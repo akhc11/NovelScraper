@@ -1,0 +1,10 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.NovelScraper" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- ステータスバーの色を黒に -->
+        <item name="android:statusBarColor">#000000</item>
+        <!-- ステータスバーのアイコンを白に（背景が暗いので） -->
+        <item name="android:windowLightStatusBar">false</item>
+        <!-- フルスクリーン系フラグはOFF -->
+        <item name="android:windowFullscreen">false</item>
+    </style>
+</resources>

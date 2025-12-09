@@ -17,17 +17,17 @@
         android:background="#1F1F1F"
         android:gravity="center_vertical"
         android:paddingHorizontal="2dp"
-        android:elevation="4dp">
+        android:elevation="10dp">
 
-        <ImageButton android:id="@+id/btnBack" android:layout_width="40dp" android:layout_height="match_parent" android:background="?attr/selectableItemBackgroundBorderless" android:src="@android:drawable/ic_media_rew" app:tint="#AAAAAA" android:contentDescription="戻る" />
-        <ImageButton android:id="@+id/btnForward" android:layout_width="40dp" android:layout_height="match_parent" android:background="?attr/selectableItemBackgroundBorderless" android:src="@android:drawable/ic_media_ff" app:tint="#AAAAAA" android:contentDescription="進む" />
+        <!-- ブラウザ操作ボタン -->
+        <ImageButton android:id="@+id/btnBack" android:layout_width="35dp" android:layout_height="match_parent" android:background="?attr/selectableItemBackgroundBorderless" android:src="@android:drawable/ic_media_rew" app:tint="#AAAAAA" android:contentDescription="戻る" />
+        <ImageButton android:id="@+id/btnForward" android:layout_width="35dp" android:layout_height="match_parent" android:background="?attr/selectableItemBackgroundBorderless" android:src="@android:drawable/ic_media_ff" app:tint="#AAAAAA" android:contentDescription="進む" />
 
-        <!-- URL入力欄 (Goボタン削除、エンターで実行) -->
-        <EditText android:id="@+id/editUrl" android:layout_width="0dp" android:layout_weight="1" android:layout_height="38dp" android:background="#333333" android:hint="検索 または URL" android:inputType="textUri" android:imeOptions="actionSearch" android:paddingHorizontal="12dp" android:textSize="14sp" android:maxLines="1" android:textColor="#FFFFFF" android:textColorHint="#888888" android:layout_marginHorizontal="5dp"/>
+        <!-- URL入力欄 (Goボタン削除、検索対応) -->
+        <EditText android:id="@+id/editUrl" android:layout_width="0dp" android:layout_weight="1" android:layout_height="36dp" android:background="#333333" android:hint="検索 または URL" android:imeOptions="actionSearch" android:inputType="textUri" android:paddingHorizontal="10dp" android:textSize="13sp" android:maxLines="1" android:textColor="#FFFFFF" android:textColorHint="#888888" android:layout_marginHorizontal="5dp"/>
 
-        <ImageButton android:id="@+id/btnStar" android:layout_width="45dp" android:layout_height="match_parent" android:background="?attr/selectableItemBackgroundBorderless" android:src="@android:drawable/btn_star_big_off" app:tint="#FFFFFF" android:contentDescription="お気に入り" />
-        <!-- メニューボタン拡大 (45dp -> 55dp) -->
-        <ImageButton android:id="@+id/btnMenu" android:layout_width="55dp" android:layout_height="match_parent" android:background="?attr/selectableItemBackgroundBorderless" android:src="@android:drawable/ic_menu_more" app:tint="#FFFFFF" android:scaleType="center" android:contentDescription="メニュー" />
+        <ImageButton android:id="@+id/btnStar" android:layout_width="40dp" android:layout_height="40dp" android:background="?attr/selectableItemBackgroundBorderless" android:src="@android:drawable/btn_star_big_off" app:tint="#FFFFFF" android:contentDescription="お気に入り" />
+        <ImageButton android:id="@+id/btnMenu" android:layout_width="45dp" android:layout_height="match_parent" android:background="?attr/selectableItemBackgroundBorderless" android:src="@android:drawable/ic_menu_more" app:tint="#FFFFFF" android:scaleType="center" android:contentDescription="メニュー" />
     </LinearLayout>
 
     <!-- コンテンツエリア -->
@@ -51,7 +51,7 @@
             android:visibility="gone"
             android:clickable="true"
             android:focusable="true"
-            android:elevation="10dp">
+            android:elevation="5dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -63,6 +63,7 @@
                     <Button android:id="@+id/btnCloseSettings" android:layout_width="wrap_content" android:layout_height="36dp" android:text="閉じる ✕" android:backgroundTint="#444444" android:textColor="#FFFFFF" android:textSize="12sp" android:insetTop="0dp" android:insetBottom="0dp"/>
                 </LinearLayout>
 
+                <!-- 便利ツールエリア -->
                 <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginBottom="10dp">
                     <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
                         <Button android:id="@+id/btnTestRun" android:layout_width="wrap_content" android:layout_height="40dp" android:text="🧪 テスト解析" android:backgroundTint="#00897B" android:textColor="#FFFFFF" android:textSize="12sp" android:layout_marginEnd="5dp"/>
@@ -114,8 +115,8 @@
                 <EditText android:id="@+id/editEndCheck" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="list|index|toc|javascript" android:textSize="14sp" android:textColor="#FFFFFF" android:inputType="text"/>
 
                 <!-- 新規追加: 自動適用キーワード -->
-                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="⑫ 自動適用キーワード(URL/Regex)" android:textSize="12sp" android:textColor="#B388FF" android:layout_marginTop="5dp"/>
-                <EditText android:id="@+id/editAutoUrl" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="" android:hint="例: syosetu.com" android:textSize="14sp" android:textColor="#FFFFFF" android:textColorHint="#888888" android:inputType="text"/>
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="⑫ 自動適用キーワード(URLに含まれる文字)" android:textSize="12sp" android:textColor="#B2FF59" android:layout_marginTop="5dp"/>
+                <EditText android:id="@+id/editAutoUrl" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="" android:hint="例: booktoki (空欄で無効)" android:textSize="14sp" android:textColor="#FFFFFF" android:textColorHint="#888888" android:inputType="text"/>
 
                 <View android:layout_width="match_parent" android:layout_height="50dp"/>
             </LinearLayout>

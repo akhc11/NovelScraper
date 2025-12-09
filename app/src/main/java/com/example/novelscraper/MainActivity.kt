@@ -1,38 +1,52 @@
 package com.example.novelscraper
 
-import android.Manifest
 import android.app.AlertDialog
 import android.app.Dialog
-import android.content.*
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.res.ColorStateList
-import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.os.*
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
-import android.view.*
+import android.util.Patterns
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputMethodManager
-import android.webkit.*
+import android.webkit.URLUtil
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.*
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
-import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
-import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.android.material.tabs.TabLayout
 import com.google.android.material.tabs.TabLayoutMediator
 import org.json.JSONObject
 import java.io.File
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.CopyOnWriteArrayList
@@ -40,27 +54,12 @@ import kotlin.random.Random
 
 class MainActivity : AppCompatActivity() {
 
-    // --- Constants & Helpers ---
-    companion object {
-        const val PREFS_NAME = "NovelScraperPrefs"
-        const val PREFS_KEY_DATA = "presets_json"
-        const val PREFS_KEY_FAVORITES = "favorites_json"
-        const val PREFS_KEY_HISTORY = "history_json_map_v3"
-        const val PREFS_KEY_SETUP = "is_setup_done"
-
-        const val WRAP_CONTENT = ViewGroup.LayoutParams.WRAP_CONTENT
-        fun createItemBg() = GradientDrawable().apply {
-            setColor(Color.parseColor("#2D2D2D"))
-            cornerRadius = 15f
-        }
-    }
-
     private lateinit var txtStatus: TextView
     private lateinit var mainWebView: WebView
     private lateinit var settingsPanel: ScrollView
     private lateinit var fabAction: FloatingActionButton
-    private lateinit var editUrl: EditText
 
+    private lateinit var editUrl: EditText
     private lateinit var editBody: EditText
     private lateinit var editTitle: EditText
     private lateinit var editFileRegex: EditText
@@ -81,31 +80,342 @@ class MainActivity : AppCompatActivity() {
     private var presets = JSONObject()
     private var favorites = JSONObject()
     private var historyData = JSONObject()
+
+    private val PREFS_NAME = "NovelScraperPrefs"
+    private val PREFS_KEY_DATA = "presets_json"
+    private val PREFS_KEY_FAVORITES = "favorites_json"
+    private val PREFS_KEY_HISTORY_JSON = "history_json_map_v3"
+    private val PREFS_KEY_SETUP_DONE = "is_setup_done"
+
     private var currentPresetName = ""
-    private var isInspectMode = false
     private val activeTasks = CopyOnWriteArrayList<ScrapingTask>()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var isInspectMode = false
+
+    enum class TaskState { INITIAL_CHECK, FETCHING_FOLDER, RETURNING, SCRAPING }
+
+    inner class ScrapingTask(
+        val startUrl: String,
+        val config: JSONObject,
+        val useImages: Boolean,
+        val onTaskFinish: (ScrapingTask) -> Unit
+    ) {
+        val webView = WebView(this@MainActivity)
+        var currentUrl = startUrl
+        var lastSuccessUrl = ""
+        var retryCount = 0
+        var status = "準備中..."
+        var folderName = "(取得中...)"
+        var isRunning = true
+        var state = TaskState.INITIAL_CHECK
+        private var taskRunnable: Runnable? = null
+
+        init {
+            setupWebViewSettings(webView, useImages)
+            webView.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    if (!isRunning) return
+                    val loadedUrl = url ?: return
+                    currentUrl = loadedUrl
+
+                    val title = view?.title ?: ""
+                    verifyTurnstile(view)
+
+                    if (isCloudflareTitle(title)) {
+                        triggerCFWait(loadedUrl)
+                        return
+                    }
+                    if (state == TaskState.SCRAPING) {
+                        performHumanLikeScroll(view)
+                    }
+
+                    taskRunnable?.let { mainHandler.removeCallbacks(it) }
+                    val delay = if (state == TaskState.SCRAPING) 5000L else 2000L
+                    taskRunnable = Runnable {
+                        if (!isRunning) return@Runnable
+                        when (state) {
+                            TaskState.INITIAL_CHECK -> checkFolderLink()
+                            TaskState.FETCHING_FOLDER -> fetchFolderName()
+                            TaskState.RETURNING -> { state = TaskState.SCRAPING; processPage() }
+                            TaskState.SCRAPING -> processPage()
+                        }
+                    }
+                    mainHandler.postDelayed(taskRunnable!!, delay)
+                }
+                override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                    if (!isRunning) return
+                    if (request?.isForMainFrame == false) return
+                    handleTaskRetry("通信エラー: ${error?.errorCode}")
+                }
+            }
+        }
+
+        private fun verifyTurnstile(view: WebView?) {
+            val js = """
+                (function() {
+                    function findAndClickCheckbox(root) {
+                        if (!root) return;
+                        var shadow = root.shadowRoot;
+                        var target = shadow ? shadow : root;
+                        var inputs = target.querySelectorAll('input[type="checkbox"]');
+                        for (var i = 0; i < inputs.length; i++) {
+                            if (!inputs[i].checked) {
+                                inputs[i].click();
+                            }
+                        }
+                        var children = target.children;
+                        for (var i = 0; i < children.length; i++) {
+                            findAndClickCheckbox(children[i]);
+                        }
+                    }
+                    if (!window.cfClickerStarted) {
+                        window.cfClickerStarted = true;
+                        setInterval(function() { findAndClickCheckbox(document.body); }, 1500);
+                    }
+                })();
+            """
+            view?.evaluateJavascript(js, null)
+        }
+
+        private fun performHumanLikeScroll(view: WebView?) {
+            val js = """
+                (function() {
+                    var totalHeight = document.body.scrollHeight;
+                    var currentScroll = window.scrollY;
+                    function humanScroll() {
+                        if (currentScroll >= totalHeight - window.innerHeight) return;
+                        var step = Math.floor(Math.random() * 60) + 20;
+                        if (Math.random() < 0.05) step = -step; 
+                        var delay = Math.floor(Math.random() * 150) + 50;
+                        if (Math.random() < 0.03) delay += 1500;
+                        currentScroll += step;
+                        if (currentScroll < 0) currentScroll = 0; 
+                        window.scrollTo(0, currentScroll);
+                        setTimeout(humanScroll, delay);
+                    }
+                    humanScroll();
+                })();
+            """
+            view?.evaluateJavascript(js, null)
+        }
+
+        private fun isCloudflareTitle(title: String): Boolean {
+            return title.contains("Just a moment") || title.contains("Cloudflare") || title.contains("Verify")
+        }
+
+        private fun triggerCFWait(url: String) {
+            status = "⚠️ 認証待機中..."
+            updateServiceStatus()
+            taskRunnable?.let { mainHandler.removeCallbacks(it) }
+            taskRunnable = Runnable { if (isRunning) webView.reload() }
+            mainHandler.postDelayed(taskRunnable!!, 30000)
+        }
+
+        fun start() {
+            status = "開始: リンク確認中"
+            state = TaskState.INITIAL_CHECK
+            webView.loadUrl(startUrl)
+            updateServiceStatus()
+        }
+
+        fun stop() {
+            isRunning = false
+            taskRunnable?.let { mainHandler.removeCallbacks(it) }
+            webView.stopLoading()
+            webView.destroy()
+        }
+
+        private fun handleTaskRetry(reason: String) {
+            taskRunnable?.let { mainHandler.removeCallbacks(it) }
+            if (retryCount < 3) {
+                retryCount++
+                status = "リトライ($retryCount): $reason"
+                updateServiceStatus()
+                taskRunnable = Runnable { if (isRunning) webView.loadUrl(currentUrl) }
+                mainHandler.postDelayed(taskRunnable!!, 60000)
+            } else {
+                status = "エラー停止: $reason"
+                isRunning = false
+                onTaskFinish(this)
+            }
+        }
+
+        private fun checkFolderLink() {
+            val folderLinkSel = config.optString("folderLink")
+            if (folderLinkSel.isEmpty()) { fetchFolderNameInPlace(); return }
+            val js = "(function(){ var el = document.querySelector('$folderLinkSel'); return el ? el.href : ''; })();"
+            webView.evaluateJavascript(js) { res ->
+                if (!isRunning) return@evaluateJavascript
+                val link = res?.replace("\"", "") ?: ""
+                if (link.isNotEmpty() && link != "null" && link != "undefined") {
+                    status = "作品名取得へ移動..."
+                    updateServiceStatus()
+                    state = TaskState.FETCHING_FOLDER
+                    webView.loadUrl(link)
+                } else { fetchFolderNameInPlace() }
+            }
+        }
+
+        private fun fetchFolderName() {
+            val folderSel = config.optString("folder")
+            val folderRegex = config.optString("regex")
+            val js = "(function(){ var el = document.querySelector('$folderSel'); return el ? el.innerText.trim() : ''; })();"
+            webView.evaluateJavascript(js) { res ->
+                if (!isRunning) return@evaluateJavascript
+                var name = res?.replace("\"", "") ?: ""
+                name = cleanText(name.replace("\\u003C", "<"), folderRegex)
+                if (name.isNotEmpty()) { folderName = name; status = "作品名取得: $folderName" }
+                else { status = "作品名取得失敗(維持)" }
+                updateServiceStatus()
+                state = TaskState.RETURNING
+                webView.loadUrl(startUrl)
+            }
+        }
+
+        private fun fetchFolderNameInPlace() {
+            val folderSel = config.optString("folder")
+            val folderRegex = config.optString("regex")
+            if (folderSel.startsWith("@")) { folderName = folderSel.substring(1) }
+            else if (folderSel.isNotEmpty()) {
+                val js = "(function(){ var el = document.querySelector('$folderSel'); return el ? el.innerText.trim() : ''; })();"
+                webView.evaluateJavascript(js) { res ->
+                    var name = res?.replace("\"", "") ?: ""
+                    name = cleanText(name.replace("\\u003C", "<"), folderRegex)
+                    if (name.isNotEmpty()) folderName = name
+                }
+            }
+            state = TaskState.SCRAPING
+            processPage()
+        }
+
+        private fun processPage() {
+            if (!isRunning) return
+            if (currentUrl == lastSuccessUrl) return
+
+            val bodySel = config.optString("body").replace("'", "\\'")
+            val titleSel = config.optString("title").replace("'", "\\'")
+            val nextSel = config.optString("next").replace("'", "\\'")
+            val chapterSel = config.optString("chapter").replace("'", "\\'")
+            val chapterRegex = config.optString("chapterRegex").replace("\\", "\\\\").replace("'", "\\'")
+            val fileRegexPattern = config.optString("fileRegex")
+            val endCheckPattern = config.optString("endCheck")
+
+            val jsCode = """
+                (function() {
+                    try {
+                        if (document.title.includes("Just a moment") || document.body.innerText.includes("Verify you are human")) return "CF_DETECTED";
+                        var result = {};
+                        var titleElem = document.querySelector('$titleSel');
+                        result.title = titleElem ? titleElem.innerText.trim() : "NoTitle_" + Date.now();
+                        var chapNum = "";
+                        if ('$chapterSel' !== "") {
+                            var chapElem = document.querySelector('$chapterSel');
+                            if (chapElem) {
+                                var text = chapElem.innerText;
+                                var nums = null;
+                                if ('$chapterRegex' !== "") {
+                                    try { var re = new RegExp('$chapterRegex'); var match = text.match(re); if(match) nums = match[1] || match[0]; } catch(e){}
+                                } 
+                                if (!nums) { var match = text.match(/\d+/); if(match) nums = match[0]; }
+                                if (nums) chapNum = nums.padStart(4, '0');
+                            }
+                        }
+                        result.chapter = chapNum;
+                        var bodyElem = document.querySelector('$bodySel');
+                        if (!bodyElem) {
+                             var ps = document.querySelectorAll('p');
+                             var txt = "";
+                             for(var i=0; i<ps.length; i++) txt += ps[i].innerText + "\n\n";
+                             result.content = txt;
+                        } else { result.content = bodyElem.innerText; }
+                        var nextElem = document.querySelector('$nextSel');
+                        result.nextUrl = nextElem ? nextElem.href : "";
+                        return JSON.stringify(result);
+                    } catch(e) { return "JS_ERROR: " + e.message; }
+                })();
+            """
+
+            webView.evaluateJavascript(jsCode) { jsonResult ->
+                if (!isRunning) return@evaluateJavascript
+                try {
+                    if (jsonResult == null || jsonResult == "null") { handleTaskRetry("解析失敗(null)"); return@evaluateJavascript }
+                    val rawResult = org.json.JSONTokener(jsonResult).nextValue().toString()
+                    if (rawResult == "CF_DETECTED") { triggerCFWait(currentUrl); return@evaluateJavascript }
+                    if (rawResult.startsWith("JS_ERROR")) { handleTaskRetry(rawResult); return@evaluateJavascript }
+
+                    val data = JSONObject(rawResult)
+                    val title = data.optString("title", "無題")
+                    val content = data.optString("content", "")
+                    val nextUrl = data.optString("nextUrl", "")
+                    val chapNum = data.optString("chapter", "")
+
+                    if (content.length < 20) { handleTaskRetry("本文短過"); return@evaluateJavascript }
+
+                    val safeTitle = cleanText(title, fileRegexPattern)
+                    saveToDownloads(folderName, safeTitle, content, chapNum)
+
+                    if (folderName != "(取得中...)") {
+                        saveHistoryMap(folderName, safeTitle, chapNum, currentUrl, config)
+                    }
+
+                    lastSuccessUrl = currentUrl
+                    retryCount = 0
+                    status = "保存: ${if(chapNum.isNotEmpty()) "$chapNum " else ""}${safeTitle.take(10)}..."
+                    updateServiceStatus()
+
+                    var shouldStop = false
+                    if (endCheckPattern.isNotEmpty()) {
+                        try {
+                            val regex = Regex(endCheckPattern)
+                            if (regex.containsMatchIn(nextUrl) || regex.containsMatchIn(title)) {
+                                shouldStop = true
+                            }
+                            if (nextUrl.contains("/null") || nextUrl.endsWith("null")) {
+                                shouldStop = true
+                            }
+                        } catch(e:Exception){}
+                    }
+
+                    if (nextUrl.isNotEmpty() && nextUrl != "null" && !shouldStop) {
+                        val delayStr = config.optString("delay", "15-30")
+                        var delaySec = 2L
+                        try {
+                            if (delayStr.contains("-")) {
+                                val parts = delayStr.split("-")
+                                val min = parts[0].trim().toLongOrNull() ?: 2L
+                                val max = parts[1].trim().toLongOrNull() ?: min
+                                delaySec = Random.nextLong(min, max + 1)
+                            } else { delaySec = delayStr.toLongOrNull() ?: 2L }
+                        } catch(e: Exception) {}
+
+                        status = "待機(${delaySec}s): $folderName"
+                        updateServiceStatus()
+                        taskRunnable = Runnable { if(isRunning) webView.loadUrl(nextUrl) }
+                        mainHandler.postDelayed(taskRunnable!!, delaySec * 1000)
+                    } else {
+                        status = if(shouldStop) "終了検知: $folderName" else "完了: $folderName"
+                        isRunning = false
+                        onTaskFinish(this)
+                        Toast.makeText(this@MainActivity, status, Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) { handleTaskRetry("エラー: ${e.message}") }
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        setupWindow()
-        initializeViews()
-        loadAllData()
-        setupEventHandlers()
-        checkNotificationPermission()
-    }
 
-    private fun setupWindow() {
         try {
             window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
             window.statusBarColor = Color.BLACK
             WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = false
             WindowCompat.setDecorFitsSystemWindows(window, true)
-        } catch (_: Exception) { }
-    }
+        } catch (e: Exception) { }
 
-    private fun initializeViews() {
+        checkNotificationPermission()
+
         settingsPanel = findViewById(R.id.settingsPanel)
         mainWebView = findViewById(R.id.myWebView)
         txtStatus = findViewById(R.id.txtStatus)
@@ -126,213 +436,314 @@ class MainActivity : AppCompatActivity() {
         editAutoUrl = findViewById(R.id.editAutoUrl)
 
         spinnerPresets = findViewById(R.id.spinnerPresets)
+
         toggleImages = findViewById(R.id.toggleImages)
         toggleInspectMode = findViewById(R.id.toggleInspectMode)
+        val btnTestRun = findViewById<Button>(R.id.btnTestRun)
+
+        val btnStar = findViewById<ImageButton>(R.id.btnStar)
+        val btnMenu = findViewById<ImageButton>(R.id.btnMenu)
+        val btnBack = findViewById<ImageButton>(R.id.btnBack)
+        val btnForward = findViewById<ImageButton>(R.id.btnForward)
+        val btnCloseSettings = findViewById<Button>(R.id.btnCloseSettings)
+        val btnSavePreset = findViewById<Button>(R.id.btnSavePreset)
+        val btnDeletePreset = findViewById<Button>(R.id.btnDeletePreset)
+
         setupWebViewSettings(mainWebView, true)
+        loadPresets()
+        loadFavorites()
+        loadHistoryMap()
 
-        mainWebView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                url?.let {
-                    editUrl.setText(it)
-                    checkAndApplyAutoPreset(it)
-                }
-                if (isInspectMode) injectInspector(view)
-            }
-        }
-    }
-
-    private fun setupEventHandlers() {
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                if (settingsPanel.visibility == View.VISIBLE) toggleSettingsPanel(false)
-                else if (mainWebView.canGoBack()) mainWebView.goBack()
-                else finish()
-            }
-        })
-
-        editUrl.setOnEditorActionListener { v, actionId, event ->
-            if (actionId == EditorInfo.IME_ACTION_GO || actionId == EditorInfo.IME_ACTION_SEARCH ||
-                (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)) {
+        editUrl.setOnEditorActionListener { v, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH || actionId == EditorInfo.IME_ACTION_GO || actionId == EditorInfo.IME_ACTION_DONE) {
                 val input = v.text.toString().trim()
                 if (input.isNotEmpty()) {
-                    if (input.startsWith("http") || (input.contains(".") && !input.contains(" "))) {
+                    if (Patterns.WEB_URL.matcher(input).matches() || URLUtil.isValidUrl(input)) {
                         var target = input
                         if (!target.startsWith("http")) target = "https://$target"
                         mainWebView.loadUrl(target)
-                    } else mainWebView.loadUrl("https://www.google.com/search?q=$input")
-                    val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    } else {
+                        val searchUrl = "https://www.google.com/search?q=${URLEncoder.encode(input, "UTF-8")}"
+                        mainWebView.loadUrl(searchUrl)
+                    }
+                    val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
                     imm.hideSoftInputFromWindow(v.windowToken, 0)
                 }
                 true
             } else false
         }
 
-        findViewById<ImageButton>(R.id.btnStar).setOnClickListener { showAddFavoriteDialog() }
-        findViewById<ImageButton>(R.id.btnMenu).let { setupChromeSlideMenu(it) }
-        findViewById<ImageButton>(R.id.btnBack).setOnClickListener { if (mainWebView.canGoBack()) mainWebView.goBack() }
-        findViewById<ImageButton>(R.id.btnForward).setOnClickListener { if (mainWebView.canGoForward()) mainWebView.goForward() }
+        mainWebView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                if (url != null) {
+                    editUrl.setText(url)
+                    checkAutoApplyPreset(url)
+                }
+                if (isInspectMode) injectInspector(view)
+            }
+        }
 
-        findViewById<Button>(R.id.btnCloseSettings).setOnClickListener { toggleSettingsPanel(false) }
-        findViewById<Button>(R.id.btnTestRun).setOnClickListener { performTestRun() }
-        findViewById<Button>(R.id.btnSavePreset).setOnClickListener { showSavePresetDialog() }
-        findViewById<Button>(R.id.btnDeletePreset).setOnClickListener { deleteCurrentPreset() }
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (settingsPanel.visibility == View.VISIBLE) {
+                    toggleSettingsPanel(false)
+                } else if (mainWebView.canGoBack()) {
+                    mainWebView.goBack()
+                } else {
+                    finish()
+                }
+            }
+        })
 
-        toggleImages.setOnCheckedChangeListener { _, isChecked -> mainWebView.settings.blockNetworkImage = !isChecked; mainWebView.reload() }
+        btnStar.setOnClickListener { showAddFavoriteDialog() }
+        setupChromeMenu(btnMenu)
+        btnCloseSettings.setOnClickListener { toggleSettingsPanel(false) }
+
+        btnBack.setOnClickListener { if (mainWebView.canGoBack()) mainWebView.goBack() }
+        btnForward.setOnClickListener { if (mainWebView.canGoForward()) mainWebView.goForward() }
+
+        toggleImages.setOnCheckedChangeListener { _, isChecked ->
+            mainWebView.settings.blockNetworkImage = !isChecked
+            mainWebView.reload()
+        }
+
         toggleInspectMode.setOnCheckedChangeListener { _, isChecked ->
             isInspectMode = isChecked
-            if (isChecked) { injectInspector(mainWebView); Toast.makeText(this, "要素をタップして情報を取得", Toast.LENGTH_SHORT).show() }
-            else mainWebView.reload()
-        }
-        fabAction.setOnClickListener { startScrapingTask() }
-        spinnerPresets.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                val name = spinnerPresets.getItemAtPosition(pos).toString()
-                if (currentPresetName != name) {
-                    currentPresetName = name
-                    if (presets.has(name)) loadConfigToUI(presets.getJSONObject(name))
-                }
+            if (isChecked) {
+                injectInspector(mainWebView)
+                Toast.makeText(this, "要素をタップして情報を取得できます", Toast.LENGTH_SHORT).show()
+            } else {
+                mainWebView.reload()
             }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
         }
-    }
 
-    private fun checkAndApplyAutoPreset(currentUrl: String) {
-        if (settingsPanel.visibility == View.VISIBLE) return
-        val keys = presets.keys()
-        while (keys.hasNext()) {
-            val key = keys.next()
-            val preset = presets.optJSONObject(key) ?: continue
-            val autoKeyword = preset.optString("autoUrl", "")
-            if (autoKeyword.isNotEmpty()) {
-                try {
-                    if (currentUrl.contains(autoKeyword) || Regex(autoKeyword).containsMatchIn(currentUrl)) {
-                        if (currentPresetName != key) {
-                            currentPresetName = key
-                            loadConfigToUI(preset)
-                            val adapter = spinnerPresets.adapter as? ArrayAdapter<String>
-                            val pos = adapter?.getPosition(key) ?: -1
-                            if (pos >= 0) spinnerPresets.setSelection(pos)
-                            Toast.makeText(this, "設定適用: $key", Toast.LENGTH_SHORT).show()
-                        }
-                        break
+        btnTestRun.setOnClickListener { performTestRun() }
+
+        fabAction.setOnClickListener {
+            val targetUrl = mainWebView.url ?: editUrl.text.toString()
+            if (targetUrl.isEmpty()) return@setOnClickListener
+
+            checkNotificationPermission()
+            val config = buildConfigFromUI()
+            val currentImageSetting = toggleImages.isChecked
+
+            val newTask = ScrapingTask(targetUrl, config, currentImageSetting) { task ->
+                activeTasks.remove(task)
+                updateServiceStatus()
+                val intent = Intent(this, ScraperService::class.java)
+                intent.action = ScraperService.ACTION_SHOW_COMPLETE
+                intent.putExtra(ScraperService.EXTRA_TITLE, "ダウンロード完了")
+                intent.putExtra(ScraperService.EXTRA_MSG, "${task.folderName} の処理が終了しました")
+                startService(intent)
+            }
+            activeTasks.add(newTask)
+            newTask.start()
+            updateServiceStatus()
+            toggleSettingsPanel(false)
+            Toast.makeText(this, "DL開始", Toast.LENGTH_SHORT).show()
+        }
+
+        // -----------------------------------------------------
+        // ★★★ プリセット保存ロジック (自動命名 & 重複回避) ★★★
+        // -----------------------------------------------------
+        btnSavePreset.setOnClickListener {
+            val input = EditText(this)
+            input.hint = "設定名 (空欄で自動命名)"
+            AlertDialog.Builder(this).setTitle("設定保存").setView(input).setPositiveButton("保存") { _, _ ->
+                var name = input.text.toString().trim()
+
+                // 空欄なら現在のURLからドメインを取得して名前にする
+                if (name.isEmpty()) {
+                    val currentUrl = mainWebView.url ?: ""
+                    if (currentUrl.isNotEmpty()) {
+                        try {
+                            val uri = Uri.parse(currentUrl)
+                            name = uri.host ?: "NewPreset"
+                            // "www." は邪魔なので消す
+                            if (name.startsWith("www.")) name = name.substring(4)
+                        } catch(e:Exception) { name = "NewPreset" }
+                    } else {
+                        name = "NewPreset"
                     }
-                } catch(e:Exception){}
-            }
-        }
-    }
 
-    private fun showTaskManagementSheet() {
-        val bottomSheetDialog = BottomSheetDialog(this)
-        val context = this
-        val displayMetrics = Resources.getSystem().displayMetrics
-        val height = (displayMetrics.heightPixels * 0.6).toInt()
-
-        val rootLayout = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height)
-            setBackgroundColor(Color.parseColor("#121212"))
-        }
-
-        val headerLayout = FrameLayout(context).apply {
-            setPadding(40, 30, 40, 30)
-            setBackgroundColor(Color.parseColor("#1F1F1F"))
-        }
-        val txtTitle = TextView(context).apply { text = "タスク管理"; textSize = 18f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE) }
-        val btnDeleteSelected = ImageButton(context).apply {
-            setImageResource(android.R.drawable.ic_menu_delete); background = null; imageTintList = ColorStateList.valueOf(Color.parseColor("#FF5252"))
-            visibility = View.GONE; layoutParams = FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL)
-        }
-        headerLayout.addView(txtTitle); headerLayout.addView(btnDeleteSelected)
-        rootLayout.addView(headerLayout)
-
-        val tabLayout = TabLayout(context).apply { setBackgroundColor(Color.parseColor("#1F1F1F")); setTabTextColors(Color.GRAY, Color.WHITE); setSelectedTabIndicatorColor(Color.parseColor("#00897B")) }
-        val viewPager = ViewPager2(context).apply { layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f) }
-        rootLayout.addView(tabLayout); rootLayout.addView(viewPager)
-
-        val historyList = ArrayList<JSONObject>()
-        val keys = historyData.keys()
-        while (keys.hasNext()) { val key = keys.next(); historyData.optJSONObject(key)?.let { it.put("folderName", key); historyList.add(it) } }
-        historyList.sortByDescending { it.optString("time") }
-
-        val runningAdapter = RunningTaskAdapter(activeTasks) { updateServiceStatus() }
-        val historyAdapter = HistoryAdapter(historyList,
-            onItemClick = { item ->
-                bottomSheetDialog.dismiss()
-                if (item.has("url")) mainWebView.loadUrl(item.getString("url"))
-                if (item.has("config")) { loadConfigToUI(item.getJSONObject("config")); toggleSettingsPanel(true); Toast.makeText(context, "設定を復元しました", Toast.LENGTH_SHORT).show() }
-            },
-            onSelectionChanged = { count ->
-                if (count > 0) { txtTitle.text = "$count 件選択中"; btnDeleteSelected.visibility = View.VISIBLE }
-                else { txtTitle.text = "タスク管理"; btnDeleteSelected.visibility = View.GONE }
-            }
-        )
-
-        viewPager.adapter = object : androidx.recyclerview.widget.RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-            override fun getItemCount(): Int = 2
-            override fun getItemViewType(position: Int): Int = position
-            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
-                val recyclerView = RecyclerView(parent.context).apply { layoutManager = LinearLayoutManager(parent.context); layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT) }
-                if (viewType == 0) recyclerView.adapter = runningAdapter else recyclerView.adapter = historyAdapter
-                return object : RecyclerView.ViewHolder(recyclerView) {}
-            }
-            override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {}
-        }
-        TabLayoutMediator(tabLayout, viewPager) { tab, position -> tab.text = if (position == 0) "🚀 実行中 (${activeTasks.size})" else "📜 履歴" }.attach()
-
-        btnDeleteSelected.setOnClickListener {
-            val selected = historyAdapter.getSelectedItems()
-            if (selected.isNotEmpty()) {
-                AlertDialog.Builder(context).setTitle("削除確認").setMessage("${selected.size} 件の履歴を削除しますか？")
-                    .setPositiveButton("削除") { _, _ -> selected.forEach { folderName -> historyData.remove(folderName) }; saveHistoryToStorage(); historyAdapter.removeSelected(); txtTitle.text = "タスク管理"; btnDeleteSelected.visibility = View.GONE }
-                    .setNegativeButton("キャンセル", null).show()
-            }
-        }
-        val updateRunnable = object : Runnable {
-            override fun run() {
-                if (bottomSheetDialog.isShowing) { runningAdapter.notifyDataSetChanged(); tabLayout.getTabAt(0)?.text = "🚀 実行中 (${activeTasks.size})"; mainHandler.postDelayed(this, 1000) }
-            }
-        }
-        mainHandler.post(updateRunnable)
-        bottomSheetDialog.setContentView(rootLayout)
-        val behavior = BottomSheetBehavior.from(rootLayout.parent as View)
-        behavior.peekHeight = height
-        behavior.state = BottomSheetBehavior.STATE_EXPANDED
-        bottomSheetDialog.show()
-    }
-
-    private fun setupChromeSlideMenu(anchorView: View) {
-        val popupWindow = PopupWindow(this)
-        val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.parseColor("#333333")); setPadding(10, 10, 10, 10) }
-        fun createItem(text: String) = TextView(this).apply { this.text = text; textSize = 16f; setTextColor(Color.WHITE); setPadding(30, 30, 30, 30); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, WRAP_CONTENT) }
-
-        val items = listOf(
-            createItem("★ ブックマーク").apply { setOnClickListener { popupWindow.dismiss(); toggleSettingsPanel(false); showFavoritesListDialog() } },
-            createItem("🕒 タスク管理").apply { setOnClickListener { popupWindow.dismiss(); toggleSettingsPanel(false); showTaskManagementSheet() } },
-            // ★ここをEruda起動に戻しました
-            createItem("🔍 解析ツール起動").apply {
-                setOnClickListener {
-                    popupWindow.dismiss()
-                    toggleSettingsPanel(false)
-                    val js = "if(!window.eruda){var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/eruda';document.body.appendChild(s);s.onload=function(){eruda.init();eruda.show()}}else{eruda.show()}"
-                    mainWebView.evaluateJavascript(js, null)
-                    Toast.makeText(this@MainActivity, "開発者ツール起動", Toast.LENGTH_SHORT).show()
+                    // 重複チェック: 既存の名前に (1), (2) をつけて被らないようにする
+                    var originalName = name
+                    var counter = 1
+                    while (presets.has(name)) {
+                        name = "$originalName ($counter)"
+                        counter++
+                    }
                 }
-            },
-            createItem("🔧 解析設定").apply { setOnClickListener { popupWindow.dismiss(); toggleSettingsPanel(true) } }
-        )
-        items.forEach { layout.addView(it) }
-        popupWindow.contentView = layout; popupWindow.width = 550; popupWindow.height = WRAP_CONTENT; popupWindow.isFocusable = true; popupWindow.isOutsideTouchable = true; if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) popupWindow.elevation = 20f
 
+                if (name.isNotEmpty()) {
+                    val newConfig = buildConfigFromUI()
+                    // 自動保存の場合、URLの一部を自動適用キーワードにも入れてあげると親切
+                    if (input.text.toString().isEmpty()) {
+                        val currentUrl = mainWebView.url ?: ""
+                        val host = try { Uri.parse(currentUrl).host } catch(e:Exception){null}
+                        if (!host.isNullOrEmpty() && newConfig.optString("autoUrl").isEmpty()) {
+                            val key = if(host.startsWith("www.")) host.substring(4) else host
+                            newConfig.put("autoUrl", key)
+                            editAutoUrl.setText(key) // UIにも反映
+                        }
+                    }
+
+                    presets.put(name, newConfig)
+                    savePresetsToStorage()
+                    updatePresetSpinner()
+                    val adapter = spinnerPresets.adapter as ArrayAdapter<String>
+                    val pos = adapter.getPosition(name)
+                    if(pos >= 0) spinnerPresets.setSelection(pos)
+                    Toast.makeText(this, "保存: $name", Toast.LENGTH_SHORT).show()
+                }
+            }.setNegativeButton("キャンセル", null).show()
+        }
+
+        btnDeletePreset.setOnClickListener {
+            val currentName = spinnerPresets.selectedItem as? String
+            if (currentName != null) {
+                presets.remove(currentName)
+                savePresetsToStorage()
+                updatePresetSpinner()
+            }
+        }
+
+        spinnerPresets.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val name = spinnerPresets.getItemAtPosition(position).toString()
+                currentPresetName = name
+                if (presets.has(name)) {
+                    loadConfigToUI(presets.getJSONObject(name))
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+    }
+
+    private fun checkAutoApplyPreset(url: String) {
+        val keys = presets.keys()
+        while(keys.hasNext()){
+            val key = keys.next()
+            val conf = presets.getJSONObject(key)
+            val autoUrl = conf.optString("autoUrl")
+            if (autoUrl.isNotEmpty() && url.contains(autoUrl)) {
+                if (currentPresetName != key) {
+                    currentPresetName = key
+                    loadConfigToUI(conf)
+                    val adapter = spinnerPresets.adapter as ArrayAdapter<String>
+                    val pos = adapter.getPosition(key)
+                    if(pos >= 0) spinnerPresets.setSelection(pos)
+                    Toast.makeText(this, "設定: [$key] を適用しました", Toast.LENGTH_SHORT).show()
+                }
+                break
+            }
+        }
+    }
+
+    // --------------------------------------------------------------------------
+    // ★★★ スライドメニューの復活 + タッチ対応 ★★★
+    // --------------------------------------------------------------------------
+    private fun setupChromeMenu(anchorView: View) {
+        val popupWindow = PopupWindow(this)
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#333333"))
+            setPadding(10, 10, 10, 10)
+        }
+        fun createItem(text: String) = TextView(this).apply {
+            this.text = text
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setPadding(30, 30, 30, 30)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+
+        val itemFav = createItem("★ ブックマーク")
+        val itemHistory = createItem("🕒 履歴 / タスク")
+        val itemInspect = createItem("🔍 解析ツール起動")
+        val itemSettings = createItem("🔧 解析設定")
+        val menuItems = listOf(itemFav, itemHistory, itemInspect, itemSettings)
+        menuItems.forEach { layout.addView(it) }
+
+        popupWindow.contentView = layout
+        popupWindow.width = 550
+        popupWindow.height = WindowManager.LayoutParams.WRAP_CONTENT
+        popupWindow.isFocusable = true
+        popupWindow.isOutsideTouchable = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) popupWindow.elevation = 20f
+
+        val performAction = { view: View ->
+            popupWindow.dismiss()
+            when (view) {
+                itemFav -> { toggleSettingsPanel(false); showFavoritesListDialog() }
+                itemHistory -> { toggleSettingsPanel(false); showHistoryBottomSheet() }
+                itemInspect -> {
+                    toggleSettingsPanel(false)
+                    val script = """
+                        (function(){
+                            if (window.eruda) { eruda.show(); return; }
+                            var s=document.createElement('script');
+                            s.src='https://cdn.jsdelivr.net/npm/eruda';
+                            document.body.appendChild(s);
+                            s.onload=function(){ eruda.init(); eruda.show(); };
+                        })();
+                    """
+                    mainWebView.evaluateJavascript(script) { Toast.makeText(this, "解析ツール起動", Toast.LENGTH_SHORT).show() }
+                }
+                itemSettings -> toggleSettingsPanel(true)
+            }
+        }
+
+        // メニュー項目への個別クリックリスナー（タップ操作用）
+        menuItems.forEach { item -> item.setOnClickListener { performAction(item) } }
+
+        // スライド操作ロジック
         anchorView.setOnTouchListener { v, event ->
             when (event.action) {
-                MotionEvent.ACTION_DOWN -> { if (!popupWindow.isShowing) popupWindow.showAsDropDown(v, -300, 0); true }
-                MotionEvent.ACTION_MOVE -> { if (popupWindow.isShowing) { val rx = event.rawX; val ry = event.rawY; items.forEach { val loc = IntArray(2); it.getLocationOnScreen(loc); val r = Rect(loc[0], loc[1], loc[0]+it.width, loc[1]+it.height); it.setBackgroundColor(if (r.contains(rx.toInt(), ry.toInt())) Color.parseColor("#555555") else Color.TRANSPARENT) } }; true }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (popupWindow.isShowing) {
-                        var clicked: View? = null; val rx = event.rawX; val ry = event.rawY
-                        items.forEach { val loc = IntArray(2); it.getLocationOnScreen(loc); val r = Rect(loc[0], loc[1], loc[0]+it.width, loc[1]+it.height); if (r.contains(rx.toInt(), ry.toInt())) clicked = it; it.setBackgroundColor(Color.TRANSPARENT) }
-                        if (clicked != null) clicked.performClick() else { val r = Rect(); v.getGlobalVisibleRect(r); if(!r.contains(rx.toInt(), ry.toInt())) popupWindow.dismiss() }
+                MotionEvent.ACTION_DOWN -> {
+                    if (!popupWindow.isShowing) {
+                        popupWindow.showAsDropDown(v, -300, 0)
                     }
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (popupWindow.isShowing) {
+                        val rawX = event.rawX
+                        val rawY = event.rawY
+                        menuItems.forEach { item ->
+                            val itemLoc = IntArray(2)
+                            item.getLocationOnScreen(itemLoc)
+                            val rect = Rect(itemLoc[0], itemLoc[1], itemLoc[0] + item.width, itemLoc[1] + item.height)
+                            if (rect.contains(rawX.toInt(), rawY.toInt())) item.setBackgroundColor(Color.parseColor("#555555"))
+                            else item.setBackgroundColor(Color.TRANSPARENT)
+                        }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    var selected: View? = null
+                    if (popupWindow.isShowing) {
+                        val rawX = event.rawX
+                        val rawY = event.rawY
+                        menuItems.forEach { item ->
+                            val itemLoc = IntArray(2)
+                            item.getLocationOnScreen(itemLoc)
+                            val rect = Rect(itemLoc[0], itemLoc[1], itemLoc[0] + item.width, itemLoc[1] + item.height)
+                            if (rect.contains(rawX.toInt(), rawY.toInt())) selected = item
+                            item.setBackgroundColor(Color.TRANSPARENT)
+                        }
+                    }
+                    // ボタンの上で離した(タップした)だけならメニューを閉じない
+                    val btnRect = Rect()
+                    v.getGlobalVisibleRect(btnRect)
+                    val isClickOnButton = btnRect.contains(event.rawX.toInt(), event.rawY.toInt())
+
+                    if (selected != null) {
+                        performAction(selected!!)
+                    } else if (!isClickOnButton) {
+                        popupWindow.dismiss()
+                    }
+                    // isClickOnButtonなら何もしない＝メニュー開きっぱなし
                     true
                 }
                 else -> false
@@ -340,155 +751,478 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    class RunningTaskAdapter(private val tasks: List<ScrapingTask>, private val onStop: () -> Unit) : RecyclerView.Adapter<RunningTaskAdapter.ViewHolder>() {
-        class ViewHolder(v: View) : RecyclerView.ViewHolder(v) { val t1:TextView=v.findViewById(1); val t2:TextView=v.findViewById(2); val b:ImageButton=v.findViewById(3); val d:View=v.findViewById(4) }
-        override fun onCreateViewHolder(p: ViewGroup, t: Int): ViewHolder {
-            val l = LinearLayout(p.context).apply { orientation=LinearLayout.HORIZONTAL; setPadding(30,20,30,20); gravity=Gravity.CENTER_VERTICAL; background=createItemBg() }
-            val dot = View(p.context).apply { id=4; layoutParams=LinearLayout.LayoutParams(20,20).apply{marginEnd=30}; background=GradientDrawable().apply{shape=GradientDrawable.OVAL} }
-            val info = LinearLayout(p.context).apply { orientation=LinearLayout.VERTICAL; layoutParams=LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) }
-            info.addView(TextView(p.context).apply{id=1; textSize=16f; setTextColor(Color.WHITE); setTypeface(null,Typeface.BOLD)})
-            info.addView(TextView(p.context).apply{id=2; textSize=12f; setTextColor(Color.LTGRAY)})
-            l.addView(dot); l.addView(info); l.addView(ImageButton(p.context).apply{id=3; setImageResource(android.R.drawable.ic_media_pause); background=null; setColorFilter(Color.parseColor("#FF5252")); setPadding(20,20,20,20)})
-            return ViewHolder(l)
-        }
-        override fun onBindViewHolder(h: ViewHolder, p: Int) { val t = tasks[p]; h.t1.text=t.folderName; h.t2.text=t.status; (h.d.background as GradientDrawable).setColor(if(t.isRunning) Color.parseColor("#00E676") else Color.RED); h.b.setOnClickListener { t.stop(); (tasks as CopyOnWriteArrayList).remove(t); notifyItemRemoved(p); onStop() } }
-        override fun getItemCount() = tasks.size
-    }
+    private fun showHistoryBottomSheet() {
+        val bottomSheet = BottomSheetDialog(this)
+        val context = this
 
-    class HistoryAdapter(private val items: ArrayList<JSONObject>, private val onItemClick: (JSONObject)->Unit, private val onSelectionChanged: (Int)->Unit) : RecyclerView.Adapter<HistoryAdapter.ViewHolder>() {
-        private val selected = HashSet<String>(); private var selectionMode = false
-        class ViewHolder(v: View) : RecyclerView.ViewHolder(v) { val c:LinearLayout=v.findViewById(100); val t1:TextView=v.findViewById(1); val t2:TextView=v.findViewById(2); val d:View=v.findViewById(4) }
-        override fun onCreateViewHolder(p: ViewGroup, t: Int): ViewHolder {
-            val c = LinearLayout(p.context).apply { id=100; orientation=LinearLayout.HORIZONTAL; setPadding(30,25,30,25); gravity=Gravity.CENTER_VERTICAL; background=createItemBg(); layoutParams=RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, WRAP_CONTENT).apply{setMargins(0,5,0,5)} }
-            val dot = View(p.context).apply { id=4; layoutParams=LinearLayout.LayoutParams(20,20).apply{marginEnd=30}; background=GradientDrawable().apply{shape=GradientDrawable.OVAL} }
-            val info = LinearLayout(p.context).apply { orientation=LinearLayout.VERTICAL; layoutParams=LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) }
-            info.addView(TextView(p.context).apply{id=1; textSize=16f; setTextColor(Color.WHITE); setTypeface(null,Typeface.BOLD)})
-            info.addView(TextView(p.context).apply{id=2; textSize=12f; setTextColor(Color.GRAY)})
-            c.addView(dot); c.addView(info)
-            return ViewHolder(c)
+        val rootLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.7).toInt())
+            setBackgroundColor(Color.parseColor("#121212"))
         }
-        override fun onBindViewHolder(h: ViewHolder, p: Int) {
-            val i = items[p]; val f = i.optString("folderName")
-            h.t1.text=f; val ch=i.optString("chapter"); val ti=i.optString("title"); h.t2.text=if(ch.isNotEmpty()) "第${ch}話 $ti" else ti
-            val isSel = selected.contains(f); h.c.setBackgroundColor(if(isSel) Color.parseColor("#3E2723") else Color.TRANSPARENT); (h.d.background as GradientDrawable).setColor(if(isSel) Color.parseColor("#FFAB40") else Color.parseColor("#29B6F6"))
-            h.itemView.setOnClickListener { if(selectionMode) toggle(f) else onItemClick(i) }; h.itemView.setOnLongClickListener { if(!selectionMode) { selectionMode=true; toggle(f) }; true }
+
+        val tabLayout = TabLayout(context).apply {
+            setBackgroundColor(Color.parseColor("#1F1F1F"))
+            setTabTextColors(Color.GRAY, Color.WHITE)
+            setSelectedTabIndicatorColor(Color.parseColor("#B2FF59"))
         }
-        private fun toggle(k:String) { if(selected.contains(k)) selected.remove(k) else selected.add(k); if(selected.isEmpty()) selectionMode=false; onSelectionChanged(selected.size); notifyDataSetChanged() }
-        fun getSelectedItems() = selected.toList(); fun removeSelected() { items.removeAll { selected.contains(it.optString("folderName")) }; selected.clear(); selectionMode=false; notifyDataSetChanged() }
-        override fun getItemCount() = items.size
-    }
 
-    private fun startScrapingTask() {
-        val u = mainWebView.url ?: editUrl.text.toString(); if(u.isEmpty()) return
-        checkNotificationPermission(); val c = buildConfigFromUI()
-        val t = ScrapingTask(u, c, toggleImages.isChecked) { fin -> activeTasks.remove(fin); updateServiceStatus(); notifyTaskComplete(fin) }
-        activeTasks.add(t); t.start(); updateServiceStatus(); toggleSettingsPanel(false); Toast.makeText(this,"DL開始: ${t.folderName}",Toast.LENGTH_SHORT).show()
-    }
-    private fun notifyTaskComplete(t: ScrapingTask) { val i=Intent(this,ScraperService::class.java); i.action=ScraperService.ACTION_SHOW_COMPLETE; i.putExtra(ScraperService.EXTRA_TITLE,"完了"); i.putExtra(ScraperService.EXTRA_MSG,"${t.folderName} 完了"); startService(i) }
-    private fun updateServiceStatus() { mainHandler.post { val c=activeTasks.size; val i=Intent(this,ScraperService::class.java); if(c>0){i.action=ScraperService.ACTION_UPDATE_STATUS; i.putExtra(ScraperService.EXTRA_MSG,"実行中: $c"); if(Build.VERSION.SDK_INT>=26) startForegroundService(i) else startService(i); txtStatus.text=activeTasks.lastOrNull()?.status?:"実行中"}else{txtStatus.text="待機中"; stopService(i)} } }
+        val viewPager = ViewPager2(context).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        }
 
-    inner class ScrapingTask(val startUrl:String, val config:JSONObject, val useImg:Boolean, val onFinish:(ScrapingTask)->Unit) {
-        val webView = WebView(this@MainActivity); var currentUrl=startUrl; var lastSuccessUrl=""; var retryCount=0; var status="準備..."; var folderName="(取得中...)"; var isRunning=true; var state=TaskState.INITIAL_CHECK; var r:Runnable?=null
-        init {
-            setupWebViewSettings(webView, useImg)
-            webView.webViewClient = object:WebViewClient() {
-                override fun onPageFinished(v:WebView?, u:String?) {
-                    if(!isRunning)return; currentUrl=u?:return; verifyTurnstile(v)
-                    if(v?.title?.contains("Just a moment")==true || v?.title?.contains("Verify")==true){ status="CF待機"; updateServiceStatus(); r=Runnable{if(isRunning)v?.reload()}; mainHandler.postDelayed(r!!,30000); return }
-                    if(state==TaskState.SCRAPING) performScroll(v)
-                    val d=if(state==TaskState.SCRAPING)5000L else 2000L; r?.let{mainHandler.removeCallbacks(it)}; r=Runnable{if(isRunning)step()}; mainHandler.postDelayed(r!!,d)
+        viewPager.adapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+            override fun getItemCount(): Int = 2
+            override fun getItemViewType(position: Int): Int = position
+
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+                val container = FrameLayout(parent.context).apply {
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                 }
-                override fun onReceivedError(v:WebView?,req:WebResourceRequest?,e:WebResourceError?) { if(req?.isForMainFrame==true) retry("Error:${e?.errorCode}") }
+                return object : RecyclerView.ViewHolder(container) {}
+            }
+
+            override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+                val container = holder.itemView as FrameLayout
+                container.removeAllViews()
+
+                if (position == 0) {
+                    val listRunning = ListView(context).apply { divider = null; dividerHeight = 0 }
+                    val adapterRunning = object : BaseAdapter() {
+                        override fun getCount(): Int = activeTasks.size
+                        override fun getItem(p: Int): Any = activeTasks[p]
+                        override fun getItemId(p: Int): Long = p.toLong()
+                        override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
+                            val task = activeTasks[p]
+                            val row = LinearLayout(context).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                setPadding(30, 30, 30, 30)
+                                gravity = Gravity.CENTER_VERTICAL
+                                background = GradientDrawable().apply { setColor(Color.parseColor("#2D2D2D")); cornerRadius = 15f; setStroke(2, Color.parseColor("#333333")) }
+                            }
+                            val info = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
+                            info.addView(TextView(context).apply { text = task.folderName; textSize = 16f; setTextColor(Color.parseColor("#B2FF59")); setTypeface(null, Typeface.BOLD); maxLines = 1 })
+                            info.addView(TextView(context).apply { text = task.status; textSize = 12f; setTextColor(Color.WHITE) })
+                            row.addView(info)
+                            row.addView(ImageButton(context).apply {
+                                setImageResource(android.R.drawable.ic_media_pause)
+                                background = null; setColorFilter(Color.parseColor("#FF5252"))
+                                setOnClickListener { task.stop(); activeTasks.remove(task); updateServiceStatus(); notifyDataSetChanged(); Toast.makeText(context, "停止しました", Toast.LENGTH_SHORT).show() }
+                            })
+                            return FrameLayout(context).apply { setPadding(15, 10, 15, 10); addView(row) }
+                        }
+                    }
+                    listRunning.adapter = adapterRunning
+                    container.addView(listRunning)
+
+                    val h = Handler(Looper.getMainLooper())
+                    val r = object : Runnable {
+                        override fun run() {
+                            if(bottomSheet.isShowing) { adapterRunning.notifyDataSetChanged(); h.postDelayed(this, 1000) }
+                        }
+                    }
+                    h.post(r)
+
+                } else {
+                    val listHistory = ListView(context).apply { divider = null; dividerHeight = 0 }
+                    val keys = historyData.keys()
+                    val hList = ArrayList<JSONObject>()
+                    while (keys.hasNext()) { val k = keys.next(); historyData.optJSONObject(k)?.let { it.put("folderName", k); hList.add(it) } }
+                    hList.sortByDescending { it.optString("time") }
+
+                    val adapterHistory = object : BaseAdapter() {
+                        override fun getCount(): Int = hList.size
+                        override fun getItem(p: Int): Any = hList[p]
+                        override fun getItemId(p: Int): Long = p.toLong()
+                        override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
+                            val item = hList[p]
+                            val row = LinearLayout(context).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                setPadding(30, 30, 30, 30)
+                                gravity = Gravity.CENTER_VERTICAL
+                                background = GradientDrawable().apply { setColor(Color.parseColor("#2D2D2D")); cornerRadius = 15f }
+                            }
+                            val info = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
+                            info.addView(TextView(context).apply { text = item.optString("folderName"); textSize = 16f; setTextColor(Color.parseColor("#80DEEA")); setTypeface(null, Typeface.BOLD); maxLines = 1 })
+                            val chap = item.optString("chapter"); val t = item.optString("title")
+                            info.addView(TextView(context).apply { text = if(chap.isNotEmpty()) "第${chap}話 $t" else t; textSize = 12f; setTextColor(Color.LTGRAY); maxLines = 1 })
+                            row.addView(info)
+                            row.addView(ImageButton(context).apply {
+                                setImageResource(android.R.drawable.ic_menu_delete)
+                                background = null; setColorFilter(Color.GRAY)
+                                setOnClickListener {
+                                    val fName = item.getString("folderName")
+                                    historyData.remove(fName)
+                                    getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString(PREFS_KEY_HISTORY_JSON, historyData.toString()).apply()
+                                    hList.removeAt(p); notifyDataSetChanged(); Toast.makeText(context, "削除しました", Toast.LENGTH_SHORT).show()
+                                }
+                            })
+                            // ★★★ 履歴クリック時の動作変更 ★★★
+                            row.setOnClickListener {
+                                if(item.has("url")) mainWebView.loadUrl(item.getString("url"))
+                                // 以前あった config 復元ロジックは削除済み。
+                                // ページ読込完了時に自動適用が走るため、そちらに任せる。
+                                bottomSheet.dismiss()
+                            }
+                            return FrameLayout(context).apply { setPadding(15, 10, 15, 10); addView(row) }
+                        }
+                    }
+                    listHistory.adapter = adapterHistory
+                    container.addView(listHistory)
+
+                    val btnClear = Button(context).apply {
+                        text = "履歴をすべて削除"; setTextColor(Color.RED); background = null
+                        setOnClickListener {
+                            AlertDialog.Builder(context).setTitle("確認").setMessage("全削除しますか？").setPositiveButton("はい"){_,_->
+                                historyData = JSONObject(); hList.clear(); adapterHistory.notifyDataSetChanged()
+                                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString(PREFS_KEY_HISTORY_JSON, "{}").apply()
+                            }.show()
+                        }
+                    }
+                    listHistory.addFooterView(btnClear)
+                }
             }
         }
-        fun start(){ status="開始"; webView.loadUrl(startUrl); updateServiceStatus() }
-        fun stop(){ isRunning=false; r?.let{mainHandler.removeCallbacks(it)}; webView.destroy() }
-        fun step(){ when(state){ TaskState.INITIAL_CHECK->checkLink(); TaskState.FETCHING_FOLDER->getFolder(); TaskState.RETURNING->{state=TaskState.SCRAPING;scrape()}; TaskState.SCRAPING->scrape() } }
-        fun retry(m:String){ if(retryCount++<3){status="リトライ: $m"; updateServiceStatus(); r=Runnable{if(isRunning)webView.loadUrl(currentUrl)}; mainHandler.postDelayed(r!!,60000)}else{status="停止: $m"; isRunning=false; onFinish(this)} }
-        fun verifyTurnstile(v:WebView?){v?.evaluateJavascript("(function(){function c(r){if(!r)return;var s=r.shadowRoot;var t=s?s:r;var i=t.querySelectorAll('input[type=\"checkbox\"]');for(var j=0;j<i.length;j++)if(!i[j].checked)i[j].click();var ch=t.children;for(var k=0;k<ch.length;k++)c(ch[k])}c(document.body)})()",null)}
-        fun performScroll(v:WebView?){v?.evaluateJavascript("(function(){var h=document.body.scrollHeight;var c=window.scrollY;function s(){if(c>=h-window.innerHeight)return;c+=Math.floor(Math.random()*60)+20;window.scrollTo(0,c);setTimeout(s,Math.floor(Math.random()*150)+50)}s()})()",null)}
-        fun checkLink() { val s=config.optString("folderLink"); if(s.isEmpty()){getFolderInPlace();return}; webView.evaluateJavascript("(function(){var e=document.querySelector('$s');return e?e.href:''})()"){r-> val l=r?.replace("\"","")?:""; if(l.length>5){state=TaskState.FETCHING_FOLDER;webView.loadUrl(l)}else getFolderInPlace()} }
-        fun getFolder(){ webView.evaluateJavascript("(function(){var e=document.querySelector('${config.optString("folder")}');return e?e.innerText.trim():''})()"){r->folderName=clean(r,config.optString("regex")); if(folderName.isEmpty())folderName="Unknown"; state=TaskState.RETURNING; webView.loadUrl(startUrl)} }
-        fun getFolderInPlace(){ val s=config.optString("folder"); if(s.startsWith("@"))folderName=s.substring(1) else webView.evaluateJavascript("(function(){var e=document.querySelector('$s');return e?e.innerText.trim():''})()"){r->folderName=clean(r,config.optString("regex")); if(folderName.isEmpty())folderName="Unknown"}; state=TaskState.SCRAPING; scrape() }
 
-        fun scrape(){
-            if(!isRunning || currentUrl==lastSuccessUrl)return
-            val js="(function(){if(document.title.includes('Just a moment'))return'CF';var r={};r.t=document.querySelector('${config.optString("title").replace("'","\\'")}')?.innerText.trim()||'NoT';var b=document.querySelector('${config.optString("body").replace("'","\\'")}');r.c=b?b.innerText:Array.from(document.querySelectorAll('p')).map(p=>p.innerText).join('\\n\\n');r.n=document.querySelector('${config.optString("next").replace("'","\\'")}')?.href||'';r.ch=document.querySelector('${config.optString("chapter").replace("'","\\'")}')?.innerText||'';return JSON.stringify(r)})()"
-            webView.evaluateJavascript(js){res->
-                if(!isRunning)return@evaluateJavascript; try{
-                if(res=="\"CF\""){ status="CF待機"; updateServiceStatus(); r=Runnable{if(isRunning)webView.reload()}; mainHandler.postDelayed(r!!,30000); return@evaluateJavascript }
-                val j=JSONObject(org.json.JSONTokener(res).nextValue().toString())
-                val ti=clean(j.optString("t"),config.optString("fileRegex")); val co=j.optString("c"); val ne=j.optString("n"); var ch=j.optString("ch")
-                val cr=config.optString("chapterRegex"); if(cr.isNotEmpty())try{ch=Regex(cr).find(ch)?.groupValues?.getOrElse(1){""}?:ch}catch(_:Exception){}else ch=Regex("\\d+").find(ch)?.value?:ch
-                if(ch.isNotEmpty()) ch=ch.padStart(4,'0')
-                if(co.length<20){ retry("本文短過"); return@evaluateJavascript }
-                saveToDownloads(folderName,ti,co,ch)
-                if(folderName!="(取得中...)") addToHistory(folderName,ti,ch,currentUrl,config)
-                lastSuccessUrl=currentUrl; retryCount=0; status="保存: $ch $ti"; updateServiceStatus()
+        rootLayout.addView(tabLayout)
+        rootLayout.addView(viewPager)
+        bottomSheet.setContentView(rootLayout)
 
-                val ec=config.optString("endCheck"); var st=false; if(ec.isNotEmpty()&&(Regex(ec).containsMatchIn(ne)||ne.contains("null")))st=true
-                if(ne.length>5 && !st){
-                    val ds=config.optString("delay","15-30"); var w=2L; try{val p=ds.split("-"); w=Random.nextLong(p[0].toLong(),p[1].toLong()+1)}catch(_:Exception){}
-                    status="待機(${w}s)..."; updateServiceStatus(); r=Runnable{if(isRunning)webView.loadUrl(ne)}; mainHandler.postDelayed(r!!,w*1000)
-                } else { status="完了"; isRunning=false; onFinish(this) }
-            }catch(e:Exception){ retry("JS解析エラー") }
+        TabLayoutMediator(tabLayout, viewPager) { tab, position ->
+            tab.text = if (position == 0) "🚀 実行中 (${activeTasks.size})" else "📜 履歴"
+        }.attach()
+
+        bottomSheet.show()
+    }
+
+    private fun injectInspector(view: WebView?) {
+        val js = """
+            (function() {
+                document.body.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    var el = e.target;
+                    var info = {
+                        tag: el.tagName.toLowerCase(),
+                        id: el.id,
+                        className: el.className,
+                        text: el.innerText.substring(0, 50)
+                    };
+                    alert("INSPECT:" + JSON.stringify(info));
+                }, true);
+            })();
+        """
+        view?.evaluateJavascript(js, null)
+
+        view?.webChromeClient = object : android.webkit.WebChromeClient() {
+            override fun onJsAlert(view: WebView?, url: String?, message: String?, result: android.webkit.JsResult?): Boolean {
+                if (message?.startsWith("INSPECT:") == true) {
+                    val jsonStr = message.substring(8)
+                    try {
+                        val info = JSONObject(jsonStr)
+                        val id = info.optString("id")
+                        val cls = info.optString("className")
+                        val tag = info.optString("tag")
+                        var selector = tag
+                        if (id.isNotEmpty()) selector += "#$id"
+                        if (cls.isNotEmpty()) selector += ".${cls.replace(" ", ".")}"
+                        showInspectResultDialog(selector, info.optString("text"))
+                    } catch(e:Exception){}
+                    result?.confirm()
+                    return true
+                }
+                return super.onJsAlert(view, url, message, result)
             }
         }
     }
-    enum class TaskState { INITIAL_CHECK, FETCHING_FOLDER, RETURNING, SCRAPING }
 
-    private fun loadAllData() { val p=getSharedPreferences(PREFS_NAME,0); try{presets=JSONObject(p.getString(PREFS_KEY_DATA,"{}"))}catch(_:Exception){}; try{favorites=JSONObject(p.getString(PREFS_KEY_FAVORITES,"{}"))}catch(_:Exception){}; try{historyData=JSONObject(p.getString(PREFS_KEY_HISTORY,"{}"))}catch(_:Exception){}; if(!p.getBoolean(PREFS_KEY_SETUP,false))p.edit().putBoolean(PREFS_KEY_SETUP,true).apply(); updateSpinner() }
-    private fun savePref(k:String,v:String)=getSharedPreferences(PREFS_NAME,0).edit().putString(k,v).apply()
-    private fun saveHistoryToStorage() { savePref(PREFS_KEY_HISTORY, historyData.toString()) }
-    private fun addToHistory(f:String,t:String,c:String,u:String,cfg:JSONObject){ val i=JSONObject().apply{put("title",t);put("chapter",c);put("url",u);put("config",cfg);put("time",SimpleDateFormat("MM/dd HH:mm",Locale.getDefault()).format(Date()))}; historyData.put(f,i); saveHistoryToStorage() }
-
-    private fun buildConfigFromUI() = JSONObject().apply {
-        put("body",editBody.text); put("title",editTitle.text); put("fileRegex",editFileRegex.text)
-        put("folder",editFolder.text); put("folderLink",editFolderLink.text); put("regex",editFolderRegex.text)
-        put("next",editNext.text); put("chapter",editChapter.text); put("chapterRegex",editChapterRegex.text)
-        put("delay",editDelay.text); put("endCheck",editEndCheck.text); put("autoUrl",editAutoUrl.text)
-    }
-    private fun loadConfigToUI(j:JSONObject) {
-        editBody.setText(j.optString("body")); editTitle.setText(j.optString("title")); editFileRegex.setText(j.optString("fileRegex"))
-        editFolder.setText(j.optString("folder")); editFolderLink.setText(j.optString("folderLink")); editFolderRegex.setText(j.optString("regex"))
-        editNext.setText(j.optString("next")); editChapter.setText(j.optString("chapter")); editChapterRegex.setText(j.optString("chapterRegex"))
-        editDelay.setText(j.optString("delay","15-30")); editEndCheck.setText(j.optString("endCheck","list|index|toc|javascript")); editAutoUrl.setText(j.optString("autoUrl",""))
-    }
-    private fun updateSpinner(){ val l=ArrayList<String>(); val k=presets.keys(); while(k.hasNext())l.add(k.next()); Collections.sort(l); spinnerPresets.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,l) }
-    private fun clean(s:String?,r:String):String{ var t=s?.replace("\"","")?:""; if(r.isNotEmpty())try{t=t.replace(Regex(r),"")}catch(_:Exception){}; return t.trim() }
-    private fun saveToDownloads(f:String,t:String,c:String,ch:String) {
-        var fn=t.replace(Regex("[\\\\/:*?\"<>|]"),"").trim(); if(ch.isNotEmpty())fn="${ch}_$fn"; fn+=".txt"
-        var fd=f.replace(Regex("[\\\\/:*?\"<>|]"),"").trim(); if(fd.isEmpty())fd="NovelScraper_DL"
-        try{
-            if(Build.VERSION.SDK_INT>=29){
-                val cv=ContentValues().apply{put(MediaStore.MediaColumns.DISPLAY_NAME,fn);put(MediaStore.MediaColumns.MIME_TYPE,"text/plain");put(MediaStore.MediaColumns.RELATIVE_PATH,Environment.DIRECTORY_DOWNLOADS+"/NovelScraper/$fd/")}
-                contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI,cv)?.let{contentResolver.openOutputStream(it)?.use{o->o.write(c.toByteArray())}}
-            }else{ val d=File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),"NovelScraper/$fd"); if(!d.exists())d.mkdirs(); File(d,fn).writeText(c) }
-        }catch(_:Exception){}
-    }
-    private fun showFavoritesListDialog(){
-        val k=favorites.keys(); val l=ArrayList<String>(); while(k.hasNext())l.add(k.next()); Collections.sort(l); if(l.isEmpty()){Toast.makeText(this,"なし",Toast.LENGTH_SHORT).show();return}
-        val d=Dialog(this); d.setTitle("ブックマーク"); val ad=object:BaseAdapter(){
-            override fun getCount()=l.size; override fun getItem(p:Int)=l[p]; override fun getItemId(p:Int)=p.toLong()
-            override fun getView(p:Int,c:View?,pv:ViewGroup?):View{
-                val ll=LinearLayout(this@MainActivity).apply{orientation=LinearLayout.HORIZONTAL; setPadding(30,20,30,20); gravity=Gravity.CENTER_VERTICAL; setBackgroundColor(Color.parseColor("#333333"))}
-                ll.addView(TextView(this@MainActivity).apply{text=l[p]; setTextColor(Color.WHITE); textSize=16f; layoutParams=LinearLayout.LayoutParams(0,WRAP_CONTENT,1f)})
-                ll.addView(ImageButton(this@MainActivity).apply{setImageResource(android.R.drawable.ic_menu_delete); background=null; setColorFilter(Color.parseColor("#FF5252")); setOnClickListener{favorites.remove(l[p]); savePref(PREFS_KEY_FAVORITES,favorites.toString()); l.removeAt(p); notifyDataSetChanged(); if(l.isEmpty())d.dismiss()}})
-                ll.setOnClickListener{mainWebView.loadUrl(favorites.optString(l[p])); d.dismiss()}; return ll
+    private fun showInspectResultDialog(selector: String, textPreview: String) {
+        val input = EditText(this)
+        input.setText(selector)
+        AlertDialog.Builder(this)
+            .setTitle("要素取得")
+            .setMessage("テキスト: $textPreview\n\nコピーして設定に使えます。")
+            .setView(input)
+            .setPositiveButton("コピー") { _, _ ->
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("Selector", input.text.toString()))
+                Toast.makeText(this, "コピーしました", Toast.LENGTH_SHORT).show()
             }
-        }; val lv=ListView(this).apply{adapter=ad; setBackgroundColor(Color.parseColor("#222222")); divider=GradientDrawable().apply{setColor(Color.DKGRAY);setSize(1,1)}; dividerHeight=1}
-        d.setContentView(lv); d.window?.setLayout((resources.displayMetrics.widthPixels*0.9).toInt(),WRAP_CONTENT); d.show()
+            .setNeutralButton("閉じる", null)
+            .show()
     }
-    private fun showAddFavoriteDialog(){ val e=EditText(this); AlertDialog.Builder(this).setTitle("追加").setView(e).setPositiveButton("OK"){_,_->favorites.put(e.text.toString(),editUrl.text.toString()); savePref(PREFS_KEY_FAVORITES,favorites.toString())}.show() }
-    private fun showSavePresetDialog(){ val e=EditText(this); AlertDialog.Builder(this).setTitle("保存").setView(e).setPositiveButton("OK"){_,_->presets.put(e.text.toString(),buildConfigFromUI()); savePref(PREFS_KEY_DATA,presets.toString()); updateSpinner()}.show() }
-    private fun deleteCurrentPreset(){ if(currentPresetName.isNotEmpty()){presets.remove(currentPresetName); savePref(PREFS_KEY_DATA,presets.toString()); updateSpinner()} }
-    private fun toggleSettingsPanel(s:Boolean){ settingsPanel.visibility=if(s)View.VISIBLE else View.GONE }
-    private fun checkNotificationPermission(){ if(Build.VERSION.SDK_INT>=33 && ContextCompat.checkSelfPermission(this,Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)ActivityCompat.requestPermissions(this,arrayOf(Manifest.permission.POST_NOTIFICATIONS),101) }
-    private fun setupWebViewSettings(v:WebView,i:Boolean){ v.settings.apply{javaScriptEnabled=true; domStorageEnabled=true; userAgentString="Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"; blockNetworkImage=!i}; CookieManager.getInstance().setAcceptThirdPartyCookies(v,true) }
-    private fun injectInspector(v:WebView?){ v?.evaluateJavascript("(function(){document.body.addEventListener('click',function(e){e.preventDefault();alert('INSPECT:'+JSON.stringify({tag:e.target.tagName,id:e.target.id,cls:e.target.className}))},true)})()",null); v?.webChromeClient=object:WebChromeClient(){override fun onJsAlert(v:WebView?,u:String?,m:String?,r:JsResult?):Boolean{if(m?.startsWith("INSPECT:")==true){showInspectDialog(m.substring(8));r?.confirm();return true};return super.onJsAlert(v,u,m,r)}} }
-    private fun showInspectDialog(j:String){ try{val o=JSONObject(j); val s="${o.optString("tag")}#${o.optString("id")}.${o.optString("cls")}".replace("..","."); val e=EditText(this); e.setText(s); AlertDialog.Builder(this).setTitle("要素").setView(e).setPositiveButton("コピー"){_,_->(getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("sel",s))}.show()}catch(_:Exception){} }
-    private fun performTestRun(){
-        val c=buildConfigFromUI(); val js="(function(){var r={};try{r.t=document.querySelector('${c.optString("title").replace("'","\\'")}').innerText.trim()}catch(e){r.t='失敗'} try{r.c=document.querySelector('${c.optString("body").replace("'","\\'")}').innerText.substring(0,100)+'...'}catch(e){r.c='失敗'} try{r.n=document.querySelector('${c.optString("next").replace("'","\\'")}').href}catch(e){r.n='なし'} return JSON.stringify(r)})()"
-        mainWebView.evaluateJavascript(js){r->if(r!=null&&r!="null"){try{val j=JSONObject(org.json.JSONTokener(r).nextValue().toString()); AlertDialog.Builder(this).setTitle("結果").setMessage("T:${j.optString("t")}\n\nC:${j.optString("c")}\n\nN:${j.optString("n")}").setPositiveButton("OK",null).show()}catch(e:Exception){Toast.makeText(this,"解析エラー",Toast.LENGTH_SHORT).show()}}else Toast.makeText(this,"失敗",Toast.LENGTH_SHORT).show()}
+
+    private fun performTestRun() {
+        val config = buildConfigFromUI()
+        val jsCode = """
+            (function() {
+                var res = {};
+                try {
+                    res.title = document.querySelector('${config.optString("title").replace("'", "\\'")}').innerText.trim();
+                } catch(e) { res.title = "取得失敗"; }
+                try {
+                    var body = document.querySelector('${config.optString("body").replace("'", "\\'")}');
+                    res.content = body ? body.innerText.substring(0, 100) + "..." : "取得失敗";
+                } catch(e) { res.content = "取得失敗"; }
+                try {
+                    var next = document.querySelector('${config.optString("next").replace("'", "\\'")}');
+                    res.next = next ? next.href : "なし";
+                } catch(e) { res.next = "なし"; }
+                return JSON.stringify(res);
+            })();
+        """
+        mainWebView.evaluateJavascript(jsCode) { res ->
+            if (res != null) {
+                try {
+                    val raw = org.json.JSONTokener(res).nextValue().toString()
+                    val json = JSONObject(raw)
+                    val msg = "タイトル: ${json.optString("title")}\n\n本文(冒頭): ${json.optString("content")}\n\n次URL: ${json.optString("next")}"
+                    AlertDialog.Builder(this).setTitle("テスト結果").setMessage(msg).setPositiveButton("OK", null).show()
+                } catch(e:Exception) {
+                    Toast.makeText(this, "解析エラー", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun buildConfigFromUI(): JSONObject {
+        val config = JSONObject()
+        config.put("body", editBody.text.toString())
+        config.put("title", editTitle.text.toString())
+        config.put("fileRegex", editFileRegex.text.toString())
+        config.put("folder", editFolder.text.toString())
+        config.put("folderLink", editFolderLink.text.toString())
+        config.put("regex", editFolderRegex.text.toString())
+        config.put("next", editNext.text.toString())
+        config.put("chapter", editChapter.text.toString())
+        config.put("chapterRegex", editChapterRegex.text.toString())
+        config.put("delay", editDelay.text.toString())
+        config.put("endCheck", editEndCheck.text.toString())
+        config.put("autoUrl", editAutoUrl.text.toString())
+        return config
+    }
+
+    private fun loadConfigToUI(data: JSONObject) {
+        editBody.setText(data.optString("body"))
+        editTitle.setText(data.optString("title"))
+        editFileRegex.setText(data.optString("fileRegex", ""))
+        editFolder.setText(data.optString("folder"))
+        editFolderLink.setText(data.optString("folderLink", ""))
+        editFolderRegex.setText(data.optString("regex", ""))
+        editNext.setText(data.optString("next"))
+        editChapter.setText(data.optString("chapter", ""))
+        editChapterRegex.setText(data.optString("chapterRegex", ""))
+        editDelay.setText(data.optString("delay", "15-30"))
+        editEndCheck.setText(data.optString("endCheck", "list|index|toc|javascript|null"))
+        editAutoUrl.setText(data.optString("autoUrl", ""))
+    }
+
+    private fun updateServiceStatus() {
+        mainHandler.post {
+            val count = activeTasks.size
+            val intent = Intent(this, ScraperService::class.java)
+            if (count > 0) {
+                intent.action = ScraperService.ACTION_UPDATE_STATUS
+                intent.putExtra(ScraperService.EXTRA_MSG, "実行中: $count 件")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+                else startService(intent)
+                txtStatus.text = activeTasks.lastOrNull()?.status ?: "実行中..."
+            } else {
+                txtStatus.text = "待機中"
+                stopService(intent)
+            }
+        }
+    }
+
+    private fun cleanText(original: String, pattern: String): String {
+        var text = original
+        if (pattern.isNotEmpty()) {
+            try { text = text.replace(Regex(pattern), "") } catch (e: Exception) { }
+        }
+        return text.trim()
+    }
+
+    private fun saveToDownloads(folderName: String, fileName: String, content: String, chapterNum: String) {
+        var cleanFileName = fileName.replace(Regex("[\\\\/:*?\"<>|\\r\\n]"), "").trim()
+        if (chapterNum.isNotEmpty()) cleanFileName = "${chapterNum}_${cleanFileName}"
+        cleanFileName += ".txt"
+        var safeFolderName = folderName.replace(Regex("[\\\\/:*?\"<>|\\r\\n]"), "").trim()
+        if (safeFolderName.isEmpty()) safeFolderName = "NovelScraper_Others"
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val relativePath = Environment.DIRECTORY_DOWNLOADS + "/NovelScraper/" + safeFolderName + "/"
+                val projection = arrayOf(MediaStore.MediaColumns._ID)
+                val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
+                val selectionArgs = arrayOf(cleanFileName, relativePath)
+                val cursor = contentResolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, selection, selectionArgs, null)
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val id = it.getLong(it.getColumnIndexOrThrow(MediaStore.MediaColumns._ID))
+                        val uriToDelete = android.content.ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id)
+                        try { contentResolver.delete(uriToDelete, null, null) } catch (e: SecurityException) {}
+                    }
+                }
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, cleanFileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    contentResolver.openOutputStream(uri).use { it?.write(content.toByteArray()) }
+                    values.clear()
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    contentResolver.update(uri, values, null, null)
+                }
+            } else {
+                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "NovelScraper/$safeFolderName")
+                if (!dir.exists()) dir.mkdirs()
+                File(dir, cleanFileName).writeText(content)
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+    }
+
+    private fun showFavoritesListDialog() {
+        val keys = favorites.keys()
+        val list = ArrayList<String>()
+        while (keys.hasNext()) list.add(keys.next())
+        Collections.sort(list)
+        if(list.isEmpty()){ Toast.makeText(this,"なし",Toast.LENGTH_SHORT).show(); return }
+
+        val dialog = Dialog(this)
+        dialog.setTitle("ブックマーク")
+        val adapter = object : BaseAdapter() {
+            override fun getCount(): Int = list.size
+            override fun getItem(p: Int): Any = list[p]
+            override fun getItemId(p: Int): Long = p.toLong()
+            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
+                val layout = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(30,20,30,20)
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                val name = list[p]
+                layout.addView(TextView(this@MainActivity).apply {
+                    text = name
+                    setTextColor(Color.WHITE)
+                    textSize = 16f
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                })
+                layout.addView(ImageButton(this@MainActivity).apply {
+                    setImageResource(android.R.drawable.ic_menu_delete)
+                    background = null
+                    setOnClickListener {
+                        favorites.remove(name)
+                        saveFavoritesToStorage()
+                        list.removeAt(p)
+                        notifyDataSetChanged()
+                    }
+                })
+                layout.setOnClickListener {
+                    val url = favorites.optString(name)
+                    if(url.isNotEmpty()) { mainWebView.loadUrl(url); dialog.dismiss() }
+                }
+                return layout
+            }
+        }
+        val listView = ListView(this).apply { this.adapter = adapter; setBackgroundColor(Color.DKGRAY) }
+        dialog.setContentView(listView)
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.9).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+        dialog.show()
+    }
+
+    private fun showAddFavoriteDialog() {
+        val input = EditText(this)
+        AlertDialog.Builder(this).setTitle("追加").setView(input).setPositiveButton("OK") {_,_ ->
+            if(input.text.isNotEmpty()) {
+                favorites.put(input.text.toString(), editUrl.text.toString())
+                saveFavoritesToStorage()
+            }
+        }.show()
+    }
+
+    private fun toggleSettingsPanel(show: Boolean) { settingsPanel.visibility = if (show) View.VISIBLE else View.GONE }
+    private fun checkNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
+        }
+    }
+    private fun setupWebViewSettings(wv: WebView, imagesOn: Boolean) {
+        wv.settings.javaScriptEnabled = true
+        wv.settings.domStorageEnabled = true
+        wv.settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+        wv.settings.blockNetworkImage = !imagesOn
+        android.webkit.CookieManager.getInstance().setAcceptCookie(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            wv.settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+        }
+    }
+    private fun loadPresets() {
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val jsonStr = prefs.getString(PREFS_KEY_DATA, "{}")
+            presets = JSONObject(jsonStr)
+
+            val isSetupDone = prefs.getBoolean(PREFS_KEY_SETUP_DONE, false)
+            if (!isSetupDone) {
+                if (!presets.has("Booktoki")) {
+                    val def = JSONObject()
+                    def.put("body", "#novel_content")
+                    def.put("title", ".toon-title")
+                    def.put("fileRegex", "")
+                    def.put("folder", ".toon-title")
+                    def.put("folderLink", "")
+                    def.put("regex", "\\s*[-].*|\\(.*\\)|\\[.*\\]")
+                    def.put("next", "#goNextBtn")
+                    def.put("chapter", ".toon-title")
+                    def.put("chapterRegex", "(\\d+)화")
+                    def.put("endCheck", "list|index|toc|javascript")
+                    def.put("autoUrl", "booktoki")
+                    presets.put("Booktoki", def)
+                    savePresetsToStorage()
+                }
+                prefs.edit().putBoolean(PREFS_KEY_SETUP_DONE, true).apply()
+            }
+            updatePresetSpinner()
+        } catch (e: Exception) { presets = JSONObject() }
+    }
+    private fun savePresetsToStorage() { getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString(PREFS_KEY_DATA, presets.toString()).apply() }
+
+    private fun updatePresetSpinner() {
+        val list = ArrayList<String>()
+        val keys = presets.keys()
+        while(keys.hasNext()) list.add(keys.next())
+        Collections.sort(list)
+
+        val adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, list) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val view = super.getView(position, convertView, parent) as TextView
+                view.textSize = 14f
+                view.setPadding(10, 10, 10, 10)
+                view.setTextColor(Color.WHITE)
+                return view
+            }
+            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val view = super.getDropDownView(position, convertView, parent) as TextView
+                view.textSize = 16f
+                view.setPadding(20, 25, 20, 25)
+                view.setTextColor(Color.WHITE)
+                view.setBackgroundColor(Color.parseColor("#444444"))
+                return view
+            }
+        }
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinnerPresets.adapter = adapter
+    }
+    private fun loadFavorites() { try { favorites = JSONObject(getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(PREFS_KEY_FAVORITES, "{}")) } catch(e:Exception){} }
+    private fun saveFavoritesToStorage() { getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString(PREFS_KEY_FAVORITES, favorites.toString()).apply() }
+    private fun loadHistoryMap() { try { historyData = JSONObject(getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(PREFS_KEY_HISTORY_JSON, "{}")) } catch(e:Exception){} }
+    private fun saveHistoryMap(folder:String, title:String, chap:String, url:String, config:JSONObject) {
+        val item = JSONObject().apply{ put("title", title); put("chapter", chap); put("url", url); put("config", config); put("time", SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())) }
+        historyData.put(folder, item)
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString(PREFS_KEY_HISTORY_JSON, historyData.toString()).apply()
     }
 }

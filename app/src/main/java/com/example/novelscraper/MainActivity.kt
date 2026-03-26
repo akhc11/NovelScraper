@@ -122,7 +122,62 @@ class MainActivity : ComponentActivity() {
 
     private fun performTestRun(view: WebView) {
         val config = viewModel.uiState.value.currentConfig
-        val jsCode = "(function(){var res={title:'',content:'',nextUrl:'',chapter:'',folderName:''};try{var ldJsons=document.querySelectorAll('script[type=\"application/ld+json\"]');var metaData={};for(var i=0;i<ldJsons.length;i++){try{var p=JSON.parse(ldJsons[i].innerText);if(Array.isArray(p))p=p[0];if(p.headline||(p.isPartOf&&p.isPartOf.name)){metaData=p;break;}}catch(e){}}var fSel='${config.folder.replace("'","\\'")}';var fTitle='';if(fSel){var fElem=document.querySelector(fSel);if(fElem)fTitle=fElem.innerText.trim();}if(!fTitle){var nTitleElem=document.querySelector('.series-title, .novel_title, .novel-title, .p-novel__title');if(nTitleElem){fTitle=nTitleElem.innerText.trim();}else{var b=document.querySelectorAll('.breadcrumb, [class*=\"breadcrumb\"], .p-breadcrumb, #breadcrumbs');if(b.length>0){var l=Array.from(b[0].querySelectorAll('a')).map(a=>a.innerText.trim()).filter(t=>t&&t.length>1&&!t.match(/ホーム|トップ|Home|Top/i));if(l.length>0){fTitle=l[l.length-1];if(fTitle.match(/第?\\d+|話|章|節|Part|ページ/i)&&l.length>=2)fTitle=l[l.length-2];}}}if(!fTitle&&metaData.isPartOf)fTitle=metaData.isPartOf.name||metaData.isPartOf;if(!fTitle)fTitle=document.querySelector('meta[property=\"og:site_name\"]')?.content;var tParts=document.title.split(/\\s*[-|｜]\\s*/).filter(p=>p);if(!fTitle&&tParts.length>=2)fTitle=tParts.length>=3?tParts[tParts.length-2]:tParts[tParts.length-1];}res.folderName=typeof fTitle==='string'&&fTitle?fTitle.trim():'取得失敗';var tSel='${config.title.replace("'","\\'")}';var tElem=tSel?document.querySelector(tSel):null;if(!tElem)tElem=document.querySelector('.novel_subtitle, .ep-title, .episode-title, .chapter-title, .widget-title, h1.text-xl, h1, h2.chapter-title, .entry-title');res.title=tElem?tElem.innerText.trim():'';if(!res.title){if(metaData.headline)res.title=metaData.headline;else if(typeof tParts!=='undefined'&&tParts.length>0)res.title=tParts[0].trim();else res.title=document.title.trim();}if(!res.title)res.title='取得失敗';var cSel='${config.chapter.replace("'","\\'")}';if(cSel){var text='';if(cSel==='@URL'){text=location.href;}else{var cElem=document.querySelector(cSel);if(cElem)text=cElem.innerText.trim();}if(text){if('${config.chapterRegex.replace("\\","\\\\").replace("'","\\'")}'!==''){try{var re=new RegExp('${config.chapterRegex.replace("\\","\\\\").replace("'","\\'")}');var match=text.match(re);if(match)res.chapter=match[1]||match[0];}catch(e){}}if(!res.chapter){var m=text.match(/(\\d+)/);if(m)res.chapter=m[1];}}}var bSel='${config.body.replace("'","\\'")}';var bElem=bSel?document.querySelector(bSel):null;if(!bElem){var c=Array.from(document.querySelectorAll('div, article, section, main')).map(el=>{var p=el.querySelectorAll('p');return {el:el,count:p.length};}).sort((a,b)=>b.count-a.count);if(c.length>0&&c[0].count>0)bElem=c[0].el;}res.content=bElem?bElem.innerText.substring(0,100).replace(/\\s+/g,' ')+'...':'';var nSel='${config.next.replace("'","\\'")}';var nElem=nSel?document.querySelector(nSel):null;if(!nElem){var a=Array.from(document.querySelectorAll('a')).filter(a=>a.innerText.match(/次|Next|>>/i));if(a.length>0)nElem=a[0];}res.nextUrl=nElem?nElem.href:'';}catch(e){res.title='Error';res.content=e.message;}return JSON.stringify(res);})();"
+        val jsCode = """
+            (function() {
+                var res = { title: '', content: '', nextUrl: '', chapter: '', folderName: '' };
+                try {
+                    function extractText(el) {
+                        if (!el) return '';
+                        var clone = el.cloneNode(true);
+                        clone.querySelectorAll('script, style, noscript, iframe').forEach(n => n.remove());
+                        clone.querySelectorAll('br').forEach(n => n.outerHTML = '\n');
+                        clone.querySelectorAll('p, div, h1, h2, h3').forEach(n => n.after('\n'));
+                        return clone.innerText.trim();
+                    }
+
+                    var metaData = {};
+                    try {
+                        var ldJsons = document.querySelectorAll('script[type="application/ld+json"]');
+                        for (var i = 0; i < ldJsons.length; i++) {
+                            var p = JSON.parse(ldJsons[i].innerText);
+                            if (Array.isArray(p)) p = p[0];
+                            if (p.headline || (p.isPartOf && p.isPartOf.name)) { metaData = p; break;}
+                        }
+                    } catch(e) {}
+
+                    var fSel = '${config.folder.replace("'", "\\'")}';
+                    var fTitle = '';
+                    if (fSel && !fSel.startsWith('@')) {
+                        var fElem = document.querySelector(fSel);
+                        if (fElem) fTitle = fElem.innerText.trim();
+                    }
+                    if (!fTitle) {
+                        var nTitleElem = document.querySelector('.series-title, .novel_title, .novel-title, .p-novel__title');
+                        fTitle = nTitleElem ? nTitleElem.innerText.trim() : '';
+                    }
+                    res.folderName = fTitle || '取得失敗';
+
+                    var tSel = '${config.title.replace("'", "\\'")}';
+                    var tElem = tSel ? document.querySelector(tSel) : null;
+                    if (!tElem) tElem = document.querySelector('.novel_subtitle, .ep-title, .chapter-title, h1, h2');
+                    res.title = tElem ? tElem.innerText.trim() : '取得失敗';
+
+                    var bSel = '${config.body.replace("'", "\\'")}';
+                    var bElem = bSel ? document.querySelector(bSel) : null;
+                    if (!bElem) {
+                        var candidates = Array.from(document.querySelectorAll('div, article, section')).map(el => ({ el: el, count: el.querySelectorAll('p').length })).sort((a,b) => b.count - a.count);
+                        if (candidates.length > 0) bElem = candidates[0].el;
+                    }
+                    var fullText = extractText(bElem);
+                    res.content = fullText.substring(0, 200) + (fullText.length > 200 ? '...' : '');
+
+                    var nSel = '${config.next.replace("'", "\\'")}';
+                    var nElem = nSel ? document.querySelector(nSel) : document.querySelector('a[rel="next"]');
+                    res.nextUrl = nElem ? nElem.href : '';
+                } catch(e) { res.title = 'Error'; res.content = e.message; }
+                return JSON.stringify(res);
+            })();
+        """.trimIndent()
         view.evaluateJavascript(jsCode) { res ->
             if (res != null) {
                 try {
@@ -157,7 +212,27 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun launchAnalysisTool(view: WebView) {
-        val script = "(function(){if(window.eruda){if(window.__eruda_is_open){eruda.hide();window.__eruda_is_open=false;}else{eruda.show();window.__eruda_is_open=true;}return;}var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/eruda';document.body.appendChild(s);s.onload=function(){eruda.init();eruda.show();window.__eruda_is_open=true;};})();"
+        val script = """
+            (function() {
+                if (window.eruda) {
+                    if (window.__eruda_is_open) { eruda.hide(); window.__eruda_is_open = false; }
+                    else { eruda.show(); window.__eruda_is_open = true; }
+                    return;
+                }
+                var s = document.createElement('script');
+                s.src = 'https://cdn.jsdelivr.net/npm/eruda';
+                document.body.appendChild(s);
+                s.onload = function() {
+                    eruda.init();
+                    eruda.show();
+                    window.__eruda_is_open = true;
+                    // ErudaのUIを拡大するためのCSSを注入
+                    var style = document.createElement('style');
+                    style.innerHTML = '#eruda .eruda-container { font-size: 16px !important; } #eruda .eruda-dev-tools { height: 70% !important; }';
+                    document.querySelector('#eruda').shadowRoot.appendChild(style);
+                };
+            })();
+        """.trimIndent()
         view.evaluateJavascript(script, null)
     }
 

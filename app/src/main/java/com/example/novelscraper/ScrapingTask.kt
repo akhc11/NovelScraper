@@ -321,7 +321,20 @@ class ScrapingTask(
                         var clone = bodyElem.cloneNode(true);
                         clone.querySelectorAll('script, style, noscript, iframe, template, .ad, .ads, [class*="advertisement"], .social, .share, #comments').forEach(n => n.remove());
                         if (!${useImages}) clone.querySelectorAll('img, picture, svg').forEach(n => n.remove());
-                        return clone.innerText.trim();
+                        
+                        // 改行を確実に保持するための処理
+                        clone.querySelectorAll('br').forEach(br => {
+                            var nl = document.createTextNode('\n');
+                            br.parentNode.replaceChild(nl, br);
+                        });
+                        // ブロック要素の間に改行を挿入
+                        clone.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6, li, dt, dd').forEach(el => {
+                            if (el.innerText.trim().length > 0) {
+                                el.after(document.createTextNode('\n'));
+                            }
+                        });
+                        
+                        return clone.innerText.trim().replace(/\n\s*\n/g, '\n\n');
                     }
                     result.content = extractSmartContent();
 

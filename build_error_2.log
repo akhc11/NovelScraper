@@ -1,0 +1,9 @@
+
+> Configure project :app
+WARNING: The option setting 'android.overridePathCheck=true' is experimental.
+The current default is 'false'.
+
+> Task :app:clean
+
+BUILD SUCCESSFUL in 2s
+1 actionable task: 1 executed

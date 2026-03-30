@@ -30,7 +30,7 @@ class ScraperService : Service() {
         createNotificationChannels()
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NovelScraper::Wakelock")
-        wakeLock?.acquire()
+        wakeLock?.acquire(30 * 60 * 1000L) // 30分で自動解放（onStartCommandで再延長される）
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

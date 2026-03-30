@@ -16,7 +16,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 class ScrapingViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = PreferencesRepository(application)
-    
+
     private val taskList = CopyOnWriteArrayList<ScrapingTask>()
     private val _activeTasks = MutableStateFlow<List<ScrapingTask>>(emptyList())
     val activeTasks: StateFlow<List<ScrapingTask>> = _activeTasks.asStateFlow()
@@ -34,36 +34,21 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
     init {
-        viewModelScope.launch {
-            repository.presetsFlow.collect { _presets.value = it }
-        }
-        viewModelScope.launch {
-            repository.favoritesFlow.collect { _favorites.value = it }
-        }
-        viewModelScope.launch {
-            repository.historyFlow.collect { _history.value = it }
-        }
-        
-        // 初期設定の流し込み
+        viewModelScope.launch { repository.presetsFlow.collect { _presets.value = it } }
+        viewModelScope.launch { repository.favoritesFlow.collect { _favorites.value = it } }
+        viewModelScope.launch { repository.historyFlow.collect { _history.value = it } }
+
         viewModelScope.launch {
             repository.setupDoneFlow.collect { done ->
                 if (!done) {
                     val initialPresets = mutableMapOf<String, ScraperConfig>()
-                    
-                    initialPresets["自動検出(推奨)"] = ScraperConfig(
-                        regex = "\\s*[-|｜].*|\\(.*\\)|\\[.*\\]",
-                        endCheck = "list|index|toc|javascript|null"
-                    )
-                    
-                    initialPresets["ハーメルン"] = ScraperConfig(
-                        body = "#honbun",
-                        title = "div > span[style*='font-size:120%']",
-                        regex = "\\s*[-|｜].*",
+                    initialPresets["初期設定(小説家になろう)"] = ScraperConfig(
+                        body = "#novel_honbun",
+                        title = ".novel_subtitle",
                         delay = "5-10",
                         endCheck = "list|index|toc|javascript|null",
-                        autoUrl = "syosetu.org"
+                        autoUrl = "syosetu.com"
                     )
-                    
                     repository.savePresets(initialPresets)
                     repository.saveSetupDone(true)
                 }
@@ -71,113 +56,85 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun addTask(task: ScrapingTask) {
-        taskList.add(task)
-        _activeTasks.value = taskList.toList()
-    }
-
-    fun removeTask(task: ScrapingTask) {
-        taskList.remove(task)
-        _activeTasks.value = taskList.toList()
-    }
-
-    fun updateStatus() {
-        _activeTasks.value = taskList.toList()
-    }
+    fun addTask(task: ScrapingTask) { taskList.add(task); _activeTasks.value = taskList.toList() }
+    fun removeTask(task: ScrapingTask) { taskList.remove(task); _activeTasks.value = taskList.toList() }
+    fun updateStatus() { _activeTasks.value = taskList.toList() }
 
     fun savePreset(name: String, config: ScraperConfig) {
-        viewModelScope.launch {
-            repository.updatePresets { it[name] = config }
-        }
+        viewModelScope.launch { repository.updatePresets { it[name] = config } }
     }
 
     fun deletePreset(name: String) {
+        if (name.isEmpty()) return
         viewModelScope.launch {
             repository.updatePresets { it.remove(name) }
+            if (_uiState.value.currentPresetName == name) {
+                _uiState.update { it.copy(currentPresetName = "", currentConfig = ScraperConfig()) }
+            }
         }
     }
 
     fun saveFavorite(name: String, url: String) {
-        viewModelScope.launch {
-            repository.updateFavorites { it[name] = url }
-        }
+        viewModelScope.launch { repository.updateFavorites { it[name] = url } }
     }
 
     fun deleteFavorite(name: String) {
-        viewModelScope.launch {
-            repository.updateFavorites { it.remove(name) }
-        }
+        viewModelScope.launch { repository.updateFavorites { it.remove(name) } }
     }
 
-    fun updateHistory(folder: String, title: String, chap: String, url: String, config: ScraperConfig) {
+    fun updateHistory(folder: String, title: String, chap: String, url: String, config: ScraperConfig) {        
         viewModelScope.launch {
             val item = HistoryItem(
                 title = title,
                 chapter = chap,
                 url = url,
                 config = config,
-                time = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())
+                time = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date()),
+                presetName = _uiState.value.currentPresetName // ここで確実に保存
             )
             repository.updateHistory { it[folder] = item }
         }
     }
 
     fun deleteHistory(folder: String) {
-        viewModelScope.launch {
-            repository.updateHistory { it.remove(folder) }
-        }
+        viewModelScope.launch { repository.updateHistory { it.remove(folder) } }
     }
 
     fun clearHistory() {
-        viewModelScope.launch {
-            repository.updateHistory { it.clear() }
+        viewModelScope.launch { repository.updateHistory { it.clear() } }
+    }
+
+    private fun checkForAutoPreset(url: String) {
+        val currentPresets = presets.value
+        if (url.isEmpty() || currentPresets.isEmpty()) return
+        for ((name, config) in currentPresets) {
+            if (config.autoUrl.isNotEmpty() && url.contains(config.autoUrl)) {
+                if (_uiState.value.currentPresetName != name) {
+                    applyPresetState(name, config)
+                }
+                break
+            }
         }
     }
+
+    fun setCurrentUrl(url: String) {
+        _uiState.update { it.copy(currentUrl = url) }
+        checkForAutoPreset(url)
+    }
+
+    fun setInputUrl(url: String) { _uiState.update { it.copy(inputUrl = url) } }
+    fun closePanels() { _uiState.update { it.copy(openedPanel = PanelType.NONE) } }
+    fun setOpenedPanel(panel: PanelType) { _uiState.update { it.copy(openedPanel = if (it.openedPanel == panel) PanelType.NONE else panel) } }
+    fun toggleInspectMode() { _uiState.update { it.copy(isInspectMode = !it.isInspectMode) } }
+    fun toggleBlockImages() { _uiState.update { it.copy(blockImages = !it.blockImages) } }
+    fun toggleDesktopMode() { _uiState.update { it.copy(isDesktopMode = !it.isDesktopMode) } }
+    fun setActiveHistoryTab(tab: Int) { _uiState.update { it.copy(activeHistoryTab = tab) } }
+    fun applyPresetState(name: String, config: ScraperConfig) { _uiState.update { it.copy(currentPresetName = name, currentConfig = config) } }
+    fun updateCurrentConfig(updater: (ScraperConfig) -> ScraperConfig) { _uiState.update { it.copy(currentConfig = updater(it.currentConfig)) } }
 
     override fun onCleared() {
         super.onCleared()
         taskList.forEach { it.stop() }
         taskList.clear()
-        _activeTasks.value = emptyList()
-    }
-
-    // --- UI State Management ---
-
-    fun setOpenedPanel(panel: PanelType) {
-        _uiState.update { 
-            it.copy(openedPanel = if (it.openedPanel == panel) PanelType.NONE else panel) 
-        }
-    }
-
-    fun closePanels() {
-        _uiState.update { it.copy(openedPanel = PanelType.NONE) }
-    }
-
-    fun toggleInspectMode() {
-        _uiState.update { it.copy(isInspectMode = !it.isInspectMode) }
-    }
-
-    fun toggleBlockImages() {
-        _uiState.update { it.copy(blockImages = !it.blockImages) }
-    }
-
-    fun setInputUrl(url: String) {
-        _uiState.update { it.copy(inputUrl = url) }
-    }
-
-    fun setCurrentUrl(url: String) {
-        _uiState.update { it.copy(currentUrl = url) }
-    }
-
-    fun setActiveHistoryTab(tab: Int) {
-        _uiState.update { it.copy(activeHistoryTab = tab) }
-    }
-
-    fun applyPresetState(name: String, config: ScraperConfig) {
-        _uiState.update { it.copy(currentPresetName = name, currentConfig = config) }
-    }
-
-    fun updateCurrentConfig(updater: (ScraperConfig) -> ScraperConfig) {
-        _uiState.update { it.copy(currentConfig = updater(it.currentConfig)) }
     }
 }

@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.novelscraper.ui.theme.AppColors
 
 @Composable
 fun FavoritesPanel(
@@ -25,11 +26,11 @@ fun FavoritesPanel(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF2D2D2D))
+            .background(AppColors.backgroundLight)
     ) {
         Text(
             text = "★ ブックマーク",
-            color = Color.White,
+            color = AppColors.textPrimary,
             fontSize = 18.sp,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(15.dp)
@@ -52,12 +53,12 @@ fun FavoritesPanel(
 
         Button(
             onClick = onCloseClick,
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF444444)),
+            colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceLight),
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(10.dp)
         ) {
-            Text("閉じる", color = Color.White)
+            Text("閉じる", color = AppColors.textPrimary)
         }
     }
 }
@@ -77,12 +78,12 @@ fun FavoriteItem(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(text = name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text(text = url, color = Color.Gray, fontSize = 12.sp, maxLines = 1)
+            Text(text = name, color = AppColors.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(text = url, color = AppColors.textTertiary, fontSize = 12.sp, maxLines = 1)
         }
         Button(
             onClick = onDelete,
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F)),
+            colors = ButtonDefaults.buttonColors(containerColor = AppColors.error),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
             modifier = Modifier.height(32.dp)
         ) {

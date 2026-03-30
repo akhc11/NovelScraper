@@ -5,6 +5,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.Composable
@@ -12,10 +16,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.novelscraper.HistoryItem
 import com.example.novelscraper.ScrapingTask
+import com.example.novelscraper.ui.theme.AppColors
 
 @Composable
 fun HistoryPanel(
@@ -24,71 +30,60 @@ fun HistoryPanel(
     activeTasks: List<ScrapingTask>,
     history: Map<String, HistoryItem>,
     onStopTaskClick: (ScrapingTask) -> Unit,
-    onHistoryItemClick: (String) -> Unit,
-    onDeleteHistoryClick: (String) -> Unit,
+    onHistoryItemClick: (String) -> Unit, // サイトへ移動
+    onHistoryResumeClick: (String) -> Unit, // 続きから再開
+    onDeleteHistoryClick: (String) -> Unit, // 削除
     modifier: Modifier = Modifier
 ) {
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(Color(0xFF2D2D2D))
-    ) {
-        val tabs = listOf("🚀 実行中", "📜 履歴")
-        
+    Column(modifier = modifier.fillMaxSize().background(AppColors.backgroundDarkest)) {
+        val tabs = listOf("実行中", "履歴")
         TabRow(
             selectedTabIndex = activeTab,
-            containerColor = Color(0xFF1F1F1F),
+            containerColor = AppColors.backgroundDark,
             contentColor = Color.White,
             indicator = { tabPositions ->
-                TabRowDefaults.SecondaryIndicator(
-                    Modifier.tabIndicatorOffset(tabPositions[activeTab]),
-                    color = MaterialTheme.colorScheme.primary
-                )
+                TabRowDefaults.SecondaryIndicator(Modifier.tabIndicatorOffset(tabPositions[activeTab]), color = AppColors.accentTeal)
             }
         ) {
             tabs.forEachIndexed { index, title ->
-                Tab(
-                    selected = activeTab == index,
-                    onClick = { onTabSelected(index) },
-                    text = { Text(title, fontWeight = FontWeight.Bold) }
-                )
+                Tab(selected = activeTab == index, onClick = { onTabSelected(index) }, text = { Text(title, fontWeight = FontWeight.Bold, fontSize = 14.sp) })
             }
         }
-
-        Box(modifier = Modifier.weight(1f)) {
+        
+        Box(modifier = Modifier.weight(1f).padding(top = 4.dp)) {
             if (activeTab == 0) {
                 RunningTasksList(activeTasks, onStopTaskClick)
             } else {
-                HistoryList(history, onHistoryItemClick, onDeleteHistoryClick)
+                HistoryList(history, onHistoryItemClick, onHistoryResumeClick, onDeleteHistoryClick)
             }
         }
     }
 }
 
 @Composable
-fun RunningTasksList(
-    tasks: List<ScrapingTask>,
-    onStopTaskClick: (ScrapingTask) -> Unit
-) {
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
+fun RunningTasksList(tasks: List<ScrapingTask>, onStopTaskClick: (ScrapingTask) -> Unit) {
+    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
         items(tasks) { task ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 12.dp, horizontal = 15.dp),
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .background(AppColors.backgroundMedium, RoundedCornerShape(6.dp))
+                    .padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(text = task.folderName, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Text(text = task.status, color = Color(0xFF03DAC5), fontSize = 13.sp)
+                    Text(text = task.folderName, color = AppColors.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(text = task.status, color = AppColors.accentTealLight, fontSize = 12.sp)
                 }
                 Button(
                     onClick = { onStopTaskClick(task) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F)),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.error),
+                    shape = RoundedCornerShape(4.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                     modifier = Modifier.height(32.dp)
                 ) {
-                    Text("停止", fontSize = 12.sp, color = Color.White)
+                    Text("停止", fontSize = 11.sp, color = Color.White)
                 }
             }
         }
@@ -99,32 +94,55 @@ fun RunningTasksList(
 fun HistoryList(
     history: Map<String, HistoryItem>,
     onItemClick: (String) -> Unit,
+    onResumeClick: (String) -> Unit,
     onDeleteClick: (String) -> Unit
 ) {
-    val sortedHistory = history.toList().sortedByDescending { it.second.time }
-    
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
+    val sortedHistory = history.toList().sortedByDescending { it.second.timestamp }
+    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
         items(sortedHistory) { (folderName, item) ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onItemClick(item.url) }
-                    .padding(vertical = 12.dp, horizontal = 15.dp),
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .background(AppColors.backgroundMedium, RoundedCornerShape(8.dp))
+                    .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = folderName, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    val titleText = if (item.chapter.isNotEmpty()) "第${item.chapter}話 ${item.title}" else item.title
-                    Text(text = titleText, color = Color.LightGray, fontSize = 13.sp, maxLines = 1)
-                    Text(text = "${item.time} - ${item.url}", color = Color.Gray, fontSize = 11.sp, maxLines = 1)
-                }
-                Button(
+                // 1. 削除ボタン (左端に配置して誤操作防止)
+                IconButton(
                     onClick = { onDeleteClick(folderName) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF444444)),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                    modifier = Modifier.height(32.dp)
+                    modifier = Modifier.size(32.dp)
                 ) {
-                    Text("削除", fontSize = 12.sp, color = Color.White)
+                    Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = Color(0xFF666666), modifier = Modifier.size(18.dp))
+                }
+
+                // 2. メイン情報エリア (タップでサイトへ移動)
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 8.dp)
+                        .clickable { onItemClick(item.url) }
+                ) {
+                    Text(text = folderName, color = AppColors.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        text = "${item.chapter} - ${item.title}", 
+                        color = AppColors.textSecondary, 
+                        fontSize = 12.sp, 
+                        maxLines = 1, 
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(text = item.time, color = AppColors.textTertiary, fontSize = 10.sp)
+                }
+                
+                // 3. 再開ボタン (右端に大きく配置)
+                Button(
+                    onClick = { onResumeClick(folderName) },
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentOrange),
+                    shape = RoundedCornerShape(4.dp),
+                    contentPadding = PaddingValues(0.dp),
+                    modifier = Modifier.size(width = 48.dp, height = 36.dp)
+                ) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = "Resume", tint = Color.White, modifier = Modifier.size(22.dp))
                 }
             }
         }

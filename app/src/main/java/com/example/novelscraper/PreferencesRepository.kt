@@ -22,7 +22,8 @@ data class HistoryItem(
     val config: ScraperConfig,
     val time: String,
     val presetName: String = "",
-    val timestamp: Long = System.currentTimeMillis() // ソート用（年またぎ対応）
+    val timestamp: Long = System.currentTimeMillis(), // ソート用（年またぎ対応）
+    val nextUrl: String = "" // 再開時、次のページから開始するため
 )
 
 class PreferencesRepository(private val context: Context) {

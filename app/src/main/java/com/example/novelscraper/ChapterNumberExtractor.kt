@@ -7,6 +7,7 @@ package com.example.novelscraper
 object ChapterNumberExtractor {
 
     private const val PAD_LENGTH = 4
+    private val NUMBER_REGEX = Regex("(\\d+)")
 
     /**
      * スクレイピング結果とコンフィグからチャプター番号文字列を決定する。
@@ -32,7 +33,7 @@ object ChapterNumberExtractor {
 
         // 自動取得: JS結果が空ならURLから数字を推測
         if (chapter.isEmpty()) {
-            val matches = Regex("(\\d+)").findAll(currentUrl).map { it.value }.toList()
+            val matches = NUMBER_REGEX.findAll(currentUrl).map { it.value }.toList()
             if (matches.isNotEmpty()) chapter = matches.last()
         }
 
@@ -65,7 +66,7 @@ object ChapterNumberExtractor {
 
         // JS結果が空 → URL推測
         if (rawChapter.isEmpty()) {
-            val matches = Regex("(\\d+)").findAll(currentUrl).map { it.value }.toList()
+            val matches = NUMBER_REGEX.findAll(currentUrl).map { it.value }.toList()
             if (matches.isNotEmpty()) {
                 return matches.last().padStart(PAD_LENGTH, '0') + " (推測)"
             }

@@ -3,6 +3,8 @@ package com.example.novelscraper.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -25,8 +27,6 @@ fun SettingsPanel(
     uiState: MainUiState,
     presets: Map<String, ScraperConfig>,
     onCloseClick: () -> Unit,
-    onTestRunClick: () -> Unit,
-    onToggleImagesClick: () -> Unit,
     onPresetSelected: (String, ScraperConfig) -> Unit,
     onSavePresetClick: () -> Unit,
     onDeletePresetClick: () -> Unit,
@@ -41,106 +41,106 @@ fun SettingsPanel(
         HelpDialog(onDismiss = { showHelpDialog = false })
     }
 
-    Column(
+    val configItems = listOf(
+        Triple("作品名 Selector", config.folder) { v: String -> onConfigChange(config.copy(folder = v)) },
+        Triple("作品名 Regex", config.regex) { v: String -> onConfigChange(config.copy(regex = v)) },
+        Triple("別URL取得 Selector", config.folderLink) { v: String -> onConfigChange(config.copy(folderLink = v)) },
+        Triple("タイトル Selector", config.title) { v: String -> onConfigChange(config.copy(title = v)) },
+        Triple("タイトル Regex", config.fileRegex) { v: String -> onConfigChange(config.copy(fileRegex = v)) },
+        Triple("チャプター番号 Selector", config.chapter) { v: String -> onConfigChange(config.copy(chapter = v)) },
+        Triple("チャプター番号 Regex", config.chapterRegex) { v: String -> onConfigChange(config.copy(chapterRegex = v)) },
+        Triple("本文 Selector", config.body) { v: String -> onConfigChange(config.copy(body = v)) },
+        Triple("次ページ Selector", config.next) { v: String -> onConfigChange(config.copy(next = v)) },
+        Triple("待機時間(秒)", config.delay) { v: String -> onConfigChange(config.copy(delay = v)) },
+        Triple("終了検知 Regex", config.endCheck) { v: String -> onConfigChange(config.copy(endCheck = v)) },
+        Triple("自動適用URL (ドメイン)", config.autoUrl) { v: String -> onConfigChange(config.copy(autoUrl = v)) }
+    )
+
+    LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .background(AppColors.backgroundLight)
-            .padding(15.dp)
-            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 15.dp),
+        contentPadding = PaddingValues(top = 15.dp, bottom = 100.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("設定", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppColors.textPrimary, modifier = Modifier.weight(1f))
-            Button(
-                onClick = { showHelpDialog = true },
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
-                modifier = Modifier.height(36.dp).padding(end = 8.dp)
-            ) { Text("説明書", fontSize = 12.sp) }
-            Button(
-                onClick = onCloseClick,
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceLight),
-                modifier = Modifier.height(36.dp)
-            ) { Text("閉じる", fontSize = 12.sp) }
-        }
-
-        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Button(
-                onClick = onTestRunClick,
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
-                modifier = Modifier.weight(1f)
-            ) { Text("テスト解析", fontSize = 14.sp) }
-            Button(
-                onClick = onToggleImagesClick,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (uiState.blockImages) AppColors.surfaceHighlight else AppColors.accentTeal
-                ),
-                modifier = Modifier.weight(1f)
-            ) { Text(if (uiState.blockImages) "画像 OFF" else "画像 ON", fontSize = 14.sp) }
-        }
-
-        Box(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+        item {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(AppColors.surfaceHighlight, MaterialTheme.shapes.small)
-                    .clickable { dropdownExpanded = true }
-                    .padding(12.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = uiState.currentPresetName.ifEmpty { "プリセット選択..." },
-                    color = AppColors.textPrimary,
-                    modifier = Modifier.weight(1f)
-                )
-                Icon(Icons.Filled.ArrowDropDown, contentDescription = null, tint = AppColors.textPrimary)
+                Text("設定", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppColors.textPrimary, modifier = Modifier.weight(1f))
+                Button(
+                    onClick = { showHelpDialog = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
+                    modifier = Modifier.height(36.dp).padding(end = 8.dp)
+                ) { Text("説明書", fontSize = 12.sp) }
+                Button(
+                    onClick = onCloseClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceLight),
+                    modifier = Modifier.height(36.dp)
+                ) { Text("閉じる", fontSize = 12.sp) }
             }
-            DropdownMenu(
-                expanded = dropdownExpanded,
-                onDismissRequest = { dropdownExpanded = false },
-                modifier = Modifier.background(AppColors.surfaceLight)
-            ) {
-                presets.keys.sorted().forEach { name ->
-                    DropdownMenuItem(
-                        text = { Text(name, color = AppColors.textPrimary) },
-                        onClick = {
-                            presets[name]?.let { onPresetSelected(name, it) }
-                            dropdownExpanded = false
-                        }
+        }
+
+
+        item {
+            Box(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(AppColors.surfaceHighlight, MaterialTheme.shapes.small)
+                        .clickable { dropdownExpanded = true }
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = uiState.currentPresetName.ifEmpty { "プリセット選択..." },
+                        color = AppColors.textPrimary,
+                        modifier = Modifier.weight(1f)
                     )
+                    Icon(Icons.Filled.ArrowDropDown, contentDescription = null, tint = AppColors.textPrimary)
+                }
+                DropdownMenu(
+                    expanded = dropdownExpanded,
+                    onDismissRequest = { dropdownExpanded = false },
+                    modifier = Modifier.background(AppColors.surfaceLight)
+                ) {
+                    presets.keys.sorted().forEach { name ->
+                        DropdownMenuItem(
+                            text = { Text(name, color = AppColors.textPrimary) },
+                            onClick = {
+                                presets[name]?.let { onPresetSelected(name, it) }
+                                dropdownExpanded = false
+                            }
+                        )
+                    }
                 }
             }
         }
 
-        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 15.dp)) {
-            Button(
-                onClick = onSavePresetClick,
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.neutralButton),
-                modifier = Modifier.weight(1f).padding(end = 5.dp)
-            ) { Text("保存") }
-            Button(
-                onClick = onDeletePresetClick,
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.error),
-                modifier = Modifier.weight(1f)
-            ) { Text("削除") }
+        item {
+            Row(modifier = Modifier.fillMaxWidth().padding(bottom = 15.dp)) {
+                Button(
+                    onClick = onSavePresetClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.neutralButton),
+                    modifier = Modifier.weight(1f).padding(end = 5.dp)
+                ) { Text("保存") }
+                Button(
+                    onClick = onDeletePresetClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.error),
+                    modifier = Modifier.weight(1f)
+                ) { Text("削除") }
+            }
         }
 
-        val textModifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
-        ConfigTextField("作品名 Selector", config.folder, textModifier) { onConfigChange(config.copy(folder = it)) }
-        ConfigTextField("作品名 Regex", config.regex, textModifier) { onConfigChange(config.copy(regex = it)) }
-        ConfigTextField("別URL取得 Selector", config.folderLink, textModifier) { onConfigChange(config.copy(folderLink = it)) }
-        ConfigTextField("タイトル Selector", config.title, textModifier) { onConfigChange(config.copy(title = it)) }
-        ConfigTextField("タイトル Regex", config.fileRegex, textModifier) { onConfigChange(config.copy(fileRegex = it)) }
-        ConfigTextField("チャプター番号 Selector", config.chapter, textModifier) { onConfigChange(config.copy(chapter = it)) }
-        ConfigTextField("チャプター番号 Regex", config.chapterRegex, textModifier) { onConfigChange(config.copy(chapterRegex = it)) }
-        ConfigTextField("本文 Selector", config.body, textModifier) { onConfigChange(config.copy(body = it)) }
-        ConfigTextField("次ページ Selector", config.next, textModifier) { onConfigChange(config.copy(next = it)) }
-        ConfigTextField("待機時間(秒)", config.delay, textModifier) { onConfigChange(config.copy(delay = it)) }
-        ConfigTextField("終了検知 Regex", config.endCheck, textModifier) { onConfigChange(config.copy(endCheck = it)) }
-        ConfigTextField("自動適用URL (ドメイン)", config.autoUrl, textModifier) { onConfigChange(config.copy(autoUrl = it)) }
-
-        Spacer(modifier = Modifier.height(100.dp))
+        items(configItems) { item ->
+            ConfigTextField(
+                hint = item.first,
+                value = item.second,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                onValueChange = item.third
+            )
+        }
     }
 }
 
@@ -189,18 +189,19 @@ fun HelpText(text: String) {
 
 @Composable
 fun ConfigTextField(hint: String, value: String, modifier: Modifier = Modifier, onValueChange: (String) -> Unit) {
+    val colors = OutlinedTextFieldDefaults.colors(
+        focusedTextColor = AppColors.textPrimary,
+        unfocusedTextColor = AppColors.textPrimary,
+        focusedBorderColor = AppColors.accentTeal,
+        unfocusedBorderColor = Color.DarkGray,
+        focusedContainerColor = AppColors.surfaceMedium,
+        unfocusedContainerColor = AppColors.surfaceMedium
+    )
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(hint, color = AppColors.textTertiary, fontSize = 12.sp) },
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedTextColor = AppColors.textPrimary,
-            unfocusedTextColor = AppColors.textPrimary,
-            focusedBorderColor = AppColors.accentTeal,
-            unfocusedBorderColor = Color.DarkGray,
-            focusedContainerColor = AppColors.surfaceMedium,
-            unfocusedContainerColor = AppColors.surfaceMedium
-        ),
+        colors = colors,
         modifier = modifier,
         singleLine = true,
         textStyle = TextStyle(fontSize = 14.sp)

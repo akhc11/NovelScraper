@@ -12,6 +12,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -42,6 +43,8 @@ fun HeaderToolbar(
     onInspectToolClick: () -> Unit,
     onToggleDesktopModeClick: () -> Unit = {},
     onStartScrapingClick: () -> Unit = {},
+    onTestRunClick: () -> Unit = {},
+    onToggleImagesClick: () -> Unit = {},
     isDesktopMode: Boolean = false
 ) {
     val focusManager = LocalFocusManager.current
@@ -129,15 +132,17 @@ fun HeaderToolbar(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                ToolButton(Icons.Filled.Settings, { onPanelToggle(PanelType.SETTINGS) }, uiState.openedPanel == PanelType.SETTINGS)
                 ToolButton(Icons.AutoMirrored.Filled.List, { onPanelToggle(PanelType.HISTORY) }, uiState.openedPanel == PanelType.HISTORY)
                 ToolButton(Icons.Filled.Favorite, { onPanelToggle(PanelType.FAVORITES) }, uiState.openedPanel == PanelType.FAVORITES)
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ToolButton(Icons.Filled.Settings, { onPanelToggle(PanelType.SETTINGS) }, uiState.openedPanel == PanelType.SETTINGS)
+                ToolButton(Icons.Filled.CheckCircle, onTestRunClick, false, AppColors.surfaceLight)
                 ToolButton(Icons.Filled.Search, onInspectModeToggle, uiState.isInspectMode, if (uiState.isInspectMode) AppColors.inspectActive else AppColors.surfaceMedium)
                 ToolButton(Icons.Filled.Build, onInspectToolClick, false, AppColors.accentTeal)
                 ToolButton(Icons.Filled.PlayArrow, onStartScrapingClick, false, AppColors.accentOrange)
+                ToolButton(null, onToggleImagesClick, uiState.blockImages, if (uiState.blockImages) AppColors.surfaceHighlight else AppColors.accentTeal, text = if (uiState.blockImages) "画✖" else "画〇")
                 ToolButton(null, onToggleDesktopModeClick, isDesktopMode, AppColors.surfaceLight, text = "PC")
             }
         }
@@ -154,7 +159,7 @@ fun ToolButton(
 ) {
     Surface(
         onClick = onClick,
-        modifier = Modifier.size(36.dp),
+        modifier = Modifier.size(32.dp),
         shape = RoundedCornerShape(4.dp),
         color = if (isSelected && containerColor != AppColors.inspectActive) AppColors.accentTeal else containerColor,
         contentColor = AppColors.textPrimary

@@ -37,6 +37,8 @@ fun MainScreen(
     val favorites by viewModel.favorites.collectAsState()
     val history by viewModel.history.collectAsState()
     val activeTasks by viewModel.activeTasks.collectAsState()
+    val currentStatusText by viewModel.currentStatusText.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
@@ -73,6 +75,8 @@ fun MainScreen(
                 onInspectToolClick = { webViewRef?.let { onLaunchAnalysisTool(it) } },
                 onToggleDesktopModeClick = { viewModel.toggleDesktopMode() },
                 onStartScrapingClick = { onStartScraping(webViewRef?.url ?: uiState.inputUrl) },
+                onTestRunClick = { webViewRef?.let { onTestRun(it) } },
+                onToggleImagesClick = { viewModel.toggleBlockImages() },
                 isDesktopMode = uiState.isDesktopMode
             )
         },
@@ -86,7 +90,10 @@ fun MainScreen(
                             WebViewHelper.applyStandardSettings(this, !uiState.blockImages, uiState.isDesktopMode)
                             webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
-                                    url?.let { viewModel.setCurrentUrl(it); viewModel.setInputUrl(it) }
+                                    if (url != null && !url.startsWith("javascript:") && !url.startsWith("data:")) {
+                                        viewModel.setCurrentUrl(url)
+                                        viewModel.setInputUrl(url)
+                                    }
                                 }
                             }
                             webViewRef = this
@@ -103,9 +110,8 @@ fun MainScreen(
                     modifier = Modifier.weight(1f)
                 )
 
-                val statusText = activeTasks.lastOrNull()?.status ?: if (activeTasks.isNotEmpty()) "実行中: ${activeTasks.size}件" else "待機中"
                 Text(
-                    text = statusText,
+                    text = currentStatusText,
                     modifier = Modifier.fillMaxWidth().background(AppColors.backgroundMedium).padding(4.dp),
                     color = AppColors.textMuted,
                     fontSize = 11.sp,
@@ -113,12 +119,15 @@ fun MainScreen(
                 )
             }
 
-            AnimatedVisibility(visible = uiState.openedPanel == PanelType.SETTINGS, modifier = Modifier.fillMaxSize()) {
+            AnimatedVisibility(
+                visible = uiState.openedPanel == PanelType.SETTINGS,
+                enter = androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.fadeOut(),
+                modifier = Modifier.fillMaxSize()
+            ) {
                 SettingsPanel(
                     uiState = uiState, presets = presets,
                     onCloseClick = { viewModel.closePanels() },
-                    onTestRunClick = { webViewRef?.let { onTestRun(it) } },
-                    onToggleImagesClick = { viewModel.toggleBlockImages() },
                     onPresetSelected = { name, config -> viewModel.applyPresetState(name, config) },
                     onSavePresetClick = { onShowSavePreset() },
                     onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
@@ -126,7 +135,12 @@ fun MainScreen(
                 )
             }
             
-            AnimatedVisibility(visible = uiState.openedPanel == PanelType.HISTORY, modifier = Modifier.fillMaxSize()) {
+            AnimatedVisibility(
+                visible = uiState.openedPanel == PanelType.HISTORY,
+                enter = androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.fadeOut(),
+                modifier = Modifier.fillMaxSize()
+            ) {
                 HistoryPanel(
                     activeTab = uiState.activeHistoryTab,
                     onTabSelected = { viewModel.setActiveHistoryTab(it) },
@@ -135,27 +149,43 @@ fun MainScreen(
                     onStopTaskClick = { task -> task.stop(); viewModel.removeTask(task) },
                     // サイトへ移動 (閲覧)
                     onHistoryItemClick = { url -> 
+                        webViewRef?.let { onNavigate(url, it) }
                         viewModel.setCurrentUrl(url)
+                        viewModel.setInputUrl(url)
                         viewModel.closePanels()
                     },
                     // 続きから再開
                     onHistoryResumeClick = { folder ->
                         val item = history[folder] ?: return@HistoryPanel
-                        val lastNum = item.chapter.filter { it.isDigit() }.toIntOrNull() ?: 0
-                        val nextConfig = item.config.copy(chapter = "@${lastNum + 1}")
-                        val presetName = if (item.presetName.isNotEmpty()) item.presetName else "(履歴から再開)"
-                        viewModel.applyPresetState(presetName, nextConfig)
-                        onResumeScraping(item.url, folder)
-                        viewModel.closePanels()
+                        if (item.nextUrl.isNotEmpty()) {
+                            val lastNum = item.chapter.filter { it.isDigit() }.toIntOrNull() ?: 0
+                            val nextConfig = item.config.copy(chapter = "@${lastNum + 1}")
+                            val presetName = if (item.presetName.isNotEmpty()) item.presetName else "(履歴から再開)"
+                            viewModel.applyPresetState(presetName, nextConfig)
+                            onResumeScraping(item.nextUrl, folder)
+                            viewModel.closePanels()
+                        } else {
+                            android.widget.Toast.makeText(context, "次のページが見つかりません（最新話か、古い履歴です）", android.widget.Toast.LENGTH_LONG).show()
+                        }
                     },
                     onDeleteHistoryClick = { folder -> viewModel.deleteHistory(folder) }
                 )
             }
 
-            AnimatedVisibility(visible = uiState.openedPanel == PanelType.FAVORITES, modifier = Modifier.fillMaxSize()) {
+            AnimatedVisibility(
+                visible = uiState.openedPanel == PanelType.FAVORITES,
+                enter = androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.fadeOut(),
+                modifier = Modifier.fillMaxSize()
+            ) {
                 FavoritesPanel(
                     favorites = favorites,
-                    onFavoriteClick = { url -> viewModel.setCurrentUrl(url); viewModel.closePanels() },
+                    onFavoriteClick = { url -> 
+                        webViewRef?.let { onNavigate(url, it) }
+                        viewModel.setCurrentUrl(url)
+                        viewModel.setInputUrl(url)
+                        viewModel.closePanels() 
+                    },
                     onDeleteClick = { name -> viewModel.deleteFavorite(name) },
                     onCloseClick = { viewModel.closePanels() }
                 )

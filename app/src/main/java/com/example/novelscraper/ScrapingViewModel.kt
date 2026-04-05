@@ -16,10 +16,14 @@ import java.util.concurrent.CopyOnWriteArrayList
 class ScrapingViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = PreferencesRepository(application)
+    private val fileRepository = FileRepository(application)
 
     private val taskList = CopyOnWriteArrayList<ScrapingTask>()
     private val _activeTasks = MutableStateFlow<List<ScrapingTask>>(emptyList())
     val activeTasks: StateFlow<List<ScrapingTask>> = _activeTasks.asStateFlow()
+
+    private val _currentStatusText = MutableStateFlow("待機中")
+    val currentStatusText: StateFlow<String> = _currentStatusText.asStateFlow()
 
     private val _presets = MutableStateFlow<Map<String, ScraperConfig>>(emptyMap())
     val presets: StateFlow<Map<String, ScraperConfig>> = _presets.asStateFlow()
@@ -34,6 +38,16 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
     init {
+        // 過去のバグで保存されてしまった不正な履歴（巨大なJS文字列など）を起動時にクリーンアップ
+        viewModelScope.launch {
+            repository.updateHistory { historyMap ->
+                val invalidKeys = historyMap.filter { (_, item) ->
+                    item.url.startsWith("javascript:") || item.url.startsWith("data:") || item.url.length > 2000
+                }.keys
+                invalidKeys.forEach { historyMap.remove(it) }
+            }
+        }
+
         viewModelScope.launch { repository.presetsFlow.collect { _presets.value = it } }
         viewModelScope.launch { repository.favoritesFlow.collect { _favorites.value = it } }
         viewModelScope.launch { repository.historyFlow.collect { _history.value = it } }
@@ -56,9 +70,14 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun addTask(task: ScrapingTask) { taskList.add(task); _activeTasks.value = taskList.toList() }
-    fun removeTask(task: ScrapingTask) { taskList.remove(task); _activeTasks.value = taskList.toList() }
-    fun updateStatus() { _activeTasks.value = taskList.toList() }
+    private fun refreshStatus() {
+        _activeTasks.value = taskList.toList()
+        _currentStatusText.value = taskList.lastOrNull()?.status ?: if (taskList.isNotEmpty()) "実行中: ${taskList.size}件" else "待機中"
+    }
+
+    fun addTask(task: ScrapingTask) { taskList.add(task); refreshStatus() }
+    fun removeTask(task: ScrapingTask) { taskList.remove(task); refreshStatus() }
+    fun updateStatus() { refreshStatus() }
 
     fun savePreset(name: String, config: ScraperConfig) {
         viewModelScope.launch { repository.updatePresets { it[name] = config } }
@@ -82,7 +101,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { repository.updateFavorites { it.remove(name) } }
     }
 
-    fun updateHistory(folder: String, title: String, chap: String, url: String, config: ScraperConfig) {        
+    fun updateHistory(folder: String, title: String, chap: String, url: String, nextUrl: String, config: ScraperConfig) {        
         viewModelScope.launch {
             val item = HistoryItem(
                 title = title,
@@ -90,7 +109,8 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 url = url,
                 config = config,
                 time = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date()),
-                presetName = _uiState.value.currentPresetName // ここで確実に保存
+                presetName = _uiState.value.currentPresetName,
+                nextUrl = nextUrl
             )
             repository.updateHistory { it[folder] = item }
         }
@@ -131,6 +151,33 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     fun setActiveHistoryTab(tab: Int) { _uiState.update { it.copy(activeHistoryTab = tab) } }
     fun applyPresetState(name: String, config: ScraperConfig) { _uiState.update { it.copy(currentPresetName = name, currentConfig = config) } }
     fun updateCurrentConfig(updater: (ScraperConfig) -> ScraperConfig) { _uiState.update { it.copy(currentConfig = updater(it.currentConfig)) } }
+
+    fun startScraping(targetUrl: String, initialFolderName: String = "(取得中...)") {
+        val config = uiState.value.currentConfig
+        val newTask = ScrapingTask(
+            getApplication(), targetUrl, config,
+            !uiState.value.blockImages,
+            uiState.value.isDesktopMode,
+            initialFolderName,
+            object : ScrapingTask.TaskListener {
+                override fun onStatusUpdate(task: ScrapingTask, status: String) {
+                    updateStatus()
+                }
+                override fun onTaskFinished(task: ScrapingTask) {
+                    removeTask(task)
+                }
+                override fun onSaveResult(folderName: String, title: String, content: String, chapterNum: String) {
+                    fileRepository.saveChapter(folderName, title, content, chapterNum)
+                }
+                override fun onUpdateHistory(folderName: String, title: String, chapter: String, url: String, nextUrl: String, config: ScraperConfig) {
+                    updateHistory(folderName, title, chapter, url, nextUrl, config)
+                }
+            }
+        )
+        addTask(newTask)
+        newTask.start()
+        closePanels()
+    }
 
     override fun onCleared() {
         super.onCleared()

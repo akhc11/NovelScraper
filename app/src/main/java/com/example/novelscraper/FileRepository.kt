@@ -26,11 +26,14 @@ class FileRepository(private val context: Context) {
         val safeFolderName = folderName.replace(sanitizeRegex, "").trim()
             .ifEmpty { DEFAULT_FOLDER_NAME }
 
+        val header = if (chapterNum.isNotEmpty()) "◆ $chapterNum $title\n\n" else "◆ $title\n\n"
+        val finalContent = header + content
+
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                saveWithMediaStore(safeFolderName, fileName, content)
+                saveWithMediaStore(safeFolderName, fileName, finalContent)
             } else {
-                saveWithLegacyFile(safeFolderName, fileName, content)
+                saveWithLegacyFile(safeFolderName, fileName, finalContent)
             }
         } catch (e: Exception) {
             // バックグラウンドタスクのためサイレントに処理

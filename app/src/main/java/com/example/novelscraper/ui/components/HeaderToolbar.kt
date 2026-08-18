@@ -42,10 +42,12 @@ fun HeaderToolbar(
     onInspectModeToggle: () -> Unit,
     onInspectToolClick: () -> Unit,
     onToggleDesktopModeClick: () -> Unit = {},
+    onToggleDarkModeClick: () -> Unit = {},
     onStartScrapingClick: () -> Unit = {},
     onTestRunClick: () -> Unit = {},
     onToggleImagesClick: () -> Unit = {},
-    isDesktopMode: Boolean = false
+    isDesktopMode: Boolean = false,
+    isDarkMode: Boolean = false
 ) {
     Column(
         modifier = Modifier
@@ -93,7 +95,8 @@ fun HeaderToolbar(
                 ToolButton(null, { onPanelToggle(PanelType.TRANSLATION) }, uiState.openedPanel == PanelType.TRANSLATION, text = "翻")
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                ToolButton(null, onToggleDarkModeClick, isDarkMode, if (isDarkMode) AppColors.surfaceHighlight else AppColors.surfaceMedium, text = if (isDarkMode) "🌙" else "☀️")
                 ToolButton(Icons.Filled.Settings, { onPanelToggle(PanelType.SETTINGS) }, uiState.openedPanel == PanelType.SETTINGS)
                 ToolButton(Icons.Filled.CheckCircle, onTestRunClick, false, AppColors.surfaceLight)
                 ToolButton(Icons.Filled.Search, onInspectModeToggle, uiState.isInspectMode, if (uiState.isInspectMode) AppColors.inspectActive else AppColors.surfaceMedium)

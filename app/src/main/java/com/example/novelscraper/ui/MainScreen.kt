@@ -1,7 +1,6 @@
 package com.example.novelscraper.ui
 
 import android.content.Intent
-import android.graphics.Bitmap
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -92,11 +91,6 @@ fun MainScreen(
         }
     }
 
-    // ダークモード切り替え時に即座にCSSを反映
-    LaunchedEffect(uiState.isDarkMode) {
-        webViewRef?.evaluateJavascript(WebViewHelper.buildDarkModeJs(uiState.isDarkMode), null)
-    }
-
     Scaffold(
         topBar = {
             HeaderToolbar(
@@ -117,12 +111,10 @@ fun MainScreen(
                 },
                 onInspectToolClick = { webViewRef?.let { onLaunchAnalysisTool(it) } },
                 onToggleDesktopModeClick = { viewModel.toggleDesktopMode() },
-                onToggleDarkModeClick = { viewModel.toggleDarkMode() },
                 onStartScrapingClick = { onStartScraping(webViewRef?.url ?: uiState.inputUrl) },
                 onTestRunClick = { webViewRef?.let { onTestRun(it) } },
                 onToggleImagesClick = { viewModel.toggleBlockImages() },
-                isDesktopMode = uiState.isDesktopMode,
-                isDarkMode = uiState.isDarkMode
+                isDesktopMode = uiState.isDesktopMode
             )
         },
         containerColor = Color.Black
@@ -141,7 +133,7 @@ fun MainScreen(
         }
 
         // ルートの imePadding() を排除（WebViewのリフロー防止。必要なパネル内部にのみ局所適用）
-        Box(modifier = Modifier.fillMaxSize().padding(paddingValues).background(Color(0xFF121212))) {
+        Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
             // 背景レイヤー: WebView & ステータスバー
             Column(modifier = Modifier.fillMaxSize()) {
                 AndroidView(
@@ -149,30 +141,11 @@ fun MainScreen(
                         WebView(ctx.applicationContext).apply {
                             WebViewHelper.applyStandardSettings(this, !uiState.blockImages, uiState.isDesktopMode)
                             webViewClient = object : WebViewClient() {
-                                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                    // 読み込み開始時：白画面の露出を防止するため一時的に透明化
-                                    if (uiState.isDarkMode) {
-                                        view?.alpha = 0f
-                                    }
-                                }
-
-                                override fun onPageCommitVisible(view: WebView?, url: String?) {
-                                    // Android公式ライフサイクル：DOM初回描画の瞬間にダークCSSを注入して表示
-                                    if (uiState.isDarkMode) {
-                                        view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(true), null)
-                                    }
-                                    view?.alpha = 1f
-                                }
-
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     if (url != null && !url.startsWith("javascript:") && !url.startsWith("data:")) {
                                         viewModel.setCurrentUrl(url)
                                         viewModel.setInputUrl(url)
                                     }
-                                    if (uiState.isDarkMode) {
-                                        view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(true), null)
-                                    }
-                                    view?.alpha = 1f
                                 }
                             }
                             webViewRef = this

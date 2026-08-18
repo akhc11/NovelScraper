@@ -44,6 +44,7 @@ object WebViewHelper {
      * Android公式仕様（API 33〜35標準 Algorithmic Darkening / API 29〜32 Force Dark）に準拠した
      * WebViewダークモード適用ロジック。Chromiumエンジンネイティブで最速・最高画質で黒化する。
      */
+    @Suppress("DEPRECATION")
     fun applyDarkMode(webView: WebView, isDarkMode: Boolean) {
         try {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {

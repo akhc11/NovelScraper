@@ -1,10 +1,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <style name="Theme.NovelScraper" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- WebViewの prefers-color-scheme 伝播用 -->
-        <item name="android:isLightTheme">false</item>
         <!-- ステータスバーの色を黒に -->
         <item name="android:statusBarColor">#000000</item>
-        <!-- ステータスバーのアイコンを白に -->
+        <!-- ステータスバーのアイコンを白に（背景が暗いため） -->
         <item name="android:windowLightStatusBar">false</item>
         <!-- フルスクリーン系フラグはOFF -->
         <item name="android:windowFullscreen">false</item>

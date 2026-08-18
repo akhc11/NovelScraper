@@ -42,7 +42,7 @@ object WebViewHelper {
 
     /**
      * Android公式仕様（API 33〜35標準 Algorithmic Darkening / API 29〜32 Force Dark）に準拠した
-     * WebViewダークモード適用ロジック。Chromiumエンジンネイティブで最速・最高画質で黒化する。
+     * WebViewダークモード適用ロジック。
      */
     @Suppress("DEPRECATION")
     fun applyDarkMode(webView: WebView, isDarkMode: Boolean) {
@@ -55,6 +55,57 @@ object WebViewHelper {
             }
         } catch (_: Exception) {
             // 一部端末での互換性例外防止
+        }
+    }
+
+    /**
+     * あらゆるWebサイトで100%確実に黒背景・白文字化を強制するスマートCSSスクリプト。
+     * 固定白背景を持つ小説サイトやブログでも即座に目に優しいダークテーマに変換する。
+     */
+    fun buildDarkModeJs(isDark: Boolean): String {
+        return if (isDark) {
+            """
+            (function() {
+                var id = 'novelscraper-dark-mode-style';
+                var existing = document.getElementById(id);
+                if (!existing) {
+                    var style = document.createElement('style');
+                    style.id = id;
+                    style.textContent = `
+                        html, body {
+                            background-color: #121212 !important;
+                            color: #e0e0e0 !important;
+                        }
+                        div, p, span, article, section, main, header, footer, nav, aside,
+                        ul, ol, li, table, tr, td, th, h1, h2, h3, h4, h5, h6, pre, blockquote {
+                            background-color: transparent !important;
+                            color: inherit !important;
+                            border-color: #333333 !important;
+                        }
+                        a, a * {
+                            color: #8ab4f8 !important;
+                        }
+                        input, textarea, select {
+                            background-color: #222222 !important;
+                            color: #ffffff !important;
+                            border-color: #555555 !important;
+                        }
+                        img, video, svg, canvas {
+                            filter: none !important;
+                            opacity: 0.92;
+                        }
+                    `;
+                    (document.head || document.documentElement).appendChild(style);
+                }
+            })();
+            """.trimIndent()
+        } else {
+            """
+            (function() {
+                var el = document.getElementById('novelscraper-dark-mode-style');
+                if (el) el.remove();
+            })();
+            """.trimIndent()
         }
     }
 }

@@ -91,6 +91,14 @@ fun MainScreen(
         }
     }
 
+    // ダークモード切り替え時に即座にCSSと公式ダークニングを適用
+    LaunchedEffect(uiState.isDarkMode) {
+        webViewRef?.let { view ->
+            WebViewHelper.applyDarkMode(view, uiState.isDarkMode)
+            view.evaluateJavascript(WebViewHelper.buildDarkModeJs(uiState.isDarkMode), null)
+        }
+    }
+
     Scaffold(
         topBar = {
             HeaderToolbar(
@@ -149,6 +157,8 @@ fun MainScreen(
                                         viewModel.setCurrentUrl(url)
                                         viewModel.setInputUrl(url)
                                     }
+                                    // ページ読み込み完了時にダークモードを確実に注入
+                                    view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(uiState.isDarkMode), null)
                                 }
                             }
                             webViewRef = this

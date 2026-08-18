@@ -39,7 +39,6 @@ class PreferencesRepository(private val context: Context) {
         val FAVORITES = stringPreferencesKey("favorites_json_v2")
         val HISTORY = stringPreferencesKey("history_json_v2")
         val SETUP_DONE = stringPreferencesKey("is_setup_done")
-        val DARK_MODE = stringPreferencesKey("is_dark_mode")
     }
 
     private val json = Json {
@@ -61,14 +60,6 @@ class PreferencesRepository(private val context: Context) {
         val jsonStr = preferences[PreferencesKeys.HISTORY] ?: "{}"
         try { json.decodeFromString<Map<String, HistoryItem>>(jsonStr) } catch (e: Exception) { emptyMap() }
     }.flowOn(Dispatchers.IO)
-
-    val darkModeFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
-        preferences[PreferencesKeys.DARK_MODE]?.toBoolean() ?: false
-    }.flowOn(Dispatchers.IO)
-
-    suspend fun saveDarkMode(enabled: Boolean) = withContext(Dispatchers.IO) {
-        context.dataStore.edit { it[PreferencesKeys.DARK_MODE] = enabled.toString() }
-    }
 
     suspend fun savePresets(presets: Map<String, ScraperConfig>) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences -> preferences[PreferencesKeys.PRESETS] = json.encodeToString(presets) }

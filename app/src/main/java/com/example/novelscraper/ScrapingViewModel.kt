@@ -58,7 +58,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { repository.presetsFlow.collect { _presets.value = it } }
         viewModelScope.launch { repository.favoritesFlow.collect { _favorites.value = it } }
         viewModelScope.launch { repository.historyFlow.collect { _history.value = it } }
-        viewModelScope.launch { repository.darkModeFlow.collect { dark -> _uiState.update { it.copy(isDarkMode = dark) } } }
 
         viewModelScope.launch {
             repository.setupDoneFlow.collect { done ->
@@ -157,11 +156,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     fun toggleInspectMode() { _uiState.update { it.copy(isInspectMode = !it.isInspectMode) } }
     fun toggleBlockImages() { _uiState.update { it.copy(blockImages = !it.blockImages) } }
     fun toggleDesktopMode() { _uiState.update { it.copy(isDesktopMode = !it.isDesktopMode) } }
-    fun toggleDarkMode() {
-        val next = !_uiState.value.isDarkMode
-        _uiState.update { it.copy(isDarkMode = next) }
-        viewModelScope.launch { repository.saveDarkMode(next) }
-    }
     fun setActiveHistoryTab(tab: Int) { _uiState.update { it.copy(activeHistoryTab = tab) } }
     fun applyPresetState(name: String, config: ScraperConfig) { _uiState.update { it.copy(currentPresetName = name, currentConfig = config) } }
     fun updateCurrentConfig(updater: (ScraperConfig) -> ScraperConfig) { _uiState.update { it.copy(currentConfig = updater(it.currentConfig)) } }

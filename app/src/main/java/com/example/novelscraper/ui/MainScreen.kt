@@ -92,11 +92,9 @@ fun MainScreen(
         }
     }
 
-    // ダークモード状態変更時のみ的確に1度だけWebViewへ適用（重複実行を完全排除）
+    // ダークモード切り替え時に即座にCSSを反映
     LaunchedEffect(uiState.isDarkMode) {
-        webViewRef?.let { view ->
-            WebViewHelper.applyDarkMode(view, uiState.isDarkMode)
-        }
+        webViewRef?.evaluateJavascript(WebViewHelper.buildDarkModeJs(uiState.isDarkMode), null)
     }
 
     Scaffold(
@@ -143,20 +141,27 @@ fun MainScreen(
         }
 
         // ルートの imePadding() を排除（WebViewのリフロー防止。必要なパネル内部にのみ局所適用）
-        Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
+        Box(modifier = Modifier.fillMaxSize().padding(paddingValues).background(Color(0xFF121212))) {
             // 背景レイヤー: WebView & ステータスバー
             Column(modifier = Modifier.fillMaxSize()) {
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx.applicationContext).apply {
                             WebViewHelper.applyStandardSettings(this, !uiState.blockImages, uiState.isDesktopMode)
-                            WebViewHelper.applyDarkMode(this, uiState.isDarkMode)
                             webViewClient = object : WebViewClient() {
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                    // ページ読み込み開始直後の0msで先行注入（白チラつき完全根絶）
+                                    // 読み込み開始時：白画面の露出を防止するため一時的に透明化
+                                    if (uiState.isDarkMode) {
+                                        view?.alpha = 0f
+                                    }
+                                }
+
+                                override fun onPageCommitVisible(view: WebView?, url: String?) {
+                                    // Android公式ライフサイクル：DOM初回描画の瞬間にダークCSSを注入して表示
                                     if (uiState.isDarkMode) {
                                         view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(true), null)
                                     }
+                                    view?.alpha = 1f
                                 }
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -167,6 +172,7 @@ fun MainScreen(
                                     if (uiState.isDarkMode) {
                                         view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(true), null)
                                     }
+                                    view?.alpha = 1f
                                 }
                             }
                             webViewRef = this

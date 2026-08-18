@@ -1,33 +1,35 @@
-# 引き継ぎ状況 - 最終更新: 2026-08-18 (手動操作再現仕様の不変ルール化 & ドキュメント確定)
+# 引き継ぎ状況 - 最終更新: 2026-08-19 (UIフルオーバーホール完了)
 
 ## 現在の状態
-- **翻訳品質:** 手動貼り付けの完全再現イベントシーケンス（`ClipboardEvent('paste')` + `InputEvent('insertFromPaste')`）により、Google翻訳に「プログラム入力」と誤認されず、ユーザー手動時と100%同一の最高品質を維持。
-- **バックグラウンド実行:** `TranslationTask` 内部で `WebView(context.applicationContext)` を生成する「独立バックグラウンドWebView」方式により、ホーム画面に戻っても他アプリを使用しても一切停止せずに翻訳が継続。
-- **不変ルール化:**
-  - `AGENTS.md` に「第7項: Google翻訳における手動操作再現ロジックの死守」を追加。
-  - `docs/translation_specification.md` に詳細仕様書を作成。
-- **ビルド・テスト:** `assembleDebug` および単体テスト全件（10/10）がすべて正常にパスすることを確認済み。
+- **UIパフォーマンス:** 履歴スクロールのカクつき、設定画面の表示遅延、キーボード開閉時の画面フリーズを根本解消するUIフルオーバーホールを完了。
+- **検証:** `assembleDebug` および単体テスト全件（10/10）がすべて正常にパスすることを確認済み。
 
-## 確定したアーキテクチャ・仕様
+## 今回のオーバーホール内容
 
-### 1. 手動貼り付け完全再現（TranslationTask.kt - JS_INPUT_TEMPLATE）
-```javascript
-ta.focus();
-ta.select();
-var dt = new DataTransfer();
-dt.setData('text/plain', %s);
-ta.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
-if (!ta.value || ta.value.trim().length === 0) ta.value = %s;
-ta.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: %s }));
-ta.dispatchEvent(new Event('change', { bubbles: true }));
-```
+### 1. 履歴・タスク一覧の最適化 (`HistoryPanel.kt`)
+- `remember(history)` による事前ソートキャッシュ（描画フレーム毎の全件ソート完全排除）。
+- `LazyColumn` に `key = { it.first }` と `contentType = { "history_item" }` を適用し、セル再利用（Recycling）を有効化。
+- アイテム行コンポーネントを独立させ、スクロール時の不要なリコンポジションを遮断。
 
-### 2. 独立バックグラウンドWebView（TranslationTask.kt）
-- `ScrapingTask` と同様に `WebView(context.applicationContext)` で独立インスタンスを生成。
-- 画面のCompose/Activityライフサイクル（UI非表示時のサスペンド）から完全に分離。
-- 最初の1回だけ `translate.google.com` をロードし、以降は同一ページ上で高速に連続翻訳（ページ再読込なし）。
+### 2. ブックマーク一覧の最適化 (`FavoritesPanel.kt`)
+- `remember(favorites)` によるソートメモ化と、`key` & `contentType` 指定。
 
-## ドキュメント構成
-- [`AGENTS.md`](file:///c:/Users/asan6/OneDrive/ドキュメント/android%20studio/NovelScraper2/AGENTS.md) : 不変の絶対遵守ルール
-- [`docs/translation_specification.md`](file:///c:/Users/asan6/OneDrive/ドキュメント/android%20studio/NovelScraper2/docs/translation_specification.md) : Google翻訳機能の詳細仕様書
-- [`docs/handoff.md`](file:///c:/Users/asan6/OneDrive/ドキュメント/android%20studio/NovelScraper2/docs/handoff.md) : 開発引き継ぎ記録
+### 3. 設定パネルの構造刷新＆超軽量化 (`SettingsPanel.kt`)
+- 固定12項目のフォームに対して `LazyColumn` を廃止し、`Column + verticalScroll` に移行（スクロール時の破棄・再生成を排除）。
+- 重い `OutlinedTextField` を廃止し、超軽量な `BasicTextField + クリーン枠線` に刷新。
+- ローカルStateバッファリング & `DisposableEffect` 自動同期により、文字入力時の再描画を入力枠内に完全局所化（データ損失ゼロ）。
+- 3セクション・カード型グルーピングで視認性と操作性を向上。
+- パネル内部に `imePadding()` を局所適用。
+
+### 4. ヘッダーURLバーの独立化 (`HeaderToolbar.kt`)
+- `UrlSearchBar` を独立コンポーネント化し、URL入力時の他ボタン（全10個）への不要なリコンポジションを遮断。
+
+### 5. メイン画面のGPU負荷・リフロー解消 (`MainScreen.kt`)
+- ルートの `imePadding()` を削除し、キーボード開閉時にWebViewがリサイズされWebページのリフローが発生する問題を根本解決。
+- `AndroidView(WebView)` に `graphicsLayer { clip = true }` を適用し、描画パイプラインをハードウェア的に分離。
+- `AnimatedVisibility(fadeIn/fadeOut)` の透過フェードを廃止し、完全不透明なパネルとして0msで即座に展開。
+
+## 検証結果
+- **`assembleDebug`**: BUILD SUCCESSFUL (36 actionable tasks)
+- **単体テスト**: 10 tests - 全件 PASS
+- **既存機能の完全維持**: 自動プリセット、スクレイピング、手動再現翻訳ロジックを100%継承

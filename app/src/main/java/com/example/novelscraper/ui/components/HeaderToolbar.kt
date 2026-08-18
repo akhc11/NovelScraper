@@ -47,8 +47,6 @@ fun HeaderToolbar(
     onToggleImagesClick: () -> Unit = {},
     isDesktopMode: Boolean = false
 ) {
-    val focusManager = LocalFocusManager.current
-
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -56,7 +54,7 @@ fun HeaderToolbar(
             .statusBarsPadding()
             .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
-        // Row 1: URLバー
+        // Row 1: ナビゲーション & URLバー & お気に入り
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -68,55 +66,13 @@ fun HeaderToolbar(
                 Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Forward", tint = AppColors.textPrimary, modifier = Modifier.size(20.dp))
             }
 
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(38.dp)
-                    .padding(horizontal = 4.dp)
-                    .background(AppColors.surfaceDark, RoundedCornerShape(4.dp))
-                    .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
-                    .padding(horizontal = 10.dp),
-                contentAlignment = Alignment.CenterStart
-            ) {
-                BasicTextField(
-                    value = uiState.inputUrl,
-                    onValueChange = onUrlChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    textStyle = TextStyle(
-                        color = AppColors.textPrimary,
-                        fontSize = 14.sp,
-                        lineHeight = 14.sp
-                    ),
-                    cursorBrush = SolidColor(AppColors.accentTealLight),
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                    keyboardActions = KeyboardActions(onGo = {
-                        onUrlSubmit(uiState.inputUrl)
-                        focusManager.clearFocus()
-                    }),
-                    decorationBox = { innerTextField ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxHeight()
-                        ) {
-                            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                                if (uiState.inputUrl.isEmpty()) {
-                                    Text("URLまたは検索", color = AppColors.textTertiary, fontSize = 12.sp)
-                                }
-                                innerTextField()
-                            }
-                            if (uiState.inputUrl.isNotEmpty()) {
-                                IconButton(
-                                    onClick = { onUrlChange("") },
-                                    modifier = Modifier.size(24.dp)
-                                ) {
-                                    Icon(Icons.Filled.Clear, contentDescription = "Clear", tint = AppColors.textTertiary, modifier = Modifier.size(16.dp))
-                                }
-                            }
-                        }
-                    }
-                )
-            }
+            // 独立したURL入力バー（入力中の他ボタンへのリコンポジション伝播を完全遮断）
+            UrlSearchBar(
+                inputUrl = uiState.inputUrl,
+                onUrlChange = onUrlChange,
+                onUrlSubmit = onUrlSubmit,
+                modifier = Modifier.weight(1f)
+            )
 
             IconButton(onClick = onStarClick, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Filled.Star, contentDescription = "Favorite", tint = AppColors.accentYellow, modifier = Modifier.size(20.dp))
@@ -125,7 +81,7 @@ fun HeaderToolbar(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Row 2: ツールバー
+        // Row 2: ツールボタン行
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -147,6 +103,65 @@ fun HeaderToolbar(
                 ToolButton(null, onToggleDesktopModeClick, isDesktopMode, AppColors.surfaceLight, text = "PC")
             }
         }
+    }
+}
+
+@Composable
+private fun UrlSearchBar(
+    inputUrl: String,
+    onUrlChange: (String) -> Unit,
+    onUrlSubmit: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val focusManager = LocalFocusManager.current
+
+    Box(
+        modifier = modifier
+            .height(38.dp)
+            .padding(horizontal = 4.dp)
+            .background(AppColors.surfaceDark, RoundedCornerShape(4.dp))
+            .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        BasicTextField(
+            value = inputUrl,
+            onValueChange = onUrlChange,
+            modifier = Modifier.fillMaxWidth(),
+            textStyle = TextStyle(
+                color = AppColors.textPrimary,
+                fontSize = 14.sp,
+                lineHeight = 14.sp
+            ),
+            cursorBrush = SolidColor(AppColors.accentTealLight),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+            keyboardActions = KeyboardActions(onGo = {
+                onUrlSubmit(inputUrl)
+                focusManager.clearFocus()
+            }),
+            decorationBox = { innerTextField ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxHeight()
+                ) {
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        if (inputUrl.isEmpty()) {
+                            Text("URLまたは検索", color = AppColors.textTertiary, fontSize = 12.sp)
+                        }
+                        innerTextField()
+                    }
+                    if (inputUrl.isNotEmpty()) {
+                        IconButton(
+                            onClick = { onUrlChange("") },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(Icons.Filled.Clear, contentDescription = "Clear", tint = AppColors.textTertiary, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+        )
     }
 }
 

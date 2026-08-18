@@ -59,7 +59,6 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.datastore.preferences)
-    implementation(libs.androidx.webkit)
 
     // Compose
     val composeBom = platform(libs.androidx.compose.bom)
@@ -72,7 +71,7 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
-    implementation(libs.androidx.navigation.compose)
+    implementation(libs.navigation.compose)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     // Serialization

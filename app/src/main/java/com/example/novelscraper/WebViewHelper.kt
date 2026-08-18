@@ -66,7 +66,9 @@ object WebViewHelper {
     }
 
     /**
-     * Google検索結果や小説サイトなど、あらゆるWebサイトで100%確実に黒背景・白文字化を強制するスマートCSSスクリプト。
+     * Google/DarkReader標準のプロ仕様カラーパレット。
+     * カクヨムや小説家になろう等のグレー文字（日付・あらすじ・作者名）の黒背景同化を完全防止し、
+     * どんなWebサイトでも最高峰の可読性と目に優しいコントラストを提供する。
      */
     fun buildDarkModeJs(isDark: Boolean): String {
         return if (isDark) {
@@ -84,28 +86,40 @@ object WebViewHelper {
                             --color-background: #121212 !important;
                             --color-on-surface: #e0e0e0 !important;
                         }
+                        /* 1. ベース背景と文字色 */
                         html, body, #main, #cnt, #rcnt, .srp, .g, #search, [role="main"], #center_col, #rso {
                             background-color: #121212 !important;
                             background: #121212 !important;
                             color: #e0e0e0 !important;
                         }
+                        /* 2. すべてのコンテナ・テキスト要素の背景を透明にし、文字を視認性の高いオフホワイトに統一（color: inheritによる黒同化を根絶） */
                         div, p, span, article, section, main, header, footer, nav, aside,
                         ul, ol, li, table, tr, td, th, h1, h2, h3, h4, h5, h6, pre, blockquote, form {
                             background-color: transparent !important;
-                            color: inherit !important;
+                            color: #e0e0e0 !important;
                             border-color: #333333 !important;
                         }
-                        a, a * {
+                        /* 3. リンクカラー（Google/Chrome標準の視認性の高いライトブルー） */
+                        a, a *, a:visited {
                             color: #8ab4f8 !important;
                         }
+                        /* 4. 強調テキスト */
                         em, b, strong {
                             color: #ffffff !important;
                         }
+                        /* 5. カクヨム・小説サイト特有のグレー文字・日付・作者名・あらすじの同化防止 */
+                        [class*="gray"], [class*="Gray"], [class*="muted"], [class*="date"], 
+                        [class*="time"], [class*="meta"], [class*="author"], [class*="sub"], 
+                        [class*="info"], [class*="toc"], small, time {
+                            color: #a8adb4 !important;
+                        }
+                        /* 6. フォーム入力欄 */
                         input, textarea, select {
                             background-color: #222222 !important;
                             color: #ffffff !important;
-                            border-color: #555555 !important;
+                            border: 1px solid #555555 !important;
                         }
+                        /* 7. メディア */
                         img, video, svg, canvas {
                             filter: none !important;
                             opacity: 0.92;

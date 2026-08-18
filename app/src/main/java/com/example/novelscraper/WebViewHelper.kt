@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 
@@ -47,6 +48,12 @@ object WebViewHelper {
     @Suppress("DEPRECATION")
     fun applyDarkMode(webView: WebView, isDarkMode: Boolean) {
         try {
+            // アプリ全体のNightModeを更新してWebViewのprefers-color-scheme伝播を同期
+            val targetMode = if (isDarkMode) AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
+            if (AppCompatDelegate.getDefaultNightMode() != targetMode) {
+                AppCompatDelegate.setDefaultNightMode(targetMode)
+            }
+
             if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
                 WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, isDarkMode)
             } else if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
@@ -59,8 +66,7 @@ object WebViewHelper {
     }
 
     /**
-     * あらゆるWebサイトで100%確実に黒背景・白文字化を強制するスマートCSSスクリプト。
-     * 固定白背景を持つ小説サイトやブログでも即座に目に優しいダークテーマに変換する。
+     * Google検索結果や小説サイトなど、あらゆるWebサイトで100%確実に黒背景・白文字化を強制するスマートCSSスクリプト。
      */
     fun buildDarkModeJs(isDark: Boolean): String {
         return if (isDark) {
@@ -72,18 +78,28 @@ object WebViewHelper {
                     var style = document.createElement('style');
                     style.id = id;
                     style.textContent = `
-                        html, body {
+                        :root {
+                            color-scheme: dark !important;
+                            --color-surface: #121212 !important;
+                            --color-background: #121212 !important;
+                            --color-on-surface: #e0e0e0 !important;
+                        }
+                        html, body, #main, #cnt, #rcnt, .srp, .g, #search, [role="main"], #center_col, #rso {
                             background-color: #121212 !important;
+                            background: #121212 !important;
                             color: #e0e0e0 !important;
                         }
                         div, p, span, article, section, main, header, footer, nav, aside,
-                        ul, ol, li, table, tr, td, th, h1, h2, h3, h4, h5, h6, pre, blockquote {
+                        ul, ol, li, table, tr, td, th, h1, h2, h3, h4, h5, h6, pre, blockquote, form {
                             background-color: transparent !important;
                             color: inherit !important;
                             border-color: #333333 !important;
                         }
                         a, a * {
                             color: #8ab4f8 !important;
+                        }
+                        em, b, strong {
+                            color: #ffffff !important;
                         }
                         input, textarea, select {
                             background-color: #222222 !important;

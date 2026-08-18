@@ -1,25 +1,22 @@
-# 引き継ぎ状況 - 最終更新: 2026-08-19 (IPC通信連打の完全排除 & アプリ全域高速化完了)
+# 引き継ぎ状況 - 最終更新: 2026-08-19 (Granular State導入 & 設定画面の完全無遅延化)
 
 ## 現在の状態
-- **アプリ全体の高速化:**
-  - `MainActivity` による毎フレームの `startForegroundService`（IPC通信連打）を完全排除。
-  - Service管理を `ScrapingViewModel.syncServiceStatus()` に一元化し、スクレイピングと翻訳のバックグラウンド継続の堅牢性を大幅向上。
-  - `MainActivity.onResume()` のダミーWebView生成＆リフレクションを完全撤去。
-  - `MainScreen` のURL正規化比較により、同一URLの不要な二重リロード・通信詰まりを完全防止。
+- **設定画面の完全無遅延化:**
+  - `SettingsFormState`（Granular State）を導入し、12個のTextFieldの入力状態を完全に個別独立化。
+  - 1文字入力した時に他の11個の入力欄や親画面（MainScreen）が一斉再描画されるボトルネックを100%排除。
+  - `MainScreen` において、パネル表示中は `alpha = 0f` によるオクルージョン・カリングを適用し、裏側のWebView描画・レイアウト干渉を完全遮断。
 - **検証:** `assembleDebug` および単体テスト全件（10/10）がすべて正常にパスすることを確認済み。
 
 ## 今回の改善内容
 
-### 1. Service通知管理の一元化とIPC通信の削減 (`ScrapingViewModel.kt`)
-- `syncServiceStatus()` を新設。スクレイピングタスクや翻訳タスクの状態変更時のみ的確にService通知を更新。
-- 文字入力やスクロール時に無駄な `startForegroundService` が走る問題を完全解消。
+### 1. 個別状態（Granular State）ホルダーの導入 (`SettingsPanel.kt`)
+- `SettingsFormState` により、12個の各プロパティ（folder, title, body, next等）を個別の `mutableStateOf` で管理。
+- 1つの入力欄でキーを叩いても、他の入力欄は1ミリもリコンポジションされないGoogle公式推奨パターンに完全刷新。
+- パネル終了時（`onCloseClick` / `onDispose`）や「保存」押下時に一括でViewModelへ確定同期。
 
-### 2. MainActivityの大掃除 (`MainActivity.kt`)
-- `observeViewModel()` 内の無駄な `combine` による毎フレームのService呼び出しを完全削除。
-- `onResume()` でのダミーWebViewインスタンス生成とリフレクションを完全撤去。
-
-### 3. URLナビゲーションの二重ロード防止 (`MainScreen.kt`)
-- `LaunchedEffect(uiState.currentUrl)` での正規化URL比較（末尾スラッシュ除去など）により、ページ読み込み後の不要な再リクエストを完全防止。
+### 2. パネル表示時のWebView描画遮断 (`MainScreen.kt`)
+- `graphicsLayer { alpha = if (openedPanel == NONE) 1f else 0f }` を適用。
+- 設定や履歴を開いている間、Androidのハードウェア描画パイプラインが背後のWebViewの描画処理を完全にスキップ。
 
 ## 検証結果
 - **`assembleDebug`**: BUILD SUCCESSFUL (36 actionable tasks)

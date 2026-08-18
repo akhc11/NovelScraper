@@ -163,7 +163,11 @@ fun MainScreen(
                     },
                     modifier = Modifier
                         .weight(1f)
-                        .graphicsLayer { clip = true } // レイヤークリップ分離によりCompose描画ツリーとの干渉を遮断
+                        .graphicsLayer {
+                            clip = true
+                            // パネル表示中はGPU描画コマンドの発行を完全スキップ（オクルージョン・カリング）
+                            alpha = if (uiState.openedPanel == PanelType.NONE) 1f else 0f
+                        }
                 )
 
                 Text(
@@ -185,7 +189,7 @@ fun MainScreen(
                         onPresetSelected = { name, config -> viewModel.applyPresetState(name, config) },
                         onSavePresetClick = { onShowSavePreset() },
                         onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
-                        onConfigChange = { updater -> viewModel.updateCurrentConfig { updater } },
+                        onConfigChange = { newConfig -> viewModel.updateCurrentConfig { newConfig } },
                         onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
                         onExportPresetsClick = { exportLauncher.launch("novel_scraper_presets.json") }
                     )

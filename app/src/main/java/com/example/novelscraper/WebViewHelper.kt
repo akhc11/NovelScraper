@@ -1,9 +1,11 @@
-﻿package com.example.novelscraper
+package com.example.novelscraper
 
 import android.annotation.SuppressLint
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 
 object WebViewHelper {
     
@@ -35,6 +37,23 @@ object WebViewHelper {
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(webView, true)
+        }
+    }
+
+    /**
+     * Android公式仕様（API 33〜35標準 Algorithmic Darkening / API 29〜32 Force Dark）に準拠した
+     * WebViewダークモード適用ロジック。Chromiumエンジンネイティブで最速・最高画質で黒化する。
+     */
+    fun applyDarkMode(webView: WebView, isDarkMode: Boolean) {
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, isDarkMode)
+            } else if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+                val forceDarkOption = if (isDarkMode) WebSettingsCompat.FORCE_DARK_ON else WebSettingsCompat.FORCE_DARK_OFF
+                WebSettingsCompat.setForceDark(webView.settings, forceDarkOption)
+            }
+        } catch (_: Exception) {
+            // 一部端末での互換性例外防止
         }
     }
 }

@@ -111,10 +111,12 @@ fun MainScreen(
                 },
                 onInspectToolClick = { webViewRef?.let { onLaunchAnalysisTool(it) } },
                 onToggleDesktopModeClick = { viewModel.toggleDesktopMode() },
+                onToggleDarkModeClick = { viewModel.toggleDarkMode() },
                 onStartScrapingClick = { onStartScraping(webViewRef?.url ?: uiState.inputUrl) },
                 onTestRunClick = { webViewRef?.let { onTestRun(it) } },
                 onToggleImagesClick = { viewModel.toggleBlockImages() },
-                isDesktopMode = uiState.isDesktopMode
+                isDesktopMode = uiState.isDesktopMode,
+                isDarkMode = uiState.isDarkMode
             )
         },
         containerColor = Color.Black
@@ -140,6 +142,7 @@ fun MainScreen(
                     factory = { ctx ->
                         WebView(ctx.applicationContext).apply {
                             WebViewHelper.applyStandardSettings(this, !uiState.blockImages, uiState.isDesktopMode)
+                            WebViewHelper.applyDarkMode(this, uiState.isDarkMode)
                             webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     if (url != null && !url.startsWith("javascript:") && !url.startsWith("data:")) {
@@ -160,6 +163,7 @@ fun MainScreen(
                             view.settings.userAgentString = targetUA
                             view.reload()
                         }
+                        WebViewHelper.applyDarkMode(view, uiState.isDarkMode)
                     },
                     modifier = Modifier
                         .weight(1f)

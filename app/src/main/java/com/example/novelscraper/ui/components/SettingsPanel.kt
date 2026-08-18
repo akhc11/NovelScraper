@@ -24,6 +24,58 @@ import com.example.novelscraper.MainUiState
 import com.example.novelscraper.ScraperConfig
 import com.example.novelscraper.ui.theme.AppColors
 
+/**
+ * 12個の入力欄の個別の状態（Granular State）を保持するホルダークラス。
+ * 1つのフィールドに入力しても、他の11個のTextFieldは一切リコンポジションされない。
+ */
+@Stable
+class SettingsFormState(initialConfig: ScraperConfig) {
+    var folder by mutableStateOf(initialConfig.folder)
+    var regex by mutableStateOf(initialConfig.regex)
+    var folderLink by mutableStateOf(initialConfig.folderLink)
+    var title by mutableStateOf(initialConfig.title)
+    var fileRegex by mutableStateOf(initialConfig.fileRegex)
+    var chapter by mutableStateOf(initialConfig.chapter)
+    var chapterRegex by mutableStateOf(initialConfig.chapterRegex)
+    var body by mutableStateOf(initialConfig.body)
+    var next by mutableStateOf(initialConfig.next)
+    var endCheck by mutableStateOf(initialConfig.endCheck)
+    var delay by mutableStateOf(initialConfig.delay)
+    var autoUrl by mutableStateOf(initialConfig.autoUrl)
+
+    fun updateAll(config: ScraperConfig) {
+        folder = config.folder
+        regex = config.regex
+        folderLink = config.folderLink
+        title = config.title
+        fileRegex = config.fileRegex
+        chapter = config.chapter
+        chapterRegex = config.chapterRegex
+        body = config.body
+        next = config.next
+        endCheck = config.endCheck
+        delay = config.delay
+        autoUrl = config.autoUrl
+    }
+
+    fun toConfig(): ScraperConfig {
+        return ScraperConfig(
+            folder = folder,
+            regex = regex,
+            folderLink = folderLink,
+            title = title,
+            fileRegex = fileRegex,
+            chapter = chapter,
+            chapterRegex = chapterRegex,
+            body = body,
+            next = next,
+            endCheck = endCheck,
+            delay = delay,
+            autoUrl = autoUrl
+        )
+    }
+}
+
 @Composable
 fun SettingsPanel(
     uiState: MainUiState,
@@ -40,13 +92,18 @@ fun SettingsPanel(
     var dropdownExpanded by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
 
-    // 【超高速化】文字入力時の画面全体リコンポジションを防ぐローカルバッファ
-    var localConfig by remember(uiState.currentConfig) { mutableStateOf(uiState.currentConfig) }
+    // 【Google公式ベストプラクティス】各入力欄を個別にState化（1文字入力での他項目一斉再描画を100%防止）
+    val formState = remember { SettingsFormState(uiState.currentConfig) }
 
-    // パネルが閉じた時（またはアンマウント時）に最新のlocalConfigを確実にViewModelへ同期
+    // uiState.currentConfig が外部から変更された場合（プリセット自動適用など）のみフォーム全体を同期
+    LaunchedEffect(uiState.currentConfig) {
+        formState.updateAll(uiState.currentConfig)
+    }
+
+    // パネルが閉じた時（アンマウント時）に最新の入力値を確実にViewModelへ一括同期
     DisposableEffect(Unit) {
         onDispose {
-            onConfigChange(localConfig)
+            onConfigChange(formState.toConfig())
         }
     }
 
@@ -60,7 +117,7 @@ fun SettingsPanel(
         modifier = modifier
             .fillMaxSize()
             .background(AppColors.backgroundDarkest)
-            .imePadding() // キーボード表示時に設定欄だけを綺麗に押し上げる（WebViewには影響なし）
+            .imePadding()
             .padding(horizontal = 14.dp)
             .verticalScroll(scrollState)
     ) {
@@ -88,7 +145,7 @@ fun SettingsPanel(
             }
             Button(
                 onClick = {
-                    onConfigChange(localConfig)
+                    onConfigChange(formState.toConfig())
                     onCloseClick()
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceLight),
@@ -129,7 +186,7 @@ fun SettingsPanel(
                         text = { Text(name, color = AppColors.textPrimary) },
                         onClick = {
                             presets[name]?.let { selectedConfig ->
-                                localConfig = selectedConfig
+                                formState.updateAll(selectedConfig)
                                 onPresetSelected(name, selectedConfig)
                             }
                             dropdownExpanded = false
@@ -143,7 +200,7 @@ fun SettingsPanel(
         Row(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
             Button(
                 onClick = {
-                    onConfigChange(localConfig)
+                    onConfigChange(formState.toConfig())
                     onSavePresetClick()
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.neutralButton),
@@ -174,66 +231,30 @@ fun SettingsPanel(
 
         // セクション1: 基本情報
         SettingsCard(title = "作品・章の識別設定") {
-            ConfigInputField("作品名 Selector", localConfig.folder) {
-                localConfig = localConfig.copy(folder = it)
-                onConfigChange(localConfig)
-            }
-            ConfigInputField("作品名 Regex", localConfig.regex) {
-                localConfig = localConfig.copy(regex = it)
-                onConfigChange(localConfig)
-            }
-            ConfigInputField("別URL取得 Selector", localConfig.folderLink) {
-                localConfig = localConfig.copy(folderLink = it)
-                onConfigChange(localConfig)
-            }
-            ConfigInputField("タイトル Selector", localConfig.title) {
-                localConfig = localConfig.copy(title = it)
-                onConfigChange(localConfig)
-            }
-            ConfigInputField("タイトル Regex", localConfig.fileRegex) {
-                localConfig = localConfig.copy(fileRegex = it)
-                onConfigChange(localConfig)
-            }
-            ConfigInputField("チャプター番号 Selector", localConfig.chapter) {
-                localConfig = localConfig.copy(chapter = it)
-                onConfigChange(localConfig)
-            }
-            ConfigInputField("チャプター番号 Regex", localConfig.chapterRegex) {
-                localConfig = localConfig.copy(chapterRegex = it)
-                onConfigChange(localConfig)
-            }
+            ConfigInputField("作品名 Selector", formState.folder) { formState.folder = it }
+            ConfigInputField("作品名 Regex", formState.regex) { formState.regex = it }
+            ConfigInputField("別URL取得 Selector", formState.folderLink) { formState.folderLink = it }
+            ConfigInputField("タイトル Selector", formState.title) { formState.title = it }
+            ConfigInputField("タイトル Regex", formState.fileRegex) { formState.fileRegex = it }
+            ConfigInputField("チャプター番号 Selector", formState.chapter) { formState.chapter = it }
+            ConfigInputField("チャプター番号 Regex", formState.chapterRegex) { formState.chapterRegex = it }
         }
 
         Spacer(modifier = Modifier.height(10.dp))
 
         // セクション2: 本文・巡回設定
         SettingsCard(title = "本文・ページ巡回設定") {
-            ConfigInputField("本文 Selector", localConfig.body) {
-                localConfig = localConfig.copy(body = it)
-                onConfigChange(localConfig)
-            }
-            ConfigInputField("次ページ Selector", localConfig.next) {
-                localConfig = localConfig.copy(next = it)
-                onConfigChange(localConfig)
-            }
-            ConfigInputField("終了検知 Regex", localConfig.endCheck) {
-                localConfig = localConfig.copy(endCheck = it)
-                onConfigChange(localConfig)
-            }
+            ConfigInputField("本文 Selector", formState.body) { formState.body = it }
+            ConfigInputField("次ページ Selector", formState.next) { formState.next = it }
+            ConfigInputField("終了検知 Regex", formState.endCheck) { formState.endCheck = it }
         }
 
         Spacer(modifier = Modifier.height(10.dp))
 
         // セクション3: 動作設定
         SettingsCard(title = "動作・自動適用設定") {
-            ConfigInputField("待機時間(秒)", localConfig.delay) {
-                localConfig = localConfig.copy(delay = it)
-                onConfigChange(localConfig)
-            }
-            ConfigInputField("自動適用URL (ドメイン)", localConfig.autoUrl) {
-                localConfig = localConfig.copy(autoUrl = it)
-                onConfigChange(localConfig)
-            }
+            ConfigInputField("待機時間(秒)", formState.delay) { formState.delay = it }
+            ConfigInputField("自動適用URL (ドメイン)", formState.autoUrl) { formState.autoUrl = it }
         }
 
         Spacer(modifier = Modifier.height(80.dp))
@@ -263,9 +284,8 @@ private fun SettingsCard(
 }
 
 /**
- * 超軽量・高レスポンスな設定入力欄。
- * OutlinedTextFieldの重厚なマテリアルアニメーション計算を排除し、
- * 最低限のレイアウトパスで高速にキー入力を受け付ける。
+ * 完全に独立した超軽量テキスト入力欄。
+ * この入力欄で文字を打っても、他の入力欄や親パネルは一切リコンポジションされない。
  */
 @Composable
 private fun ConfigInputField(

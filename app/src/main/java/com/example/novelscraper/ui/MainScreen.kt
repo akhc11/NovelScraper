@@ -1,6 +1,7 @@
 package com.example.novelscraper.ui
 
 import android.content.Intent
+import android.graphics.Bitmap
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -91,11 +92,10 @@ fun MainScreen(
         }
     }
 
-    // ダークモード切り替え時に即座にCSSと公式ダークニングを適用
+    // ダークモード切り替え時に即座にCSSと背景色を適用
     LaunchedEffect(uiState.isDarkMode) {
         webViewRef?.let { view ->
             WebViewHelper.applyDarkMode(view, uiState.isDarkMode)
-            view.evaluateJavascript(WebViewHelper.buildDarkModeJs(uiState.isDarkMode), null)
         }
     }
 
@@ -152,12 +152,16 @@ fun MainScreen(
                             WebViewHelper.applyStandardSettings(this, !uiState.blockImages, uiState.isDesktopMode)
                             WebViewHelper.applyDarkMode(this, uiState.isDarkMode)
                             webViewClient = object : WebViewClient() {
+                                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                    // ページ読み込み開始直後の0msで先行注入（白チラつき完全根絶）
+                                    view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(uiState.isDarkMode), null)
+                                }
+
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     if (url != null && !url.startsWith("javascript:") && !url.startsWith("data:")) {
                                         viewModel.setCurrentUrl(url)
                                         viewModel.setInputUrl(url)
                                     }
-                                    // ページ読み込み完了時にダークモードを確実に注入
                                     view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(uiState.isDarkMode), null)
                                 }
                             }

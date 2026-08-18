@@ -66,9 +66,10 @@ object WebViewHelper {
     }
 
     /**
-     * Google/DarkReader標準のプロ仕様カラーパレット。
-     * カクヨムや小説家になろう等のグレー文字（日付・あらすじ・作者名）の黒背景同化を完全防止し、
-     * どんなWebサイトでも最高峰の可読性と目に優しいコントラストを提供する。
+     * Google/DarkReader標準のプロ仕様ダークモードCSS。
+     * - カクヨム等の上下バーを不透明サーフェス（#1e1e1e）化して文字透けを解消
+     * - Google検索のタブ下白線をダーク境界線（#333333）化
+     * - テキストコントラストを最高峰に維持
      */
     fun buildDarkModeJs(isDark: Boolean): String {
         return if (isDark) {
@@ -86,40 +87,60 @@ object WebViewHelper {
                             --color-background: #121212 !important;
                             --color-on-surface: #e0e0e0 !important;
                         }
-                        /* 1. ベース背景と文字色 */
+                        /* 1. ページ全体のベース背景と文字色 */
                         html, body, #main, #cnt, #rcnt, .srp, .g, #search, [role="main"], #center_col, #rso {
                             background-color: #121212 !important;
                             background: #121212 !important;
                             color: #e0e0e0 !important;
                         }
-                        /* 2. すべてのコンテナ・テキスト要素の背景を透明にし、文字を視認性の高いオフホワイトに統一（color: inheritによる黒同化を根絶） */
-                        div, p, span, article, section, main, header, footer, nav, aside,
-                        ul, ol, li, table, tr, td, th, h1, h2, h3, h4, h5, h6, pre, blockquote, form {
+                        /* 2. 本文・記事コンテンツ要素（背景透明・文字オフホワイト） */
+                        article, section, main, p, span, pre, blockquote, ul, ol, li, table, tr, td, th, h1, h2, h3, h4, h5, h6 {
+                            color: #e0e0e0 !important;
+                        }
+                        div:not([class*="header"]):not([class*="footer"]):not([class*="nav"]):not([class*="bar"]):not([class*="menu"]):not([class*="fixed"]):not([class*="sticky"]) {
                             background-color: transparent !important;
+                        }
+                        /* 3. 【文字透け防止】カクヨム・なろう・Webサイトの上下固定バー・ヘッダー・フッター・ナビ・メニュー（不透明サーフェス化） */
+                        header, footer, nav, aside, menu, dialog,
+                        [role="banner"], [role="navigation"], [role="tablist"],
+                        [class*="header"], [class*="footer"], [class*="nav"], 
+                        [class*="bar"], [class*="toolbar"], [class*="menu"], 
+                        [class*="fixed"], [class*="sticky"], [class*="dropdown"], [class*="popup"], [class*="modal"] {
+                            background-color: #1e1e1e !important;
+                            background: #1e1e1e !important;
                             color: #e0e0e0 !important;
                             border-color: #333333 !important;
                         }
-                        /* 3. リンクカラー（Google/Chrome標準の視認性の高いライトブルー） */
+                        /* 4. 【白線・白枠除去】すべての境界線・区切り線・Google検索タブ下横線をシックなダークグレーに統一 */
+                        *, *::before, *::after {
+                            border-color: #333333 !important;
+                            box-shadow: none !important;
+                        }
+                        hr, [role="separator"], div[class*="divider"], div[class*="separator"], div[class*="border"], div[class*="line"] {
+                            background-color: #333333 !important;
+                            border-color: #333333 !important;
+                        }
+                        /* 5. リンクカラー（Google/Chrome標準の明るく見やすいライトブルー） */
                         a, a *, a:visited {
                             color: #8ab4f8 !important;
                         }
-                        /* 4. 強調テキスト */
+                        /* 6. 強調テキスト */
                         em, b, strong {
                             color: #ffffff !important;
                         }
-                        /* 5. カクヨム・小説サイト特有のグレー文字・日付・作者名・あらすじの同化防止 */
+                        /* 7. 小説サイト・ブログのサブテキスト（グレー文字・日付・作者名等）の同化防止 */
                         [class*="gray"], [class*="Gray"], [class*="muted"], [class*="date"], 
                         [class*="time"], [class*="meta"], [class*="author"], [class*="sub"], 
                         [class*="info"], [class*="toc"], small, time {
                             color: #a8adb4 !important;
                         }
-                        /* 6. フォーム入力欄 */
+                        /* 8. フォーム入力欄 */
                         input, textarea, select {
                             background-color: #222222 !important;
                             color: #ffffff !important;
                             border: 1px solid #555555 !important;
                         }
-                        /* 7. メディア */
+                        /* 9. メディア */
                         img, video, svg, canvas {
                             filter: none !important;
                             opacity: 0.92;

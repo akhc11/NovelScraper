@@ -13,3 +13,8 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Graphify output
+graphify-out/
+
+graphify-out/

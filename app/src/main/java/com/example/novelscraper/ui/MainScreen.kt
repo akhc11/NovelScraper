@@ -1,11 +1,12 @@
 package com.example.novelscraper.ui
 
+import android.content.Intent
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -15,6 +16,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.*
 import com.example.novelscraper.ui.components.*
 import com.example.novelscraper.ui.theme.AppColors
@@ -41,6 +43,36 @@ fun MainScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        uri?.let { viewModel.exportPresets(it) }
+    }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { viewModel.importPresets(it) }
+    }
+
+    val folderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        uri?.let { treeUri ->
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                // セキュリティ例外等のハンドリング
+            }
+            val doc = DocumentFile.fromTreeUri(context, treeUri)
+            val folderName = doc?.name ?: treeUri.lastPathSegment ?: "選択フォルダ"
+            viewModel.setTranslationFolder(treeUri, folderName)
+        }
+    }
 
     BackHandler(enabled = uiState.openedPanel != PanelType.NONE || (webViewRef?.canGoBack() == true)) {
         if (uiState.openedPanel != PanelType.NONE) viewModel.closePanels()
@@ -82,11 +114,25 @@ fun MainScreen(
         },
         containerColor = Color.Black
     ) { paddingValues ->
+        DisposableEffect(Unit) {
+            onDispose {
+                webViewRef?.let { view ->
+                    (view.parent as? android.view.ViewGroup)?.removeView(view)
+                    view.stopLoading()
+                    view.webViewClient = android.webkit.WebViewClient()
+                    view.webChromeClient = null
+                    view.destroy()
+                }
+                webViewRef = null
+            }
+        }
+
         Box(modifier = Modifier.fillMaxSize().padding(paddingValues).imePadding()) {
             Column(modifier = Modifier.fillMaxSize()) {
                 AndroidView(
-                    factory = { context ->
-                        WebView(context).apply {
+                    factory = { ctx ->
+                        // バックグラウンド時にもActivityライフサイクル破棄・停止を受けないよう applicationContext で初期化
+                        WebView(ctx.applicationContext).apply {
                             WebViewHelper.applyStandardSettings(this, !uiState.blockImages, uiState.isDesktopMode)
                             webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -111,9 +157,9 @@ fun MainScreen(
                 )
 
                 Text(
-                    text = currentStatusText,
+                    text = if (uiState.isTranslating) "翻訳: ${uiState.translationStatusText}" else currentStatusText,
                     modifier = Modifier.fillMaxWidth().background(AppColors.backgroundMedium).padding(4.dp),
-                    color = AppColors.textMuted,
+                    color = if (uiState.isTranslating) AppColors.accentTealLight else AppColors.textMuted,
                     fontSize = 11.sp,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center
                 )
@@ -131,7 +177,9 @@ fun MainScreen(
                     onPresetSelected = { name, config -> viewModel.applyPresetState(name, config) },
                     onSavePresetClick = { onShowSavePreset() },
                     onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
-                    onConfigChange = { viewModel.updateCurrentConfig { _ -> it } }
+                    onConfigChange = { viewModel.updateCurrentConfig { _ -> it } },
+                    onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
+                    onExportPresetsClick = { exportLauncher.launch("novel_scraper_presets.json") }
                 )
             }
             
@@ -190,6 +238,29 @@ fun MainScreen(
                     onCloseClick = { viewModel.closePanels() }
                 )
             }
+
+            AnimatedVisibility(
+                visible = uiState.openedPanel == PanelType.TRANSLATION,
+                enter = androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.fadeOut(),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                TranslationPanel(
+                    uiState = uiState,
+                    onSelectFolderClick = { folderLauncher.launch(null) },
+                    onStartTranslationClick = { viewModel.startTranslation() },
+                    onStopTranslationClick = { viewModel.stopTranslation() },
+                    onOpenGoogleTranslateClick = {
+                        val gUrl = "https://translate.google.com/?sl=${uiState.translationSourceLang}&tl=${uiState.translationTargetLang}&op=translate"
+                        webViewRef?.let { onNavigate(gUrl, it) }
+                        viewModel.setCurrentUrl(gUrl)
+                        viewModel.setInputUrl(gUrl)
+                        viewModel.closePanels()
+                    },
+                    onCloseClick = { viewModel.closePanels() }
+                )
+            }
+
         }
     }
 }

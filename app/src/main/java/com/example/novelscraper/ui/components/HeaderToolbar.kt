@@ -134,6 +134,7 @@ fun HeaderToolbar(
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 ToolButton(Icons.AutoMirrored.Filled.List, { onPanelToggle(PanelType.HISTORY) }, uiState.openedPanel == PanelType.HISTORY)
                 ToolButton(Icons.Filled.Favorite, { onPanelToggle(PanelType.FAVORITES) }, uiState.openedPanel == PanelType.FAVORITES)
+                ToolButton(null, { onPanelToggle(PanelType.TRANSLATION) }, uiState.openedPanel == PanelType.TRANSLATION, text = "翻")
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

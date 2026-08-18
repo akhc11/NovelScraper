@@ -80,6 +80,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     private fun refreshStatus() {
         _activeTasks.value = taskList.toList()
         _currentStatusText.value = taskList.lastOrNull()?.status ?: if (taskList.isNotEmpty()) "実行中: ${taskList.size}件" else "待機中"
+        syncServiceStatus()
     }
 
     fun addTask(task: ScrapingTask) { taskList.add(task); refreshStatus() }
@@ -196,8 +197,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             )
         }
 
-        // バックグラウンド通知Serviceを即時起動
-        updateServiceNotification("翻訳タスクを開始中...")
+        syncServiceStatus()
 
         val task = TranslationTask(
             context = getApplication(),
@@ -221,12 +221,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                             translationStatusText = statusText
                         )
                     }
-                    val msg = if (totalFiles > 0) {
-                        "翻訳中: $completedFiles/$totalFiles 件 ($statusText)"
-                    } else {
-                        "翻訳中: $statusText"
-                    }
-                    updateServiceNotification(msg)
+                    syncServiceStatus()
                 }
 
                 override fun onFileTranslated(fileName: String, success: Boolean) {
@@ -242,19 +237,39 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                     }
                     Toast.makeText(getApplication(), message, Toast.LENGTH_LONG).show()
                     translationTask = null
-
-                    // スクレイピングタスクが残っていなければService停止、残っていれば更新
-                    if (taskList.isEmpty()) {
-                        val stopIntent = Intent(getApplication(), ScraperService::class.java)
-                        getApplication<Application>().stopService(stopIntent)
-                    } else {
-                        updateServiceNotification("実行中: ${taskList.size} 件")
-                    }
+                    syncServiceStatus()
                 }
             }
         )
         translationTask = task
         task.start()
+    }
+
+    /**
+     * スクレイピングタスク・翻訳タスクの状態を一元管理し、
+     * タスク変更時のみ的確にService通知を更新する（MainActivityからの毎フレームIPC通信を完全排除）。
+     */
+    private fun syncServiceStatus() {
+        val scrapingCount = taskList.size
+        val isTranslating = _uiState.value.isTranslating
+        val ui = _uiState.value
+
+        if (scrapingCount > 0 || isTranslating) {
+            val msg = when {
+                scrapingCount > 0 && isTranslating ->
+                    "スクレイプト: ${scrapingCount}件 / 翻訳: ${ui.translationProgress.first}/${ui.translationProgress.second}件"
+                scrapingCount > 0 ->
+                    taskList.lastOrNull()?.let { "${it.folderName}: ${it.status}" } ?: "実行中: ${scrapingCount}件"
+                else ->
+                    "翻訳中: ${ui.translationProgress.first}/${ui.translationProgress.second}件 (${ui.translationStatusText})"
+            }
+            updateServiceNotification(msg)
+        } else {
+            try {
+                val stopIntent = Intent(getApplication(), ScraperService::class.java)
+                getApplication<Application>().stopService(stopIntent)
+            } catch (_: Exception) {}
+        }
     }
 
     private fun updateServiceNotification(msg: String) {
@@ -268,7 +283,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             } else {
                 getApplication<Application>().startService(intent)
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Service更新時の例外防止
         }
     }
@@ -282,10 +297,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 translationStatusText = "翻訳を停止しました"
             )
         }
-        if (taskList.isEmpty()) {
-            val stopIntent = Intent(getApplication(), ScraperService::class.java)
-            getApplication<Application>().stopService(stopIntent)
-        }
+        syncServiceStatus()
     }
 
     fun startScraping(targetUrl: String, initialFolderName: String = "(取得中...)") {

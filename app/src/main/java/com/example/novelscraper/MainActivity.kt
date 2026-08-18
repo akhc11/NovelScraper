@@ -1,6 +1,5 @@
 package com.example.novelscraper
 
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -12,7 +11,6 @@ import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.runtime.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -22,7 +20,6 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.novelscraper.ui.MainScreen
 import com.example.novelscraper.ui.theme.NovelScraperTheme
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 
@@ -71,31 +68,17 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
     }
 
-    /**
-     * バックグラウンドから復帰した際にWebViewのJSタイマーを再開する。
-     * OSがバックグラウンドでWebViewのタイマーを凍結しても、
-     * フォアグラウンド復帰時に即座に再開される。
-     */
     override fun onResume() {
         super.onResume()
         WebView.setWebContentsDebuggingEnabled(false)
-        // 全WebViewインスタンスのJSタイマーを再開
-        try {
-            val resumeMethod = WebView::class.java.getMethod("resumeTimers")
-            val tempView = WebView(applicationContext)
-            resumeMethod.invoke(tempView)
-            tempView.destroy()
-        } catch (e: Exception) {
-            // resumeTimers失敗時は無視
-        }
     }
 
     private fun performNavigation(input: String, view: WebView) {
         if (input.isEmpty()) return
 
-        // 異常に長い入力（過去のバグによるスクリプトデータの混入など）に対する保護
+        // 異常に長い入力に対する保護
         if (input.length > 2000) {
-            Toast.makeText(this, "URL\u307e\u305f\u306f\u691c\u7d22\u30af\u30a8\u30ea\u304c\u9577\u3059\u304e\u307e\u3059\u3002\u7121\u52b9\u306a\u30c7\u30fc\u30bf\u3067\u3059\u3002", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "URLまたは検索クエリが長すぎます。無効なデータです。", Toast.LENGTH_LONG).show()
             return
         }
 
@@ -115,7 +98,7 @@ class MainActivity : ComponentActivity() {
                 try {
                     val rawResult = Json.decodeFromString<String>(res)
                     if (rawResult == "CF_DETECTED") {
-                        Toast.makeText(this, "Cloudflare\u691c\u77e5", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "Cloudflare検知", Toast.LENGTH_SHORT).show()
                         return@evaluateJavascript
                     }
                     if (rawResult.startsWith("JS_ERROR")) {
@@ -127,7 +110,7 @@ class MainActivity : ComponentActivity() {
                     val chap = ChapterNumberExtractor.extractForDisplay(data.chapter, config.chapter, view.url ?: "")
                     DialogHelper.showTestResultDialog(this, data, chap)
                 } catch (e: Exception) {
-                    Toast.makeText(this, "\u89e3\u6790\u5931\u6557", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "解析失敗", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -137,20 +120,11 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.presets.collect { presets ->
-                    if (viewModel.uiState.value.currentPresetName.isEmpty() && presets.containsKey("\u521d\u671f\u8a2d\u5b9a(\u5c0f\u8aac\u5bb6\u306b\u306a\u308d\u3046)")) {
-                        presets["\u521d\u671f\u8a2d\u5b9a(\u5c0f\u8aac\u5bb6\u306b\u306a\u308d\u3046)"]?.let {
-                            viewModel.applyPresetState("\u521d\u671f\u8a2d\u5b9a(\u5c0f\u8aac\u5bb6\u306b\u306a\u308d\u3046)", it)
+                    if (viewModel.uiState.value.currentPresetName.isEmpty() && presets.containsKey("初期設定(小説家になろう)")) {
+                        presets["初期設定(小説家になろう)"]?.let {
+                            viewModel.applyPresetState("初期設定(小説家になろう)", it)
                         }
                     }
-                }
-            }
-        }
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                combine(viewModel.activeTasks, viewModel.uiState) { tasks, uiState ->
-                    Pair(tasks, uiState)
-                }.collect { (tasks, uiState) ->
-                    updateServiceStatus(tasks.size, uiState.isTranslating, uiState)
                 }
             }
         }
@@ -174,31 +148,6 @@ class MainActivity : ComponentActivity() {
         view?.let { v ->
             v.addJavascriptInterface(NovelScraperBridge(), "AndroidBridge")
             v.evaluateJavascript(ScrapingScriptBuilder.buildInspectorScript(), null)
-        }
-    }
-
-    private fun updateServiceStatus(scrapingTaskCount: Int, isTranslating: Boolean, uiState: MainUiState) {
-        mainHandler.post {
-            val intent = Intent(this, ScraperService::class.java)
-            if (scrapingTaskCount > 0 || isTranslating) {
-                intent.action = ScraperService.ACTION_UPDATE_STATUS
-                val msg = when {
-                    scrapingTaskCount > 0 && isTranslating ->
-                        "\u30b9\u30af\u30ec\u30a4\u30d7: ${scrapingTaskCount}\u4ef6 / \u7ffb\u8a33: ${uiState.translationProgress.first}/${uiState.translationProgress.second}\u4ef6"
-                    scrapingTaskCount > 0 ->
-                        "\u5b9f\u884c\u4e2d: ${scrapingTaskCount} \u4ef6"
-                    else ->
-                        "\u7ffb\u8a33\u4e2d: ${uiState.translationProgress.first}/${uiState.translationProgress.second}\u4ef6 (${uiState.translationStatusText})"
-                }
-                intent.putExtra(ScraperService.EXTRA_MSG, msg)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(intent)
-                } else {
-                    startService(intent)
-                }
-            } else {
-                stopService(intent)
-            }
         }
     }
 

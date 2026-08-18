@@ -79,10 +79,15 @@ fun MainScreen(
         else if (webViewRef?.canGoBack() == true) webViewRef?.goBack()
     }
 
+    // URL変更時のナビゲーション（正規化比較により同一URLの不要な二重リロードを完全防止）
     LaunchedEffect(uiState.currentUrl) {
         val view = webViewRef
-        if (view != null && uiState.currentUrl.isNotEmpty() && view.url != uiState.currentUrl) {
-            onNavigate(uiState.currentUrl, view)
+        if (view != null && uiState.currentUrl.isNotEmpty()) {
+            val currentNormalized = view.url?.trimEnd('/') ?: ""
+            val targetNormalized = uiState.currentUrl.trimEnd('/')
+            if (currentNormalized != targetNormalized) {
+                onNavigate(uiState.currentUrl, view)
+            }
         }
     }
 
@@ -147,7 +152,9 @@ fun MainScreen(
                         }
                     },
                     update = { view ->
-                        view.settings.blockNetworkImage = uiState.blockImages
+                        if (view.settings.blockNetworkImage != uiState.blockImages) {
+                            view.settings.blockNetworkImage = uiState.blockImages
+                        }
                         val targetUA = if (uiState.isDesktopMode) WebViewHelper.DESKTOP_UA else WebViewHelper.MOBILE_UA
                         if (view.settings.userAgentString != targetUA) {
                             view.settings.userAgentString = targetUA

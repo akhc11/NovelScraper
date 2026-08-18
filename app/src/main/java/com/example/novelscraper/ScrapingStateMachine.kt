@@ -181,12 +181,11 @@ class ScrapingStateMachine(
             val chapNum = ChapterNumberExtractor.extract(data.chapter, config.chapter, currentUrl, manualChapterCounter)
             if (manualChapterCounter != null) manualChapterCounter = manualChapterCounter!! + 1
 
-            if (data.content.length < MIN_CONTENT_LENGTH) {
-                return buildRetryActions("本文過少")
-            }
+            // 本文が空・空白のみの場合は代替テキストを自動補完し、エラー停止させずに保存して進行する
+            val finalContent = data.content.ifBlank { "(本文なし)" }
 
             val actions = mutableListOf<Action>()
-            actions.add(Action.SaveAndContinue(folderName, title, data.content, chapNum, data.nextUrl, currentUrl))
+            actions.add(Action.SaveAndContinue(folderName, title, finalContent, chapNum, data.nextUrl, currentUrl))
             actions.add(Action.UpdateHistory(folderName, title, chapNum, currentUrl, data.nextUrl))
 
             lastSuccessUrl = currentUrl
@@ -233,7 +232,6 @@ class ScrapingStateMachine(
         private const val MAX_RETRY_COUNT = 3
         private const val RETRY_DELAY_MS = 60_000L
         private const val CF_WAIT_DELAY_MS = 30_000L
-        private const val MIN_CONTENT_LENGTH = 20
 
         fun calculateDelay(delayStr: String): Long {
             return try {

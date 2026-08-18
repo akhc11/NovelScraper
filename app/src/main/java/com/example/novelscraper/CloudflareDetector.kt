@@ -23,4 +23,14 @@ object CloudflareDetector {
     /** 人間的なスクロール動作を模倣するJS */
     fun buildHumanScrollJs(): String =
         "(function(){ var h=document.body.scrollHeight; var s=0; function sc(){ if(s>=h) return; s+=Math.random()*50+20; window.scrollTo(0,s); setTimeout(sc, Math.random()*100+50); } sc(); })();"
+
+    /** ページロード完了時の初期化JS（Turnstile対策 + 必要に応じた人間的スクロール模倣）を単一スクリプトに集約 */
+    fun buildPageLoadInitJs(shouldScroll: Boolean): String {
+        val turnstileJs = buildTurnstileClickJs()
+        return if (shouldScroll) {
+            "$turnstileJs\n${buildHumanScrollJs()}"
+        } else {
+            turnstileJs
+        }
+    }
 }

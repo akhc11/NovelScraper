@@ -31,6 +31,8 @@ fun SettingsPanel(
     onSavePresetClick: () -> Unit,
     onDeletePresetClick: () -> Unit,
     onConfigChange: (ScraperConfig) -> Unit,
+    onImportPresetsClick: () -> Unit,
+    onExportPresetsClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var dropdownExpanded by remember { mutableStateOf(false) }
@@ -119,17 +121,31 @@ fun SettingsPanel(
         }
 
         item {
-            Row(modifier = Modifier.fillMaxWidth().padding(bottom = 15.dp)) {
-                Button(
-                    onClick = onSavePresetClick,
-                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.neutralButton),
-                    modifier = Modifier.weight(1f).padding(end = 5.dp)
-                ) { Text("保存") }
-                Button(
-                    onClick = onDeletePresetClick,
-                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.error),
-                    modifier = Modifier.weight(1f)
-                ) { Text("削除") }
+            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 15.dp)) {
+                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                    Button(
+                        onClick = onSavePresetClick,
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.neutralButton),
+                        modifier = Modifier.weight(1f).padding(end = 5.dp)
+                    ) { Text("保存") }
+                    Button(
+                        onClick = onDeletePresetClick,
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.error),
+                        modifier = Modifier.weight(1f)
+                    ) { Text("削除") }
+                }
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = onImportPresetsClick,
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
+                        modifier = Modifier.weight(1f).padding(end = 5.dp)
+                    ) { Text("インポート") }
+                    Button(
+                        onClick = onExportPresetsClick,
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
+                        modifier = Modifier.weight(1f)
+                    ) { Text("エクスポート") }
+                }
             }
         }
 

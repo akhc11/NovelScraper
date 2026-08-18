@@ -5,6 +5,9 @@ import android.content.Context
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -19,24 +22,23 @@ class FileRepository(private val context: Context) {
      * チャプターをDownloadsフォルダに保存する。
      * Android Q以降は MediaStore、それ以前は直接ファイル書き込み。
      */
-    fun saveChapter(folderName: String, title: String, content: String, chapterNum: String) {
+    suspend fun saveChapter(folderName: String, title: String, content: String, chapterNum: String): Boolean = withContext(Dispatchers.IO) {
         var fileName = title.replace(sanitizeRegex, "").trim()
         if (chapterNum.isNotEmpty()) fileName = "${chapterNum}_${fileName}"
         fileName += ".txt"
         val safeFolderName = folderName.replace(sanitizeRegex, "").trim()
             .ifEmpty { DEFAULT_FOLDER_NAME }
 
-        val header = if (chapterNum.isNotEmpty()) "◆ $chapterNum $title\n\n" else "◆ $title\n\n"
-        val finalContent = header + content
-
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                saveWithMediaStore(safeFolderName, fileName, finalContent)
+                saveWithMediaStore(safeFolderName, fileName, content)
             } else {
-                saveWithLegacyFile(safeFolderName, fileName, finalContent)
+                saveWithLegacyFile(safeFolderName, fileName, content)
             }
+            true
         } catch (e: Exception) {
-            // バックグラウンドタスクのためサイレントに処理
+            Log.e("FileRepository", "Failed to save chapter file [fileName=$fileName, folderName=$safeFolderName]", e)
+            false
         }
     }
 
@@ -51,7 +53,7 @@ class FileRepository(private val context: Context) {
         val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
         uri?.let {
             context.contentResolver.openOutputStream(it).use { os ->
-                os?.write(content.toByteArray())
+                os?.write(content.toByteArray(Charsets.UTF_8))
             }
             values.clear()
             values.put(MediaStore.MediaColumns.IS_PENDING, 0)
@@ -65,7 +67,7 @@ class FileRepository(private val context: Context) {
             "$ROOT_FOLDER_NAME/$folderName"
         )
         if (!dir.exists()) dir.mkdirs()
-        File(dir, fileName).writeText(content)
+        File(dir, fileName).writeText(content, Charsets.UTF_8)
     }
 
     companion object {

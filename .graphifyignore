@@ -1,0 +1,17 @@
+# Gradle & Android Build Outputs
+build/
+app/build/
+.gradle/
+.idea/
+.kotlin/
+
+# Binaries & Logs
+*.apk
+*.aab
+*.aar
+*.log
+*.iml
+temp_html.txt
+
+# Graphify output itself
+graphify-out/

@@ -33,6 +33,8 @@ class ScrapingTask(
     private val stateMachine = ScrapingStateMachine(config, startUrl, initialFolderName)
 
     var isRunning = true
+    private var navigationJob: Job? = null
+    private var isPageError = false
 
     // StateMachineの状態を外部公開（UI表示用）
     val currentUrl: String get() = stateMachine.currentUrl
@@ -49,16 +51,14 @@ class ScrapingTask(
                 if (!isRunning) return
                 val loadedUrl = url ?: return
                 if (loadedUrl.startsWith("javascript:") || loadedUrl.startsWith("data:")) return
+                if (isPageError) return // エラー時はonPageFinishedを処理しない
 
-                // CF対策: Turnstile自動クリック
-                view?.evaluateJavascript(CloudflareDetector.buildTurnstileClickJs(), null)
+                // CF対策(Turnstile自動クリック)とスクロール模倣を単一のevaluateJavascript呼び出しに集約（IPC通信回数の半減）
+                val shouldScroll = stateMachine.state == ScrapingStateMachine.State.SCRAPING
+                view?.evaluateJavascript(CloudflareDetector.buildPageLoadInitJs(shouldScroll), null)
 
-                // スクレイピング中はスクロールを模倣
-                if (stateMachine.state == ScrapingStateMachine.State.SCRAPING) {
-                    view?.evaluateJavascript(CloudflareDetector.buildHumanScrollJs(), null)
-                }
-
-                scope.launch {
+                navigationJob?.cancel()
+                navigationJob = scope.launch {
                     val delayMs = if (stateMachine.state == ScrapingStateMachine.State.SCRAPING) {
                         stateMachine.calculateDelay()
                     } else {
@@ -74,6 +74,8 @@ class ScrapingTask(
 
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                 if (!isRunning || request?.isForMainFrame == false) return
+                isPageError = true
+                navigationJob?.cancel()
                 val actions = stateMachine.onNetworkError(error?.errorCode ?: -1)
                 executeActions(actions)
             }
@@ -81,11 +83,14 @@ class ScrapingTask(
     }
 
     fun start() {
+        isPageError = false
+        navigationJob?.cancel()
         webView.loadUrl(startUrl)
     }
 
     fun stop() {
         isRunning = false
+        navigationJob?.cancel()
         scope.cancel()
         webView.stopLoading()
         webView.destroy()
@@ -98,6 +103,8 @@ class ScrapingTask(
             if (!isRunning) return
             when (action) {
                 is ScrapingStateMachine.Action.LoadUrl -> {
+                    isPageError = false
+                    navigationJob?.cancel()
                     webView.loadUrl(action.url)
                 }
                 is ScrapingStateMachine.Action.EvaluateJs -> {
@@ -117,15 +124,23 @@ class ScrapingTask(
                     updateStatus(action.message)
                 }
                 is ScrapingStateMachine.Action.WaitAndLoad -> {
-                    scope.launch {
+                    navigationJob?.cancel()
+                    navigationJob = scope.launch {
                         delay(action.delayMs)
-                        if (isRunning) webView.loadUrl(action.url)
+                        if (isRunning) {
+                            isPageError = false
+                            webView.loadUrl(action.url)
+                        }
                     }
                 }
                 is ScrapingStateMachine.Action.WaitForCF -> {
-                    scope.launch {
+                    navigationJob?.cancel()
+                    navigationJob = scope.launch {
                         delay(action.delayMs)
-                        if (isRunning) webView.reload()
+                        if (isRunning) {
+                            isPageError = false
+                            webView.reload()
+                        }
                     }
                 }
                 is ScrapingStateMachine.Action.Retry -> {

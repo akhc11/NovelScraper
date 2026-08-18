@@ -2,16 +2,18 @@ package com.example.novelscraper
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
+import java.util.Base64
 
 object ScrapingScriptBuilder {
 
     fun buildScrapingScript(config: ScraperConfig, useImages: Boolean): String {
-        val configJson = Json.encodeToString(config).replace("\\", "\\\\").replace("'", "\\'")
+        val configJson = Json.encodeToString(config)
+        val configBase64 = Base64.getEncoder().encodeToString(configJson.toByteArray(Charsets.UTF_8))
         return """
             (function() {
                 try {
                     if (document.title.includes("Just a moment") || document.body.innerText.includes("Verify you are human")) return "CF_DETECTED";
-                    var config = JSON.parse('$configJson');
+                    var config = JSON.parse(decodeURIComponent(escape(atob('$configBase64'))));
                     var result = { title: "", content: "", nextUrl: "", chapter: "", folderName: "" };
                     function clean(t) { return t ? t.trim() : ""; }
 
@@ -177,8 +179,10 @@ object ScrapingScriptBuilder {
                 },true);
                 document.body.addEventListener('click',function(e){
                     e.preventDefault(); e.stopPropagation();
-                    var info={selector:getCss(e.target)||'?',text:e.target.innerText.substring(0,100)};
-                    alert('INSPECT:'+JSON.stringify(info));
+                    var selector = getCss(e.target) || '?';
+                    if (window.AndroidBridge) {
+                        window.AndroidBridge.onInspectResult(selector);
+                    }
                 },true);
             })();
         """.trimIndent()

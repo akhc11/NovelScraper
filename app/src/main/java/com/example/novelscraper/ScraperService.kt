@@ -34,6 +34,14 @@ class ScraperService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Wakelockの有効期限を30分に更新・延長（スリープによるダウンロード停止を防止）
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+            wakeLock?.acquire(30 * 60 * 1000L)
+        } catch (e: Exception) {}
+
         if (intent != null) {
             when (intent.action) {
                 ACTION_SHOW_COMPLETE -> {
@@ -73,7 +81,11 @@ class ScraperService : Service() {
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
 
-        startForeground(1, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(1, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(1, notification)
+        }
     }
 
     private fun showCompletionNotification(title: String, msg: String) {

@@ -1,5 +1,7 @@
 package com.example.novelscraper
 
+import java.net.URI
+
 /**
  * チャプター番号の抽出・整形ロジックを一元管理する。
  * MainActivity.performTestRun と ScrapingTask.processPage で共通利用。
@@ -31,15 +33,25 @@ object ChapterNumberExtractor {
 
         var chapter = rawChapter
 
-        // 自動取得: JS結果が空ならURLから数字を推測
+        // 自動取得: JS結果が空ならURLのパス部分から数字を推測
         if (chapter.isEmpty()) {
-            val matches = NUMBER_REGEX.findAll(currentUrl).map { it.value }.toList()
+            val path = try {
+                URI(currentUrl).path ?: ""
+            } catch (e: Exception) {
+                ""
+            }
+            val matches = NUMBER_REGEX.findAll(path).map { it.value }.toList()
             if (matches.isNotEmpty()) chapter = matches.last()
         }
 
-        // 数字のみ抽出して0埋め
+        // 数字のみ抽出して0埋め（数字が全く含まれない場合は空文字にして "0000" を防ぐ）
         if (chapter.isNotEmpty()) {
-            chapter = chapter.filter { it.isDigit() }.padStart(PAD_LENGTH, '0')
+            val digits = chapter.filter { it.isDigit() }
+            chapter = if (digits.isNotEmpty()) {
+                digits.padStart(PAD_LENGTH, '0')
+            } else {
+                ""
+            }
         }
 
         return chapter
@@ -64,16 +76,29 @@ object ChapterNumberExtractor {
             }
         }
 
-        // JS結果が空 → URL推測
+        // JS結果が空 → URLのパス部分から数字を推測
         if (rawChapter.isEmpty()) {
-            val matches = NUMBER_REGEX.findAll(currentUrl).map { it.value }.toList()
+            val path = try {
+                URI(currentUrl).path ?: ""
+            } catch (e: Exception) {
+                ""
+            }
+            val matches = NUMBER_REGEX.findAll(path).map { it.value }.toList()
             if (matches.isNotEmpty()) {
-                return matches.last().padStart(PAD_LENGTH, '0') + " (推測)"
+                val lastNum = matches.last().filter { it.isDigit() }
+                if (lastNum.isNotEmpty()) {
+                    return lastNum.padStart(PAD_LENGTH, '0') + " (推測)"
+                }
             }
             return ""
         }
 
-        // 通常
-        return rawChapter.filter { it.isDigit() }.padStart(PAD_LENGTH, '0')
+        // 通常（数字が全く含まれない場合は空文字にして "0000" を防ぐ）
+        val digits = rawChapter.filter { it.isDigit() }
+        return if (digits.isNotEmpty()) {
+            digits.padStart(PAD_LENGTH, '0')
+        } else {
+            ""
+        }
     }
 }

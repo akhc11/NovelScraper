@@ -6,13 +6,13 @@ import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -127,11 +127,12 @@ fun MainScreen(
             }
         }
 
-        Box(modifier = Modifier.fillMaxSize().padding(paddingValues).imePadding()) {
+        // ルートの imePadding() を排除（WebViewのリフロー防止。必要なパネル内部にのみ局所適用）
+        Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
+            // 背景レイヤー: WebView & ステータスバー
             Column(modifier = Modifier.fillMaxSize()) {
                 AndroidView(
                     factory = { ctx ->
-                        // バックグラウンド時にもActivityライフサイクル破棄・停止を受けないよう applicationContext で初期化
                         WebView(ctx.applicationContext).apply {
                             WebViewHelper.applyStandardSettings(this, !uiState.blockImages, uiState.isDesktopMode)
                             webViewClient = object : WebViewClient() {
@@ -153,7 +154,9 @@ fun MainScreen(
                             view.reload()
                         }
                     },
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .graphicsLayer { clip = true } // レイヤークリップ分離によりCompose描画ツリーとの干渉を遮断
                 )
 
                 Text(
@@ -165,102 +168,83 @@ fun MainScreen(
                 )
             }
 
-            AnimatedVisibility(
-                visible = uiState.openedPanel == PanelType.SETTINGS,
-                enter = androidx.compose.animation.fadeIn(),
-                exit = androidx.compose.animation.fadeOut(),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                SettingsPanel(
-                    uiState = uiState, presets = presets,
-                    onCloseClick = { viewModel.closePanels() },
-                    onPresetSelected = { name, config -> viewModel.applyPresetState(name, config) },
-                    onSavePresetClick = { onShowSavePreset() },
-                    onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
-                    onConfigChange = { viewModel.updateCurrentConfig { _ -> it } },
-                    onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
-                    onExportPresetsClick = { exportLauncher.launch("novel_scraper_presets.json") }
-                )
-            }
-            
-            AnimatedVisibility(
-                visible = uiState.openedPanel == PanelType.HISTORY,
-                enter = androidx.compose.animation.fadeIn(),
-                exit = androidx.compose.animation.fadeOut(),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                HistoryPanel(
-                    activeTab = uiState.activeHistoryTab,
-                    onTabSelected = { viewModel.setActiveHistoryTab(it) },
-                    activeTasks = activeTasks,
-                    history = history,
-                    onStopTaskClick = { task -> task.stop(); viewModel.removeTask(task) },
-                    // サイトへ移動 (閲覧)
-                    onHistoryItemClick = { url -> 
-                        webViewRef?.let { onNavigate(url, it) }
-                        viewModel.setCurrentUrl(url)
-                        viewModel.setInputUrl(url)
-                        viewModel.closePanels()
-                    },
-                    // 続きから再開
-                    onHistoryResumeClick = { folder ->
-                        val item = history[folder] ?: return@HistoryPanel
-                        if (item.nextUrl.isNotEmpty()) {
-                            val lastNum = item.chapter.filter { it.isDigit() }.toIntOrNull() ?: 0
-                            val nextConfig = item.config.copy(chapter = "@${lastNum + 1}")
-                            val presetName = if (item.presetName.isNotEmpty()) item.presetName else "(履歴から再開)"
-                            viewModel.applyPresetState(presetName, nextConfig)
-                            onResumeScraping(item.nextUrl, folder)
+            // 前面レイヤー: パネル群（ゼロ遅延・GPUアルファ合成なしの完全不透明スタック描画）
+            when (uiState.openedPanel) {
+                PanelType.SETTINGS -> {
+                    SettingsPanel(
+                        uiState = uiState,
+                        presets = presets,
+                        onCloseClick = { viewModel.closePanels() },
+                        onPresetSelected = { name, config -> viewModel.applyPresetState(name, config) },
+                        onSavePresetClick = { onShowSavePreset() },
+                        onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
+                        onConfigChange = { updater -> viewModel.updateCurrentConfig { updater } },
+                        onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
+                        onExportPresetsClick = { exportLauncher.launch("novel_scraper_presets.json") }
+                    )
+                }
+                PanelType.HISTORY -> {
+                    HistoryPanel(
+                        activeTab = uiState.activeHistoryTab,
+                        onTabSelected = { viewModel.setActiveHistoryTab(it) },
+                        activeTasks = activeTasks,
+                        history = history,
+                        onStopTaskClick = { task -> task.stop(); viewModel.removeTask(task) },
+                        onHistoryItemClick = { url -> 
+                            webViewRef?.let { onNavigate(url, it) }
+                            viewModel.setCurrentUrl(url)
+                            viewModel.setInputUrl(url)
                             viewModel.closePanels()
-                        } else {
-                            android.widget.Toast.makeText(context, "次のページが見つかりません（最新話か、古い履歴です）", android.widget.Toast.LENGTH_LONG).show()
-                        }
-                    },
-                    onDeleteHistoryClick = { folder -> viewModel.deleteHistory(folder) }
-                )
+                        },
+                        onHistoryResumeClick = { folder ->
+                            val item = history[folder] ?: return@HistoryPanel
+                            if (item.nextUrl.isNotEmpty()) {
+                                val lastNum = item.chapter.filter { it.isDigit() }.toIntOrNull() ?: 0
+                                val nextConfig = item.config.copy(chapter = "@${lastNum + 1}")
+                                val presetName = if (item.presetName.isNotEmpty()) item.presetName else "(履歴から再開)"
+                                viewModel.applyPresetState(presetName, nextConfig)
+                                onResumeScraping(item.nextUrl, folder)
+                                viewModel.closePanels()
+                            } else {
+                                android.widget.Toast.makeText(context, "次のページが見つかりません（最新話か、古い履歴です）", android.widget.Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        onDeleteHistoryClick = { folder -> viewModel.deleteHistory(folder) }
+                    )
+                }
+                PanelType.FAVORITES -> {
+                    FavoritesPanel(
+                        favorites = favorites,
+                        onFavoriteClick = { url -> 
+                            webViewRef?.let { onNavigate(url, it) }
+                            viewModel.setCurrentUrl(url)
+                            viewModel.setInputUrl(url)
+                            viewModel.closePanels() 
+                        },
+                        onDeleteClick = { name -> viewModel.deleteFavorite(name) },
+                        onCloseClick = { viewModel.closePanels() }
+                    )
+                }
+                PanelType.TRANSLATION -> {
+                    TranslationPanel(
+                        uiState = uiState,
+                        onSelectFolderClick = { folderLauncher.launch(null) },
+                        onStartTranslationClick = { viewModel.startTranslation() },
+                        onStopTranslationClick = { viewModel.stopTranslation() },
+                        onOpenGoogleTranslateClick = {
+                            val gUrl = "https://translate.google.com/?sl=${uiState.translationSourceLang}&tl=${uiState.translationTargetLang}&op=translate"
+                            webViewRef?.let { onNavigate(gUrl, it) }
+                            viewModel.setCurrentUrl(gUrl)
+                            viewModel.setInputUrl(gUrl)
+                            viewModel.closePanels()
+                        },
+                        onCloseClick = { viewModel.closePanels() }
+                    )
+                }
+                PanelType.NONE -> {
+                    // パネル非表示
+                }
             }
-
-            AnimatedVisibility(
-                visible = uiState.openedPanel == PanelType.FAVORITES,
-                enter = androidx.compose.animation.fadeIn(),
-                exit = androidx.compose.animation.fadeOut(),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                FavoritesPanel(
-                    favorites = favorites,
-                    onFavoriteClick = { url -> 
-                        webViewRef?.let { onNavigate(url, it) }
-                        viewModel.setCurrentUrl(url)
-                        viewModel.setInputUrl(url)
-                        viewModel.closePanels() 
-                    },
-                    onDeleteClick = { name -> viewModel.deleteFavorite(name) },
-                    onCloseClick = { viewModel.closePanels() }
-                )
-            }
-
-            AnimatedVisibility(
-                visible = uiState.openedPanel == PanelType.TRANSLATION,
-                enter = androidx.compose.animation.fadeIn(),
-                exit = androidx.compose.animation.fadeOut(),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                TranslationPanel(
-                    uiState = uiState,
-                    onSelectFolderClick = { folderLauncher.launch(null) },
-                    onStartTranslationClick = { viewModel.startTranslation() },
-                    onStopTranslationClick = { viewModel.stopTranslation() },
-                    onOpenGoogleTranslateClick = {
-                        val gUrl = "https://translate.google.com/?sl=${uiState.translationSourceLang}&tl=${uiState.translationTargetLang}&op=translate"
-                        webViewRef?.let { onNavigate(gUrl, it) }
-                        viewModel.setCurrentUrl(gUrl)
-                        viewModel.setInputUrl(gUrl)
-                        viewModel.closePanels()
-                    },
-                    onCloseClick = { viewModel.closePanels() }
-                )
-            }
-
         }
     }
 }

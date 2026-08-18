@@ -92,7 +92,7 @@ fun MainScreen(
         }
     }
 
-    // ダークモード切り替え時に即座にCSSと背景色を適用
+    // ダークモード状態変更時のみ的確に1度だけWebViewへ適用（重複実行を完全排除）
     LaunchedEffect(uiState.isDarkMode) {
         webViewRef?.let { view ->
             WebViewHelper.applyDarkMode(view, uiState.isDarkMode)
@@ -154,7 +154,9 @@ fun MainScreen(
                             webViewClient = object : WebViewClient() {
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                     // ページ読み込み開始直後の0msで先行注入（白チラつき完全根絶）
-                                    view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(uiState.isDarkMode), null)
+                                    if (uiState.isDarkMode) {
+                                        view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(true), null)
+                                    }
                                 }
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -162,22 +164,25 @@ fun MainScreen(
                                         viewModel.setCurrentUrl(url)
                                         viewModel.setInputUrl(url)
                                     }
-                                    view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(uiState.isDarkMode), null)
+                                    if (uiState.isDarkMode) {
+                                        view?.evaluateJavascript(WebViewHelper.buildDarkModeJs(true), null)
+                                    }
                                 }
                             }
                             webViewRef = this
                         }
                     },
                     update = { view ->
+                        // 画像ブロックの変更時のみ設定を更新
                         if (view.settings.blockNetworkImage != uiState.blockImages) {
                             view.settings.blockNetworkImage = uiState.blockImages
                         }
+                        // デスクトップモードの変更時のみUA更新＆リロード
                         val targetUA = if (uiState.isDesktopMode) WebViewHelper.DESKTOP_UA else WebViewHelper.MOBILE_UA
                         if (view.settings.userAgentString != targetUA) {
                             view.settings.userAgentString = targetUA
                             view.reload()
                         }
-                        WebViewHelper.applyDarkMode(view, uiState.isDarkMode)
                     },
                     modifier = Modifier
                         .weight(1f)

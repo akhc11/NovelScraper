@@ -3,6 +3,7 @@ NovelScraper2/
 ├── graphify-out/                ← 構造マップ（前回設定済み）
 └── docs/
     ├── handoff.md                ← 進捗報告（機能系統ごとに分離）
+    ├── handoff_darkmode.md       ← ダークモード機能の仕様・実機テスト手順
     └── translation_specification.md ← 翻訳機能・品質維持の仕様書
 
 
@@ -69,7 +70,28 @@ NovelScraper2/
 - **バックグラウンド実行アーキテクチャ:**
   - 翻訳タスク（`TranslationTask`）は、画面UIのライフサイクル凍結を回避するため、`ScrapingTask` と同様に `WebView(context.applicationContext)` による独立バックグラウンドインスタンスで動作させる。
 
-## 8. 完了の定義（Definition of Done）
+## 8. 実機テスト＆ビルド環境の標準手順
+- **環境設定（PowerShell必須）:**
+  - 日本語パスの文字化け・Gradle文字コードエラー防止のため、Gradle コマンド実行前に必ず以下を設定すること：
+    ```powershell
+    $env:JAVA_TOOL_OPTIONS = "-Dfile.encoding=UTF-8"
+    $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+    $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+    ```
+  - ADB パス: `C:\Users\asan6\AppData\Local\Android\Sdk\platform-tools\adb.exe`
+- **実機インストール＆完全再起動コマンド:**
+  ```powershell
+  # ビルド＆インストール
+  .\gradlew installDebug
+
+  # ログクリア＆アプリ再起動
+  $adb = "C:\Users\asan6\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+  & $adb logcat -c
+  & $adb shell am force-stop com.example.novelscraper
+  & $adb shell am start -n com.example.novelscraper/.MainActivity
+  ```
+
+## 9. 完了の定義（Definition of Done）
 - 変更したファイルに関連するテストが存在する場合は実行し、パスすることを確認する
 - 変更した関数・クラスが他の場所から呼び出されていないか `graphify-out/graph.json` で確認する
 - 「完了しました」と報告する前に、上記2点をチェックしたことを明記する

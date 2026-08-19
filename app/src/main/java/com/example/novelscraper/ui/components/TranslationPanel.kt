@@ -2,7 +2,10 @@ package com.example.novelscraper.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -13,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.novelscraper.MainUiState
@@ -24,6 +28,8 @@ fun TranslationPanel(
     uiState: MainUiState,
     onSelectEngineTab: (TranslationEngine) -> Unit,
     onSelectFolderClick: () -> Unit,
+    onRemoveFolderClick: (TranslationEngine, Int) -> Unit,
+    onClearFoldersClick: (TranslationEngine) -> Unit,
     onStartTranslationClick: (TranslationEngine) -> Unit,
     onStopTranslationClick: (TranslationEngine) -> Unit,
     onOpenWebTranslateClick: (TranslationEngine) -> Unit,
@@ -31,6 +37,7 @@ fun TranslationPanel(
 ) {
     val activeEngine = uiState.activeTranslationEngine
     val engineState = uiState.currentEngineState
+    val folderList = engineState.selectedFolders
 
     Surface(
         modifier = Modifier
@@ -58,7 +65,10 @@ fun TranslationPanel(
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold
                 )
-                IconButton(onClick = onCloseClick, modifier = Modifier.size(28.dp)) {
+                IconButton(
+                    onClick = onCloseClick,
+                    modifier = Modifier.size(24.dp)
+                ) {
                     Icon(
                         Icons.Filled.Close,
                         contentDescription = "閉じる",
@@ -70,10 +80,10 @@ fun TranslationPanel(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // エンジン切替タブ (Google翻訳 / DeepL翻訳)
+            // エンジン切り替えタブ (Google翻訳 / DeepL翻訳)
             TabRow(
                 selectedTabIndex = if (activeEngine == TranslationEngine.GOOGLE) 0 else 1,
-                containerColor = AppColors.backgroundDark,
+                containerColor = AppColors.surfaceMedium,
                 contentColor = AppColors.accentTeal,
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -116,8 +126,25 @@ fun TranslationPanel(
             Spacer(modifier = Modifier.height(10.dp))
 
             // フォルダ選択エリア
-            Text("対象フォルダ:", color = AppColors.textSecondary, fontSize = 12.sp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("対象フォルダ:", color = AppColors.textSecondary, fontSize = 12.sp)
+                if (folderList.size > 1) {
+                    Text(
+                        text = "全 ${folderList.size} フォルダ一括翻訳",
+                        color = AppColors.accentTealLight,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.height(4.dp))
+
+            // フォルダ選択ボックス ＆ 追加ボタン
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -128,19 +155,25 @@ fun TranslationPanel(
                         .height(38.dp)
                         .background(AppColors.surfaceMedium, RoundedCornerShape(4.dp))
                         .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
+                        .clickable(enabled = !engineState.isTranslating) { onSelectFolderClick() }
                         .padding(horizontal = 10.dp),
                     contentAlignment = Alignment.CenterStart
                 ) {
-                    Text(
-                        text = if (engineState.folderName.isNotEmpty()) {
-                            engineState.folderName
-                        } else {
-                            "フォルダを選択してください (.txt)"
-                        },
-                        color = if (engineState.folderName.isNotEmpty()) AppColors.textPrimary else AppColors.textTertiary,
-                        fontSize = 13.sp,
-                        maxLines = 1
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("📁", fontSize = 15.sp)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (folderList.isNotEmpty()) {
+                                engineState.folderName
+                            } else {
+                                "フォルダを選択 (OSピッカー)"
+                            },
+                            color = if (folderList.isNotEmpty()) AppColors.textPrimary else AppColors.textTertiary,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(6.dp))
@@ -152,7 +185,73 @@ fun TranslationPanel(
                     shape = RoundedCornerShape(4.dp),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                 ) {
-                    Text("選択", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(if (folderList.isEmpty()) "選択" else "＋ 追加", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            // 【複数選択時】選択中フォルダのキュー一覧チップス
+            if (folderList.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF1B2F2C), RoundedCornerShape(4.dp))
+                        .border(1.dp, AppColors.accentTeal, RoundedCornerShape(4.dp))
+                        .padding(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "選択中 (${folderList.size}件):",
+                            color = AppColors.accentTealLight,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (!engineState.isTranslating) {
+                            Text(
+                                text = "全解除",
+                                color = Color.Gray,
+                                fontSize = 11.sp,
+                                modifier = Modifier.clickable { onClearFoldersClick(activeEngine) }
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        itemsIndexed(folderList) { index, item ->
+                            Row(
+                                modifier = Modifier
+                                    .background(Color(0xFF112220), RoundedCornerShape(3.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "${index + 1}. ${item.name}",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (!engineState.isTranslating) {
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "削除",
+                                        tint = Color.LightGray,
+                                        modifier = Modifier
+                                            .size(13.dp)
+                                            .clickable { onRemoveFolderClick(activeEngine, index) }
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -219,33 +318,40 @@ fun TranslationPanel(
                                 if (engineState.chunkProgress.second > 0) " (チャンク ${engineState.chunkProgress.first}/${engineState.chunkProgress.second})" else "",
                         color = AppColors.textMuted,
                         fontSize = 11.sp,
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // 操作ボタン行（開始・停止）
+            // 操作ボタン (開始 / 停止)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Button(
                     onClick = { onStartTranslationClick(activeEngine) },
-                    enabled = !engineState.isTranslating && engineState.folderUri != null,
-                    modifier = Modifier.weight(1f),
+                    enabled = !engineState.isTranslating && (folderList.isNotEmpty() || engineState.folderUri != null),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AppColors.accentOrange,
                         disabledContainerColor = AppColors.surfaceMedium
                     ),
-                    shape = RoundedCornerShape(4.dp)
+                    shape = RoundedCornerShape(4.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = "翻訳開始",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        if (activeEngine == TranslationEngine.GOOGLE) "Google翻訳開始" else "DeepL翻訳開始",
-                        fontSize = 12.sp,
+                        text = if (activeEngine == TranslationEngine.GOOGLE) "Google翻訳開始" else "DeepL翻訳開始",
+                        color = Color.White,
+                        fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -253,16 +359,25 @@ fun TranslationPanel(
                 Button(
                     onClick = { onStopTranslationClick(activeEngine) },
                     enabled = engineState.isTranslating,
-                    modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFD32F2F),
+                        containerColor = AppColors.surfaceMedium,
                         disabledContainerColor = AppColors.surfaceMedium
                     ),
-                    shape = RoundedCornerShape(4.dp)
+                    shape = RoundedCornerShape(4.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "停止",
+                        tint = if (engineState.isTranslating) Color.White else AppColors.textTertiary,
+                        modifier = Modifier.size(16.dp)
+                    )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("停止", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        text = "停止",
+                        color = if (engineState.isTranslating) Color.White else AppColors.textTertiary,
+                        fontSize = 13.sp
+                    )
                 }
             }
         }

@@ -1,5 +1,6 @@
 package com.example.novelscraper
 
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -60,6 +61,30 @@ class MainActivity : ComponentActivity() {
             }
         }
         observeViewModel()
+        if (savedInstanceState == null) {
+            handleIntent(intent)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent == null) return
+        if (intent.action == Intent.ACTION_SEND && (intent.type?.startsWith("text/") == true || intent.type == "text/plain")) {
+            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+                ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
+            val extractedUrl = UrlExtractor.extractUrl(sharedText)
+            if (extractedUrl != null) {
+                viewModel.closePanels()
+                viewModel.setInputUrl(extractedUrl)
+                viewModel.setCurrentUrl(extractedUrl)
+                Toast.makeText(this, "共有されたURLを開きます", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun setupSystemUI() {

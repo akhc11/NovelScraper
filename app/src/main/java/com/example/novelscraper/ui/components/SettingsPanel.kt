@@ -251,8 +251,8 @@ fun SettingsPanel(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // セクション3: 動作設定
-        SettingsCard(title = "動作・自動適用設定") {
+        // セクション3: 表示・動作設定
+        SettingsCard(title = "表示・動作設定") {
             ConfigInputField("待機時間(秒)", formState.delay) { formState.delay = it }
             ConfigInputField("自動適用URL (ドメイン)", formState.autoUrl) { formState.autoUrl = it }
         }

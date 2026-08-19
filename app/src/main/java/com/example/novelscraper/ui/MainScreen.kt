@@ -134,11 +134,10 @@ fun MainScreen(
 
         // ルートの imePadding() を排除（WebViewのリフロー防止。必要なパネル内部にのみ局所適用）
         Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
-            // 背景レイヤー: WebView & ステータスバー
-            Column(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize().background(AppColors.backgroundDarkest)) {
                 AndroidView(
                     factory = { ctx ->
-                        WebView(ctx.applicationContext).apply {
+                        WebView(ctx).apply {
                             WebViewHelper.applyStandardSettings(this, !uiState.blockImages, uiState.isDesktopMode)
                             webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -146,6 +145,21 @@ fun MainScreen(
                                         viewModel.setCurrentUrl(url)
                                         viewModel.setInputUrl(url)
                                     }
+                                    // ── DEBUG ONLY: ダークモード検証ログ ──────────────────
+                                    // このブロックはリリースビルドでは完全に除去される（BuildConfig.DEBUG）
+                                    if (com.example.novelscraper.BuildConfig.DEBUG && url != null
+                                        && !url.startsWith("javascript:") && !url.startsWith("data:")) {
+                                        view?.evaluateJavascript("""
+                                            (function() {
+                                                var isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                                                var bg = window.getComputedStyle(document.documentElement).backgroundColor;
+                                                return JSON.stringify({ dark: isDark, bg: bg, url: location.hostname });
+                                            })()
+                                        """.trimIndent()) { result ->
+                                            android.util.Log.d("DarkModeCheck", "result=$result")
+                                        }
+                                    }
+                                    // ────────────────────────────────────────────────────
                                 }
                             }
                             webViewRef = this

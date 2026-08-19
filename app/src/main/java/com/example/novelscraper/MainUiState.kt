@@ -9,6 +9,8 @@ enum class TranslationEngine { GOOGLE, DEEPL }
 data class EngineTranslationState(
     val folderUri: Uri? = null,
     val folderName: String = "",
+    val selectedFolders: List<FolderItem> = emptyList(),
+    val currentFolderIndex: Int = 0,
     val isTranslating: Boolean = false,
     val statusText: String = "待機中",
     val progress: Pair<Int, Int> = Pair(0, 0), // (完了件数, 総件数)

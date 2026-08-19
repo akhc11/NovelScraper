@@ -1,8 +1,8 @@
 package com.example.novelscraper.ui
 
 import android.content.Intent
+import android.net.Uri
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -13,11 +13,17 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.documentfile.provider.DocumentFile
-import com.example.novelscraper.*
+import com.example.novelscraper.MainUiState
+import com.example.novelscraper.PanelType
+import com.example.novelscraper.ScraperConfig
+import com.example.novelscraper.ScrapingViewModel
+import com.example.novelscraper.TranslationEngine
+import com.example.novelscraper.WebViewHelper
 import com.example.novelscraper.ui.components.*
 import com.example.novelscraper.ui.theme.AppColors
 
@@ -26,9 +32,9 @@ fun MainScreen(
     viewModel: ScrapingViewModel,
     onStartScraping: (String) -> Unit,
     onResumeScraping: (String, String) -> Unit,
-    onInspectResult: (String, String) -> Unit,
+    onInspectResult: (String, (String) -> Unit) -> Unit,
     onLaunchAnalysisTool: (WebView) -> Unit,
-    onInjectInspector: (WebView) -> Unit,
+    onInjectInspector: (WebView?) -> Unit,
     onNavigate: (String, WebView) -> Unit,
     onShowAddFavorite: (String, String) -> Unit,
     onShowSavePreset: () -> Unit,
@@ -40,7 +46,7 @@ fun MainScreen(
     val history by viewModel.history.collectAsState()
     val activeTasks by viewModel.activeTasks.collectAsState()
     val currentStatusText by viewModel.currentStatusText.collectAsState()
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
@@ -70,7 +76,7 @@ fun MainScreen(
             }
             val doc = DocumentFile.fromTreeUri(context, treeUri)
             val folderName = doc?.name ?: treeUri.lastPathSegment ?: "選択フォルダ"
-            viewModel.setTranslationFolder(uiState.activeTranslationEngine, treeUri, folderName)
+            viewModel.addTranslationFolder(uiState.activeTranslationEngine, treeUri, folderName)
         }
     }
 
@@ -95,58 +101,82 @@ fun MainScreen(
         topBar = {
             HeaderToolbar(
                 uiState = uiState,
-                onBackClick = { webViewRef?.goBack() },
-                onForwardClick = { webViewRef?.goForward() },
-                onStarClick = { webViewRef?.let { onShowAddFavorite(it.title ?: "", it.url ?: "") } },
-                onUrlSubmit = { url -> 
-                    webViewRef?.let { onNavigate(url, it) }
-                    viewModel.setInputUrl(url)
-                    viewModel.closePanels()
+                onBackClick = { webViewRef?.let { if (it.canGoBack()) it.goBack() } },
+                onForwardClick = { webViewRef?.let { if (it.canGoForward()) it.goForward() } },
+                onStarClick = {
+                    val url = webViewRef?.url ?: uiState.currentUrl
+                    val title = webViewRef?.title ?: "No Title"
+                    if (url.isNotEmpty()) {
+                        onShowAddFavorite(title, url)
+                    }
+                },
+                onUrlSubmit = { url ->
+                    viewModel.setCurrentUrl(url)
+                    webViewRef?.let { view -> onNavigate(url, view) }
                 },
                 onUrlChange = { viewModel.setInputUrl(it) },
-                onPanelToggle = { viewModel.setOpenedPanel(it) },
+                onPanelToggle = { panel -> viewModel.togglePanel(panel) },
                 onInspectModeToggle = {
-                    viewModel.toggleInspectMode()
-                    if (!uiState.isInspectMode) webViewRef?.let { onInjectInspector(it) } else webViewRef?.reload()
+                    val nextMode = !uiState.isInspectMode
+                    viewModel.setInspectMode(nextMode)
+                    if (nextMode) {
+                        onInjectInspector(webViewRef)
+                    }
                 },
-                onInspectToolClick = { webViewRef?.let { onLaunchAnalysisTool(it) } },
-                onToggleDesktopModeClick = { viewModel.toggleDesktopMode() },
-                onToggleDarkModeClick = { viewModel.toggleWebViewDarkMode() },
-                onStartScrapingClick = { onStartScraping(webViewRef?.url ?: uiState.inputUrl) },
-                onTestRunClick = { webViewRef?.let { onTestRun(it) } },
-                onToggleImagesClick = { viewModel.toggleBlockImages() },
+                onInspectToolClick = {
+                    webViewRef?.let { onLaunchAnalysisTool(it) }
+                },
+                onToggleDesktopModeClick = {
+                    val nextDesktop = !uiState.isDesktopMode
+                    viewModel.setDesktopMode(nextDesktop)
+                },
+                onToggleDarkModeClick = {
+                    viewModel.toggleWebViewDarkMode()
+                },
+                onStartScrapingClick = {
+                    val url = uiState.currentUrl
+                    if (url.isNotEmpty()) {
+                        val currentTask = activeTasks.firstOrNull { it.currentUrl == url }
+                        if (currentTask != null) {
+                            currentTask.stop()
+                        } else {
+                            onStartScraping(url)
+                        }
+                    }
+                },
+                onToggleImagesClick = {
+                    val nextBlock = !uiState.blockImages
+                    viewModel.setBlockImages(nextBlock)
+                },
                 isDesktopMode = uiState.isDesktopMode
             )
         },
         containerColor = Color.Black
     ) { paddingValues ->
-        DisposableEffect(Unit) {
-            onDispose {
-                webViewRef?.let { view ->
-                    (view.parent as? android.view.ViewGroup)?.removeView(view)
-                    view.stopLoading()
-                    view.webViewClient = android.webkit.WebViewClient()
-                    view.webChromeClient = null
-                    view.destroy()
-                }
-                webViewRef = null
-            }
-        }
-
-        // ルートの imePadding() を排除（WebViewのリフロー防止。必要なパネル内部にのみ局所適用）
-        Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
-            Column(modifier = Modifier.fillMaxSize().background(AppColors.backgroundDarkest)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+        ) {
+            // 背景レイヤー: WebView（画面遷移を行わず常駐）
+            Column(modifier = Modifier.fillMaxSize()) {
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx).apply {
-                            WebViewHelper.applyStandardSettings(this, !uiState.blockImages, uiState.isDesktopMode)
+                            WebViewHelper.applyStandardSettings(this, isDesktop = uiState.isDesktopMode)
                             WebViewHelper.applyDarkMode(this, uiState.isWebViewDarkMode)
                             tag = uiState.isWebViewDarkMode
-                            webViewClient = object : WebViewClient() {
+                            
+                            webViewClient = object : android.webkit.WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
-                                    if (url != null && !url.startsWith("javascript:") && !url.startsWith("data:")) {
-                                        viewModel.setCurrentUrl(url)
-                                        viewModel.setInputUrl(url)
+                                    super.onPageFinished(view, url)
+                                    url?.let {
+                                        if (it.isNotEmpty() && !it.startsWith("javascript:")) {
+                                            viewModel.setCurrentUrl(it)
+                                        }
+                                    }
+                                    if (uiState.isInspectMode) {
+                                        onInjectInspector(view)
                                     }
                                 }
                             }
@@ -264,6 +294,8 @@ fun MainScreen(
                         uiState = uiState,
                         onSelectEngineTab = { engine -> viewModel.setActiveTranslationEngine(engine) },
                         onSelectFolderClick = { folderLauncher.launch(null) },
+                        onRemoveFolderClick = { engine, index -> viewModel.removeTranslationFolder(engine, index) },
+                        onClearFoldersClick = { engine -> viewModel.clearTranslationFolders(engine) },
                         onStartTranslationClick = { engine -> viewModel.startTranslation(engine) },
                         onStopTranslationClick = { engine -> viewModel.stopTranslation(engine) },
                         onOpenWebTranslateClick = { engine ->

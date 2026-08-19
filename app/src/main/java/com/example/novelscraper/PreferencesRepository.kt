@@ -39,11 +39,22 @@ class PreferencesRepository(private val context: Context) {
         val FAVORITES = stringPreferencesKey("favorites_json_v2")
         val HISTORY = stringPreferencesKey("history_json_v2")
         val SETUP_DONE = stringPreferencesKey("is_setup_done")
+        val WEBVIEW_DARK_MODE = stringPreferencesKey("webview_dark_mode")
     }
 
     private val json = Json {
         ignoreUnknownKeys = true
         coerceInputValues = true
+    }
+
+    val webViewDarkModeFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.WEBVIEW_DARK_MODE]?.toBoolean() ?: true
+    }.flowOn(Dispatchers.IO)
+
+    suspend fun saveWebViewDarkMode(enabled: Boolean) = withContext(Dispatchers.IO) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.WEBVIEW_DARK_MODE] = enabled.toString()
+        }
     }
 
     val presetsFlow: Flow<Map<String, ScraperConfig>> = context.dataStore.data.map { preferences ->

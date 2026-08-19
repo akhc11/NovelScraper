@@ -42,6 +42,7 @@ fun HeaderToolbar(
     onInspectModeToggle: () -> Unit,
     onInspectToolClick: () -> Unit,
     onToggleDesktopModeClick: () -> Unit = {},
+    onToggleDarkModeClick: () -> Unit = {},
     onStartScrapingClick: () -> Unit = {},
     onTestRunClick: () -> Unit = {},
     onToggleImagesClick: () -> Unit = {},
@@ -101,6 +102,7 @@ fun HeaderToolbar(
                 ToolButton(Icons.Filled.PlayArrow, onStartScrapingClick, false, AppColors.accentOrange)
                 ToolButton(null, onToggleImagesClick, uiState.blockImages, if (uiState.blockImages) AppColors.surfaceHighlight else AppColors.accentTeal, text = if (uiState.blockImages) "画✖" else "画〇")
                 ToolButton(null, onToggleDesktopModeClick, isDesktopMode, AppColors.surfaceLight, text = "PC")
+                ToolButton(null, onToggleDarkModeClick, uiState.isWebViewDarkMode, AppColors.accentTeal, text = if (uiState.isWebViewDarkMode) "🌙" else "☀️")
             }
         }
     }

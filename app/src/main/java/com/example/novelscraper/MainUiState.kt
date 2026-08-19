@@ -14,6 +14,7 @@ data class MainUiState(
     val activeHistoryTab: Int = 0, // 0: History, 1: Active Tasks
     val blockImages: Boolean = false,
     val isDesktopMode: Boolean = false,
+    val isWebViewDarkMode: Boolean = true,
     // 翻訳関連の状態
     val translationFolderUri: Uri? = null,
     val translationFolderName: String = "",

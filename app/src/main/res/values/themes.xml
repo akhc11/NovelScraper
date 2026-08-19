@@ -6,5 +6,7 @@
         <item name="android:windowLightStatusBar">false</item>
         <!-- フルスクリーン系フラグはOFF -->
         <item name="android:windowFullscreen">false</item>
+        <!-- WebView にダークテーマを伝達 -->
+        <item name="android:isLightTheme">false</item>
     </style>
 </resources>

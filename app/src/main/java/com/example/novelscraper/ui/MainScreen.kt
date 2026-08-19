@@ -111,6 +111,7 @@ fun MainScreen(
                 },
                 onInspectToolClick = { webViewRef?.let { onLaunchAnalysisTool(it) } },
                 onToggleDesktopModeClick = { viewModel.toggleDesktopMode() },
+                onToggleDarkModeClick = { viewModel.toggleWebViewDarkMode() },
                 onStartScrapingClick = { onStartScraping(webViewRef?.url ?: uiState.inputUrl) },
                 onTestRunClick = { webViewRef?.let { onTestRun(it) } },
                 onToggleImagesClick = { viewModel.toggleBlockImages() },
@@ -139,27 +140,14 @@ fun MainScreen(
                     factory = { ctx ->
                         WebView(ctx).apply {
                             WebViewHelper.applyStandardSettings(this, !uiState.blockImages, uiState.isDesktopMode)
+                            WebViewHelper.applyDarkMode(this, uiState.isWebViewDarkMode)
+                            tag = uiState.isWebViewDarkMode
                             webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     if (url != null && !url.startsWith("javascript:") && !url.startsWith("data:")) {
                                         viewModel.setCurrentUrl(url)
                                         viewModel.setInputUrl(url)
                                     }
-                                    // ── DEBUG ONLY: ダークモード検証ログ ──────────────────
-                                    // このブロックはリリースビルドでは完全に除去される（BuildConfig.DEBUG）
-                                    if (com.example.novelscraper.BuildConfig.DEBUG && url != null
-                                        && !url.startsWith("javascript:") && !url.startsWith("data:")) {
-                                        view?.evaluateJavascript("""
-                                            (function() {
-                                                var isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-                                                var bg = window.getComputedStyle(document.documentElement).backgroundColor;
-                                                return JSON.stringify({ dark: isDark, bg: bg, url: location.hostname });
-                                            })()
-                                        """.trimIndent()) { result ->
-                                            android.util.Log.d("DarkModeCheck", "result=$result")
-                                        }
-                                    }
-                                    // ────────────────────────────────────────────────────
                                 }
                             }
                             webViewRef = this
@@ -174,6 +162,13 @@ fun MainScreen(
                         val targetUA = if (uiState.isDesktopMode) WebViewHelper.DESKTOP_UA else WebViewHelper.MOBILE_UA
                         if (view.settings.userAgentString != targetUA) {
                             view.settings.userAgentString = targetUA
+                            view.reload()
+                        }
+                        // ダークモード状態の更新
+                        val lastDarkMode = view.tag as? Boolean
+                        if (lastDarkMode != uiState.isWebViewDarkMode) {
+                            view.tag = uiState.isWebViewDarkMode
+                            WebViewHelper.applyDarkMode(view, uiState.isWebViewDarkMode)
                             view.reload()
                         }
                     },
@@ -207,7 +202,8 @@ fun MainScreen(
                         onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
                         onConfigChange = { newConfig -> viewModel.updateCurrentConfig { newConfig } },
                         onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
-                        onExportPresetsClick = { exportLauncher.launch("novel_scraper_presets.json") }
+                        onExportPresetsClick = { exportLauncher.launch("novel_scraper_presets.json") },
+                        onToggleWebViewDarkModeClick = { viewModel.toggleWebViewDarkMode() }
                     )
                 }
                 PanelType.HISTORY -> {

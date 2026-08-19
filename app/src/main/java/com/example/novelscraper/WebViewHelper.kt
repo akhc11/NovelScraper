@@ -1,14 +1,18 @@
 package com.example.novelscraper
 
 import android.annotation.SuppressLint
+import android.graphics.Color
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 
 object WebViewHelper {
     
     const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
     const val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    val DARK_BG_COLOR = Color.parseColor("#121212")
 
     @SuppressLint("SetJavaScriptEnabled")
     fun applyStandardSettings(webView: WebView, blockImages: Boolean = false, isDesktop: Boolean = false) {
@@ -36,5 +40,16 @@ object WebViewHelper {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(webView, true)
         }
+    }
+
+    /**
+     * WebView にダークモード設定を適用する（Algorithmic Darkening + 背景色）
+     * Chromium エンジンのネイティブ暗転を利用し、外部 CSS 注入の競合を防ぐ。
+     */
+    fun applyDarkMode(webView: WebView, enabled: Boolean) {
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+            WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, enabled)
+        }
+        webView.setBackgroundColor(if (enabled) DARK_BG_COLOR else Color.WHITE)
     }
 }

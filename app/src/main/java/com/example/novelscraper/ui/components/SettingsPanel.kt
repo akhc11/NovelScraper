@@ -87,6 +87,7 @@ fun SettingsPanel(
     onConfigChange: (ScraperConfig) -> Unit,
     onImportPresetsClick: () -> Unit,
     onExportPresetsClick: () -> Unit,
+    onToggleWebViewDarkModeClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var dropdownExpanded by remember { mutableStateOf(false) }
@@ -253,6 +254,38 @@ fun SettingsPanel(
 
         // セクション3: 表示・動作設定
         SettingsCard(title = "表示・動作設定") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "WebView ダークモード",
+                        color = AppColors.textPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "ウェブページを自動でダークテーマ表示",
+                        color = AppColors.textSecondary,
+                        fontSize = 11.sp
+                    )
+                }
+                Switch(
+                    checked = uiState.isWebViewDarkMode,
+                    onCheckedChange = { onToggleWebViewDarkModeClick() },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = AppColors.accentTealLight,
+                        checkedTrackColor = AppColors.accentTeal,
+                        uncheckedThumbColor = AppColors.surfaceLight,
+                        uncheckedTrackColor = AppColors.surfaceMedium
+                    )
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
             ConfigInputField("待機時間(秒)", formState.delay) { formState.delay = it }
             ConfigInputField("自動適用URL (ドメイン)", formState.autoUrl) { formState.autoUrl = it }
         }

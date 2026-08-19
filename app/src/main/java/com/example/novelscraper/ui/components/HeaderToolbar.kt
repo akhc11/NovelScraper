@@ -93,7 +93,7 @@ fun HeaderToolbar(
                 ToolButton(null, { onPanelToggle(PanelType.TRANSLATION) }, uiState.openedPanel == PanelType.TRANSLATION, text = "翻")
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 ToolButton(Icons.Filled.Settings, { onPanelToggle(PanelType.SETTINGS) }, uiState.openedPanel == PanelType.SETTINGS)
                 ToolButton(Icons.Filled.CheckCircle, onTestRunClick, false, AppColors.surfaceLight)
                 ToolButton(Icons.Filled.Search, onInspectModeToggle, uiState.isInspectMode, if (uiState.isInspectMode) AppColors.inspectActive else AppColors.surfaceMedium)
@@ -130,59 +130,62 @@ private fun UrlSearchBar(
             modifier = Modifier.fillMaxWidth(),
             textStyle = TextStyle(
                 color = AppColors.textPrimary,
-                fontSize = 14.sp,
-                lineHeight = 14.sp
+                fontSize = 13.sp
             ),
-            cursorBrush = SolidColor(AppColors.accentTealLight),
             singleLine = true,
+            cursorBrush = SolidColor(AppColors.accentTealLight),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-            keyboardActions = KeyboardActions(onGo = {
-                onUrlSubmit(inputUrl)
-                focusManager.clearFocus()
-            }),
-            decorationBox = { innerTextField ->
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxHeight()
-                ) {
-                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                        if (inputUrl.isEmpty()) {
-                            Text("URLまたは検索", color = AppColors.textTertiary, fontSize = 12.sp)
-                        }
-                        innerTextField()
-                    }
-                    if (inputUrl.isNotEmpty()) {
-                        IconButton(
-                            onClick = { onUrlChange("") },
-                            modifier = Modifier.size(24.dp)
-                        ) {
-                            Icon(Icons.Filled.Clear, contentDescription = "Clear", tint = AppColors.textTertiary, modifier = Modifier.size(16.dp))
-                        }
-                    }
+            keyboardActions = KeyboardActions(
+                onGo = {
+                    onUrlSubmit(inputUrl)
+                    focusManager.clearFocus()
                 }
-            }
+            )
         )
     }
 }
 
 @Composable
-fun ToolButton(
+private fun ToolButton(
     icon: ImageVector?,
     onClick: () -> Unit,
     isSelected: Boolean,
-    containerColor: Color = AppColors.surfaceMedium,
+    activeColor: Color = AppColors.accentTeal,
     text: String? = null
 ) {
-    Surface(
-        onClick = onClick,
-        modifier = Modifier.size(32.dp),
-        shape = RoundedCornerShape(4.dp),
-        color = if (isSelected && containerColor != AppColors.inspectActive) AppColors.accentTeal else containerColor,
-        contentColor = AppColors.textPrimary
+    val background = if (isSelected) activeColor else AppColors.surfaceMedium
+    val contentColor = if (isSelected) Color.White else AppColors.textPrimary
+
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .background(background, RoundedCornerShape(6.dp))
+            .border(
+                1.dp,
+                if (isSelected) activeColor else Color.Transparent,
+                RoundedCornerShape(6.dp)
+            ),
+        contentAlignment = Alignment.Center
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            if (icon != null) Icon(icon, null, modifier = Modifier.size(20.dp))
-            else if (text != null) Text(text, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        IconButton(
+            onClick = onClick,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = contentColor,
+                    modifier = Modifier.size(18.dp)
+                )
+            } else if (text != null) {
+                Text(
+                    text = text,
+                    color = contentColor,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }

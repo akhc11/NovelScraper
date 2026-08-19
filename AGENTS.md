@@ -2,7 +2,7 @@ NovelScraper2/
 ├── AGENTS.md                    ← 今回見せてもらった不変ルール（そのままでOK）
 ├── graphify-out/                ← 構造マップ（前回設定済み）
 └── docs/
-    ├── handoff.md                ← 進捗報告
+    ├── handoff.md                ← 進捗報告（機能系統ごとに分離）
     └── translation_specification.md ← 翻訳機能・品質維持の仕様書
 
 
@@ -10,8 +10,9 @@ NovelScraper2/
 
 ## 0. 作業前作業後の鉄則
 - **作業開始前**: `graphify-out/GRAPH_REPORT.md` を読んでから作業すること
-- **作業中**: 進捗報告やプランを `docs/handoff.md` に記載すること
-- **作業終了前**: 必ず `docs/handoff.md` を更新すること
+- **作業中・作業終了前の進捗記録 (handoffの分離管理)**:
+  - 進捗報告やプランは `docs/` 配下の handoff ファイルに記載・更新すること。
+  - **【絶対遵守】別種・別機能の実装時の分離:** 直前の実装と全く異なる種類・機能の実装を行う場合（例: ダークモードの実装とURL共有の実装のように系統が異なる場合）、既存の `docs/handoff.md` を上書きして過去の記録を消してはならない。`docs/handoff2.md` や `docs/handoff_<機能名>.md` のようにファイルを分けて作成・記録すること。
 
 
 ## 1. 修正時の鉄則

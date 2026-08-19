@@ -5,7 +5,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
@@ -17,17 +16,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.novelscraper.MainUiState
+import com.example.novelscraper.TranslationEngine
 import com.example.novelscraper.ui.theme.AppColors
 
 @Composable
 fun TranslationPanel(
     uiState: MainUiState,
+    onSelectEngineTab: (TranslationEngine) -> Unit,
     onSelectFolderClick: () -> Unit,
-    onStartTranslationClick: () -> Unit,
-    onStopTranslationClick: () -> Unit,
-    onOpenGoogleTranslateClick: () -> Unit,
+    onStartTranslationClick: (TranslationEngine) -> Unit,
+    onStopTranslationClick: (TranslationEngine) -> Unit,
+    onOpenWebTranslateClick: (TranslationEngine) -> Unit,
     onCloseClick: () -> Unit
 ) {
+    val activeEngine = uiState.activeTranslationEngine
+    val engineState = uiState.currentEngineState
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -49,7 +53,7 @@ fun TranslationPanel(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Google翻訳 (バックグラウンド)",
+                    text = "Webバックグラウンド翻訳",
                     color = AppColors.textPrimary,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold
@@ -62,6 +66,51 @@ fun TranslationPanel(
                         modifier = Modifier.size(18.dp)
                     )
                 }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // エンジン切替タブ (Google翻訳 / DeepL翻訳)
+            TabRow(
+                selectedTabIndex = if (activeEngine == TranslationEngine.GOOGLE) 0 else 1,
+                containerColor = AppColors.backgroundDark,
+                contentColor = AppColors.accentTeal,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Tab(
+                    selected = activeEngine == TranslationEngine.GOOGLE,
+                    onClick = { onSelectEngineTab(TranslationEngine.GOOGLE) },
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (uiState.googleTranslationState.isTranslating) {
+                                Text("● ", color = Color(0xFF4CAF50), fontSize = 12.sp)
+                            }
+                            Text(
+                                "Google翻訳",
+                                fontWeight = if (activeEngine == TranslationEngine.GOOGLE) FontWeight.Bold else FontWeight.Normal,
+                                color = if (activeEngine == TranslationEngine.GOOGLE) AppColors.accentTeal else AppColors.textSecondary,
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                )
+                Tab(
+                    selected = activeEngine == TranslationEngine.DEEPL,
+                    onClick = { onSelectEngineTab(TranslationEngine.DEEPL) },
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (uiState.deeplTranslationState.isTranslating) {
+                                Text("● ", color = Color(0xFF4CAF50), fontSize = 12.sp)
+                            }
+                            Text(
+                                "DeepL翻訳",
+                                fontWeight = if (activeEngine == TranslationEngine.DEEPL) FontWeight.Bold else FontWeight.Normal,
+                                color = if (activeEngine == TranslationEngine.DEEPL) AppColors.accentTeal else AppColors.textSecondary,
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                )
             }
 
             Spacer(modifier = Modifier.height(10.dp))
@@ -83,12 +132,12 @@ fun TranslationPanel(
                     contentAlignment = Alignment.CenterStart
                 ) {
                     Text(
-                        text = if (uiState.translationFolderName.isNotEmpty()) {
-                            uiState.translationFolderName
+                        text = if (engineState.folderName.isNotEmpty()) {
+                            engineState.folderName
                         } else {
                             "フォルダを選択してください (.txt)"
                         },
-                        color = if (uiState.translationFolderName.isNotEmpty()) AppColors.textPrimary else AppColors.textTertiary,
+                        color = if (engineState.folderName.isNotEmpty()) AppColors.textPrimary else AppColors.textTertiary,
                         fontSize = 13.sp,
                         maxLines = 1
                     )
@@ -98,7 +147,7 @@ fun TranslationPanel(
 
                 Button(
                     onClick = onSelectFolderClick,
-                    enabled = !uiState.isTranslating,
+                    enabled = !engineState.isTranslating,
                     colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
                     shape = RoundedCornerShape(4.dp),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
@@ -109,23 +158,34 @@ fun TranslationPanel(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // 言語設定 & Google翻訳Web確認ボタン
+            // 設定・出力先案内 & Webサイト確認ボタン
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val outputInfo = if (activeEngine == TranslationEngine.GOOGLE) {
+                    "自動検出 → 日本語 (出力: 翻訳完了_GOOGLE / 3,500字)"
+                } else {
+                    "自動検出 → 日本語 (出力: 翻訳完了_DEEPL / 1,300字)"
+                }
+
                 Text(
-                    text = "設定: 自動検出 → 日本語 (出力先: 翻訳完了_GOOGLE)",
+                    text = outputInfo,
                     color = AppColors.textTertiary,
-                    fontSize = 11.sp
+                    fontSize = 10.sp,
+                    modifier = Modifier.weight(1f)
                 )
 
                 TextButton(
-                    onClick = onOpenGoogleTranslateClick,
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                    onClick = { onOpenWebTranslateClick(activeEngine) },
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                 ) {
-                    Text("Google翻訳を開く", color = AppColors.accentTealLight, fontSize = 11.sp)
+                    Text(
+                        text = if (activeEngine == TranslationEngine.GOOGLE) "Google翻訳を開く" else "DeepLを開く",
+                        color = AppColors.accentTealLight,
+                        fontSize = 11.sp
+                    )
                 }
             }
 
@@ -139,24 +199,24 @@ fun TranslationPanel(
                     .padding(8.dp)
             ) {
                 Text(
-                    text = "ステータス: ${uiState.translationStatusText}",
+                    text = "ステータス: ${engineState.statusText}",
                     color = AppColors.accentTealLight,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium
                 )
-                if (uiState.translationProgress.second > 0) {
+                if (engineState.progress.second > 0) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "全体進捗: ${uiState.translationProgress.first} / ${uiState.translationProgress.second} 件",
+                        text = "全体進捗: ${engineState.progress.first} / ${engineState.progress.second} 件",
                         color = AppColors.textSecondary,
                         fontSize = 11.sp
                     )
                 }
-                if (uiState.translationCurrentFileName.isNotEmpty()) {
+                if (engineState.currentFileName.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "処理中: ${uiState.translationCurrentFileName}" +
-                                if (uiState.translationChunkProgress.second > 0) " (チャンク ${uiState.translationChunkProgress.first}/${uiState.translationChunkProgress.second})" else "",
+                        text = "処理中: ${engineState.currentFileName}" +
+                                if (engineState.chunkProgress.second > 0) " (チャンク ${engineState.chunkProgress.first}/${engineState.chunkProgress.second})" else "",
                         color = AppColors.textMuted,
                         fontSize = 11.sp,
                         maxLines = 1
@@ -172,8 +232,8 @@ fun TranslationPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Button(
-                    onClick = onStartTranslationClick,
-                    enabled = !uiState.isTranslating && uiState.translationFolderUri != null,
+                    onClick = { onStartTranslationClick(activeEngine) },
+                    enabled = !engineState.isTranslating && engineState.folderUri != null,
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AppColors.accentOrange,
@@ -183,12 +243,16 @@ fun TranslationPanel(
                 ) {
                     Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("翻訳開始", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (activeEngine == TranslationEngine.GOOGLE) "Google翻訳開始" else "DeepL翻訳開始",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
 
                 Button(
-                    onClick = onStopTranslationClick,
-                    enabled = uiState.isTranslating,
+                    onClick = { onStopTranslationClick(activeEngine) },
+                    enabled = engineState.isTranslating,
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFFD32F2F),
@@ -198,7 +262,7 @@ fun TranslationPanel(
                 ) {
                     Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("停止", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text("停止", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }

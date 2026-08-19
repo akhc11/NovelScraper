@@ -42,7 +42,9 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
-    private var translationTask: TranslationTask? = null
+    // Google翻訳 & DeepL翻訳の独立したバックグラウンドタスク
+    private var googleTranslationTask: TranslationTask? = null
+    private var deeplTranslationTask: DeeplTranslationTask? = null
 
     init {
         // 過去のバグで保存されてしまった不正な履歴（巨大なJS文字列など）を起動時にクリーンアップ
@@ -171,107 +173,241 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     fun updateCurrentConfig(updater: (ScraperConfig) -> ScraperConfig) { _uiState.update { it.copy(currentConfig = updater(it.currentConfig)) } }
 
     // 翻訳関連のメソッド
-    fun setTranslationFolder(uri: Uri, folderName: String) {
-        _uiState.update {
-            it.copy(
-                translationFolderUri = uri,
-                translationFolderName = folderName
-            )
+    fun setActiveTranslationEngine(engine: TranslationEngine) {
+        _uiState.update { it.copy(activeTranslationEngine = engine) }
+    }
+
+    fun setTranslationFolder(engine: TranslationEngine, uri: Uri, folderName: String) {
+        _uiState.update { state ->
+            when (engine) {
+                TranslationEngine.GOOGLE -> state.copy(
+                    googleTranslationState = state.googleTranslationState.copy(
+                        folderUri = uri,
+                        folderName = folderName
+                    )
+                )
+                TranslationEngine.DEEPL -> state.copy(
+                    deeplTranslationState = state.deeplTranslationState.copy(
+                        folderUri = uri,
+                        folderName = folderName
+                    )
+                )
+            }
         }
     }
 
-    fun setTranslationLanguages(source: String, target: String) {
-        _uiState.update {
-            it.copy(
-                translationSourceLang = source,
-                translationTargetLang = target
-            )
+    fun setTranslationLanguages(engine: TranslationEngine, source: String, target: String) {
+        _uiState.update { state ->
+            when (engine) {
+                TranslationEngine.GOOGLE -> state.copy(
+                    googleTranslationState = state.googleTranslationState.copy(
+                        sourceLang = source,
+                        targetLang = target
+                    )
+                )
+                TranslationEngine.DEEPL -> state.copy(
+                    deeplTranslationState = state.deeplTranslationState.copy(
+                        sourceLang = source,
+                        targetLang = target
+                    )
+                )
+            }
         }
     }
 
-    fun startTranslation() {
-        val folderUri = _uiState.value.translationFolderUri
+    fun startTranslation(engine: TranslationEngine) {
+        val engineState = when (engine) {
+            TranslationEngine.GOOGLE -> _uiState.value.googleTranslationState
+            TranslationEngine.DEEPL -> _uiState.value.deeplTranslationState
+        }
+
+        val folderUri = engineState.folderUri
         if (folderUri == null) {
             Toast.makeText(getApplication(), "翻訳対象のフォルダを選択してください", Toast.LENGTH_SHORT).show()
             return
         }
 
-        if (_uiState.value.isTranslating) return
+        if (engineState.isTranslating) return
 
-        _uiState.update {
-            it.copy(
-                isTranslating = true,
-                translationStatusText = "翻訳タスクを開始中...",
-                translationProgress = Pair(0, 0),
-                translationChunkProgress = Pair(0, 0)
-            )
+        when (engine) {
+            TranslationEngine.GOOGLE -> {
+                _uiState.update {
+                    it.copy(
+                        googleTranslationState = it.googleTranslationState.copy(
+                            isTranslating = true,
+                            statusText = "Google翻訳を開始中...",
+                            progress = Pair(0, 0),
+                            chunkProgress = Pair(0, 0)
+                        )
+                    )
+                }
+                syncServiceStatus()
+
+                val task = TranslationTask(
+                    context = getApplication(),
+                    folderUri = folderUri,
+                    sourceLang = engineState.sourceLang,
+                    targetLang = engineState.targetLang,
+                    listener = object : TranslationTask.TranslationListener {
+                        override fun onProgress(
+                            completedFiles: Int,
+                            totalFiles: Int,
+                            currentFileName: String,
+                            currentChunk: Int,
+                            totalChunks: Int,
+                            statusText: String
+                        ) {
+                            _uiState.update {
+                                it.copy(
+                                    googleTranslationState = it.googleTranslationState.copy(
+                                        progress = Pair(completedFiles, totalFiles),
+                                        currentFileName = currentFileName,
+                                        chunkProgress = Pair(currentChunk, totalChunks),
+                                        statusText = statusText
+                                    )
+                                )
+                            }
+                            syncServiceStatus()
+                        }
+
+                        override fun onFileTranslated(fileName: String, success: Boolean) {}
+
+                        override fun onTaskFinished(success: Boolean, message: String) {
+                            _uiState.update {
+                                it.copy(
+                                    googleTranslationState = it.googleTranslationState.copy(
+                                        isTranslating = false,
+                                        statusText = message
+                                    )
+                                )
+                            }
+                            Toast.makeText(getApplication(), "[Google翻訳] $message", Toast.LENGTH_LONG).show()
+                            googleTranslationTask = null
+                            syncServiceStatus()
+                        }
+                    }
+                )
+                googleTranslationTask = task
+                task.start()
+            }
+            TranslationEngine.DEEPL -> {
+                _uiState.update {
+                    it.copy(
+                        deeplTranslationState = it.deeplTranslationState.copy(
+                            isTranslating = true,
+                            statusText = "DeepL翻訳を開始中...",
+                            progress = Pair(0, 0),
+                            chunkProgress = Pair(0, 0)
+                        )
+                    )
+                }
+                syncServiceStatus()
+
+                val task = DeeplTranslationTask(
+                    context = getApplication(),
+                    folderUri = folderUri,
+                    sourceLang = engineState.sourceLang,
+                    targetLang = engineState.targetLang,
+                    listener = object : TranslationTask.TranslationListener {
+                        override fun onProgress(
+                            completedFiles: Int,
+                            totalFiles: Int,
+                            currentFileName: String,
+                            currentChunk: Int,
+                            totalChunks: Int,
+                            statusText: String
+                        ) {
+                            _uiState.update {
+                                it.copy(
+                                    deeplTranslationState = it.deeplTranslationState.copy(
+                                        progress = Pair(completedFiles, totalFiles),
+                                        currentFileName = currentFileName,
+                                        chunkProgress = Pair(currentChunk, totalChunks),
+                                        statusText = statusText
+                                    )
+                                )
+                            }
+                            syncServiceStatus()
+                        }
+
+                        override fun onFileTranslated(fileName: String, success: Boolean) {}
+
+                        override fun onTaskFinished(success: Boolean, message: String) {
+                            _uiState.update {
+                                it.copy(
+                                    deeplTranslationState = it.deeplTranslationState.copy(
+                                        isTranslating = false,
+                                        statusText = message
+                                    )
+                                )
+                            }
+                            Toast.makeText(getApplication(), "[DeepL翻訳] $message", Toast.LENGTH_LONG).show()
+                            deeplTranslationTask = null
+                            syncServiceStatus()
+                        }
+                    }
+                )
+                deeplTranslationTask = task
+                task.start()
+            }
         }
+    }
 
-        syncServiceStatus()
-
-        val task = TranslationTask(
-            context = getApplication(),
-            folderUri = folderUri,
-            sourceLang = _uiState.value.translationSourceLang,
-            targetLang = _uiState.value.translationTargetLang,
-            listener = object : TranslationTask.TranslationListener {
-                override fun onProgress(
-                    completedFiles: Int,
-                    totalFiles: Int,
-                    currentFileName: String,
-                    currentChunk: Int,
-                    totalChunks: Int,
-                    statusText: String
-                ) {
-                    _uiState.update {
-                        it.copy(
-                            translationProgress = Pair(completedFiles, totalFiles),
-                            translationCurrentFileName = currentFileName,
-                            translationChunkProgress = Pair(currentChunk, totalChunks),
-                            translationStatusText = statusText
-                        )
-                    }
-                    syncServiceStatus()
-                }
-
-                override fun onFileTranslated(fileName: String, success: Boolean) {
-                    // 個別ファイル完了
-                }
-
-                override fun onTaskFinished(success: Boolean, message: String) {
-                    _uiState.update {
-                        it.copy(
+    fun stopTranslation(engine: TranslationEngine) {
+        when (engine) {
+            TranslationEngine.GOOGLE -> {
+                googleTranslationTask?.stop()
+                googleTranslationTask = null
+                _uiState.update {
+                    it.copy(
+                        googleTranslationState = it.googleTranslationState.copy(
                             isTranslating = false,
-                            translationStatusText = message
+                            statusText = "Google翻訳を停止しました"
                         )
-                    }
-                    Toast.makeText(getApplication(), message, Toast.LENGTH_LONG).show()
-                    translationTask = null
-                    syncServiceStatus()
+                    )
                 }
             }
-        )
-        translationTask = task
-        task.start()
+            TranslationEngine.DEEPL -> {
+                deeplTranslationTask?.stop()
+                deeplTranslationTask = null
+                _uiState.update {
+                    it.copy(
+                        deeplTranslationState = it.deeplTranslationState.copy(
+                            isTranslating = false,
+                            statusText = "DeepL翻訳を停止しました"
+                        )
+                    )
+                }
+            }
+        }
+        syncServiceStatus()
     }
 
     /**
-     * スクレイピングタスク・翻訳タスクの状態を一元管理し、
+     * スクレイピングタスク・Google翻訳・DeepL翻訳の状態を一元管理し、
      * タスク変更時のみ的確にService通知を更新する（MainActivityからの毎フレームIPC通信を完全排除）。
      */
     private fun syncServiceStatus() {
         val scrapingCount = taskList.size
-        val isTranslating = _uiState.value.isTranslating
-        val ui = _uiState.value
+        val googleState = _uiState.value.googleTranslationState
+        val deeplState = _uiState.value.deeplTranslationState
+        val isTranslating = googleState.isTranslating || deeplState.isTranslating
 
         if (scrapingCount > 0 || isTranslating) {
-            val msg = when {
-                scrapingCount > 0 && isTranslating ->
-                    "スクレイプト: ${scrapingCount}件 / 翻訳: ${ui.translationProgress.first}/${ui.translationProgress.second}件"
-                scrapingCount > 0 ->
-                    taskList.lastOrNull()?.let { "${it.folderName}: ${it.status}" } ?: "実行中: ${scrapingCount}件"
-                else ->
-                    "翻訳中: ${ui.translationProgress.first}/${ui.translationProgress.second}件 (${ui.translationStatusText})"
+            val statusParts = mutableListOf<String>()
+            if (scrapingCount > 0) {
+                statusParts.add("スクレイプト: ${scrapingCount}件")
+            }
+            if (googleState.isTranslating) {
+                statusParts.add("Google: ${googleState.progress.first}/${googleState.progress.second}件")
+            }
+            if (deeplState.isTranslating) {
+                statusParts.add("DeepL: ${deeplState.progress.first}/${deeplState.progress.second}件")
+            }
+            val msg = if (statusParts.isNotEmpty()) {
+                statusParts.joinToString(" / ")
+            } else {
+                "処理中..."
             }
             updateServiceNotification(msg)
         } else {
@@ -296,18 +432,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         } catch (_: Exception) {
             // Service更新時の例外防止
         }
-    }
-
-    fun stopTranslation() {
-        translationTask?.stop()
-        translationTask = null
-        _uiState.update {
-            it.copy(
-                isTranslating = false,
-                translationStatusText = "翻訳を停止しました"
-            )
-        }
-        syncServiceStatus()
     }
 
     fun startScraping(targetUrl: String, initialFolderName: String = "(取得中...)") {
@@ -373,7 +497,9 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         super.onCleared()
         taskList.forEach { it.stop() }
         taskList.clear()
-        translationTask?.stop()
-        translationTask = null
+        googleTranslationTask?.stop()
+        googleTranslationTask = null
+        deeplTranslationTask?.stop()
+        deeplTranslationTask = null
     }
 }

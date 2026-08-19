@@ -34,6 +34,7 @@ class MainActivity : ComponentActivity() {
         viewModel = ViewModelProvider(this)[ScrapingViewModel::class.java]
         setupSystemUI()
         checkNotificationPermission()
+        WebView.setWebContentsDebuggingEnabled(true)
 
         setContent {
             NovelScraperTheme {
@@ -95,7 +96,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        WebView.setWebContentsDebuggingEnabled(false)
+        WebView.setWebContentsDebuggingEnabled(true)
     }
 
     private fun performNavigation(input: String, view: WebView) {

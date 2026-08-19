@@ -69,8 +69,9 @@ class DeeplTranslationTask(
     }
 
     init {
-        // DeepLのWeb版はデスクトップ表示（PC用UserAgent）で確実にWebUIをロードする
+        // DeepLのWeb版はPC版サイト表示（正規Android Chrome PC版UA）で確実にWebUIをロード
         WebViewHelper.applyStandardSettings(webView, blockImages = false, isDesktop = true)
+        WebViewHelper.applyVirtualSize(webView) // ヘッドレス（0x0）判定を解除
     }
 
     fun start() {

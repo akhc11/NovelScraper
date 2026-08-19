@@ -46,6 +46,8 @@ class ScrapingTask(
 
     init {
         WebViewHelper.applyStandardSettings(webView, !useImages, isDesktop)
+        WebViewHelper.applyVirtualSize(webView) // ヘッドレス（0x0）判定の完全解除
+
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 if (!isRunning) return
@@ -53,7 +55,7 @@ class ScrapingTask(
                 if (loadedUrl.startsWith("javascript:") || loadedUrl.startsWith("data:")) return
                 if (isPageError) return // エラー時はonPageFinishedを処理しない
 
-                // CF対策(Turnstile自動クリック)とスクロール模倣を単一のevaluateJavascript呼び出しに集約（IPC通信回数の半減）
+                // CF対策(生体タップ + スクロール模倣)を集約実行
                 val shouldScroll = stateMachine.state == ScrapingStateMachine.State.SCRAPING
                 view?.evaluateJavascript(CloudflareDetector.buildPageLoadInitJs(shouldScroll), null)
 

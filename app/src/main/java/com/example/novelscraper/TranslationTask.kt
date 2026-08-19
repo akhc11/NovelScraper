@@ -42,7 +42,7 @@ class TranslationTask(
 
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val fileStore = TranslationFileStore(context)
+    private val fileStore = TranslationFileStore(context, TranslationFileStore.GOOGLE_OUTPUT_FOLDER)
 
     // バックグラウンド専用の独立したWebView（画面のCompose/Activityライフサイクルから完全に分離）
     private val webView = WebView(context.applicationContext)
@@ -83,6 +83,7 @@ class TranslationTask(
 
     init {
         WebViewHelper.applyStandardSettings(webView, blockImages = false, isDesktop = false)
+        WebViewHelper.applyVirtualSize(webView) // ヘッドレス（0x0）判定を解除
     }
 
     fun start() {

@@ -4,6 +4,20 @@ import android.net.Uri
 
 enum class PanelType { NONE, SETTINGS, HISTORY, FAVORITES, TRANSLATION }
 
+enum class TranslationEngine { GOOGLE, DEEPL }
+
+data class EngineTranslationState(
+    val folderUri: Uri? = null,
+    val folderName: String = "",
+    val isTranslating: Boolean = false,
+    val statusText: String = "待機中",
+    val progress: Pair<Int, Int> = Pair(0, 0), // (完了件数, 総件数)
+    val currentFileName: String = "",
+    val chunkProgress: Pair<Int, Int> = Pair(0, 0), // (現在チャンク, 総チャンク)
+    val sourceLang: String = "auto",
+    val targetLang: String = "ja"
+)
+
 data class MainUiState(
     val currentUrl: String = "",
     val inputUrl: String = "",
@@ -15,14 +29,20 @@ data class MainUiState(
     val blockImages: Boolean = false,
     val isDesktopMode: Boolean = false,
     val isWebViewDarkMode: Boolean = true,
-    // 翻訳関連の状態
-    val translationFolderUri: Uri? = null,
-    val translationFolderName: String = "",
-    val isTranslating: Boolean = false,
-    val translationStatusText: String = "待機中",
-    val translationProgress: Pair<Int, Int> = Pair(0, 0), // (完了件数, 総件数)
-    val translationCurrentFileName: String = "",
-    val translationChunkProgress: Pair<Int, Int> = Pair(0, 0), // (現在チャンク, 総チャンク)
-    val translationSourceLang: String = "auto",
-    val translationTargetLang: String = "ja"
-)
+    
+    // 翻訳関連の状態（エンジンごとに独立管理）
+    val activeTranslationEngine: TranslationEngine = TranslationEngine.GOOGLE,
+    val googleTranslationState: EngineTranslationState = EngineTranslationState(),
+    val deeplTranslationState: EngineTranslationState = EngineTranslationState()
+) {
+    /** 現在選択中のタブの翻訳エンジン状態 */
+    val currentEngineState: EngineTranslationState
+        get() = when (activeTranslationEngine) {
+            TranslationEngine.GOOGLE -> googleTranslationState
+            TranslationEngine.DEEPL -> deeplTranslationState
+        }
+
+    /** いずれかのエンジンが翻訳中かどうか */
+    val isAnyTranslating: Boolean
+        get() = googleTranslationState.isTranslating || deeplTranslationState.isTranslating
+}

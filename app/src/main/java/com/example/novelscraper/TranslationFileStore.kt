@@ -13,37 +13,41 @@ data class TranslationFileInfo(
     val size: Long
 )
 
-class TranslationFileStore(private val context: Context) {
+class TranslationFileStore(
+    private val context: Context,
+    private val outputFolderName: String = GOOGLE_OUTPUT_FOLDER
+) {
 
     companion object {
-        const val OUTPUT_FOLDER_NAME = "翻訳完了_GOOGLE"
+        const val GOOGLE_OUTPUT_FOLDER = "翻訳完了_GOOGLE"
+        const val DEEPL_OUTPUT_FOLDER = "翻訳完了_DEEPL"
+        const val OUTPUT_FOLDER_NAME = GOOGLE_OUTPUT_FOLDER // 互換性維持用
         private const val TAG = "TranslationFileStore"
     }
 
     /**
-     * 翻訳完了フォルダ（翻訳完了_GOOGLE）を取得、存在しなければ新規作成する。
+     * 翻訳完了フォルダ（指定された outputFolderName）を取得、存在しなければ新規作成する。
      * DocumentFile.findFile は環境により失敗して連番フォルダ (1), (2) が作られる原因となるため、
      * 必ず listFiles() の大文字小文字無視スキャンで既存フォルダを再利用する。
      */
     private fun getOrCreateOutputDirectory(rootDoc: DocumentFile): DocumentFile? {
         val children = rootDoc.listFiles()
-        // 既存の「翻訳完了_GOOGLE」または「翻訳完了_google」等のフォルダを探す
+        // 既存のフォルダ（例: 「翻訳完了_GOOGLE」または「翻訳完了_DEEPL」等）を探す
         val existingDir = children.firstOrNull { 
             it.isDirectory && (
-                it.name.equals(OUTPUT_FOLDER_NAME, ignoreCase = true) ||
-                it.name?.startsWith("翻訳完了_GOOGLE", ignoreCase = true) == true ||
-                it.name?.startsWith("翻訳完了_google", ignoreCase = true) == true
+                it.name.equals(outputFolderName, ignoreCase = true) ||
+                it.name?.startsWith(outputFolderName, ignoreCase = true) == true
             )
         }
         if (existingDir != null) {
             return existingDir
         }
-        return rootDoc.createDirectory(OUTPUT_FOLDER_NAME)
+        return rootDoc.createDirectory(outputFolderName)
     }
 
     /**
      * 指定されたフォルダ直下の .txt ファイルのうち、
-     * 翻訳完了フォルダ（翻訳完了_GOOGLE）に同名ファイルが存在しない未翻訳ファイル一覧を取得する。
+     * 翻訳完了フォルダに同名ファイルが存在しない未翻訳ファイル一覧を取得する。
      */
     suspend fun getPendingTextFiles(folderUri: Uri): List<TranslationFileInfo> = withContext(Dispatchers.IO) {
         val rootDoc = DocumentFile.fromTreeUri(context, folderUri) ?: return@withContext emptyList()
@@ -91,7 +95,7 @@ class TranslationFileStore(private val context: Context) {
     }
 
     /**
-     * 翻訳完了テキストを「翻訳完了_GOOGLE」フォルダ配下に同名で保存する。
+     * 翻訳完了テキストを出力フォルダ配下に同名で保存する。
      * 連番フォルダや連番ファイルが作成されないよう、確実に同一フォルダ内に上書きまたは作成する。
      */
     suspend fun saveTranslatedFile(folderUri: Uri, fileName: String, content: String): Result<Uri> = withContext(Dispatchers.IO) {
@@ -100,7 +104,7 @@ class TranslationFileStore(private val context: Context) {
                 ?: throw IllegalStateException("Cannot access folder: $folderUri")
 
             val outputDirDoc = getOrCreateOutputDirectory(rootDoc)
-                ?: throw IllegalStateException("Failed to get or create output directory: $OUTPUT_FOLDER_NAME")
+                ?: throw IllegalStateException("Failed to get or create output directory: $outputFolderName")
 
             // 既存ファイルがあれば取得（大文字小文字無視で検索）、なければ新規作成
             val targetFileDoc = outputDirDoc.listFiles().firstOrNull { 

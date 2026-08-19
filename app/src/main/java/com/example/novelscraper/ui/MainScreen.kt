@@ -70,7 +70,7 @@ fun MainScreen(
             }
             val doc = DocumentFile.fromTreeUri(context, treeUri)
             val folderName = doc?.name ?: treeUri.lastPathSegment ?: "選択フォルダ"
-            viewModel.setTranslationFolder(treeUri, folderName)
+            viewModel.setTranslationFolder(uiState.activeTranslationEngine, treeUri, folderName)
         }
     }
 
@@ -181,10 +181,21 @@ fun MainScreen(
                         }
                 )
 
+                val isAnyTranslating = uiState.isAnyTranslating
+                val translationStatus = when {
+                    uiState.googleTranslationState.isTranslating && uiState.deeplTranslationState.isTranslating ->
+                        "Google: ${uiState.googleTranslationState.progress.first}/${uiState.googleTranslationState.progress.second}件 | DeepL: ${uiState.deeplTranslationState.progress.first}/${uiState.deeplTranslationState.progress.second}件"
+                    uiState.googleTranslationState.isTranslating ->
+                        "Google翻訳: ${uiState.googleTranslationState.statusText}"
+                    uiState.deeplTranslationState.isTranslating ->
+                        "DeepL翻訳: ${uiState.deeplTranslationState.statusText}"
+                    else -> currentStatusText
+                }
+
                 Text(
-                    text = if (uiState.isTranslating) "翻訳: ${uiState.translationStatusText}" else currentStatusText,
+                    text = if (isAnyTranslating) translationStatus else currentStatusText,
                     modifier = Modifier.fillMaxWidth().background(AppColors.backgroundMedium).padding(4.dp),
-                    color = if (uiState.isTranslating) AppColors.accentTealLight else AppColors.textMuted,
+                    color = if (isAnyTranslating) AppColors.accentTealLight else AppColors.textMuted,
                     fontSize = 11.sp,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center
                 )
@@ -251,14 +262,18 @@ fun MainScreen(
                 PanelType.TRANSLATION -> {
                     TranslationPanel(
                         uiState = uiState,
+                        onSelectEngineTab = { engine -> viewModel.setActiveTranslationEngine(engine) },
                         onSelectFolderClick = { folderLauncher.launch(null) },
-                        onStartTranslationClick = { viewModel.startTranslation() },
-                        onStopTranslationClick = { viewModel.stopTranslation() },
-                        onOpenGoogleTranslateClick = {
-                            val gUrl = "https://translate.google.com/?sl=${uiState.translationSourceLang}&tl=${uiState.translationTargetLang}&op=translate"
-                            webViewRef?.let { onNavigate(gUrl, it) }
-                            viewModel.setCurrentUrl(gUrl)
-                            viewModel.setInputUrl(gUrl)
+                        onStartTranslationClick = { engine -> viewModel.startTranslation(engine) },
+                        onStopTranslationClick = { engine -> viewModel.stopTranslation(engine) },
+                        onOpenWebTranslateClick = { engine ->
+                            val targetUrl = when (engine) {
+                                TranslationEngine.GOOGLE -> "https://translate.google.com/?sl=auto&tl=ja&op=translate"
+                                TranslationEngine.DEEPL -> "https://www.deepl.com/ja/translator#auto/ja/"
+                            }
+                            webViewRef?.let { onNavigate(targetUrl, it) }
+                            viewModel.setCurrentUrl(targetUrl)
+                            viewModel.setInputUrl(targetUrl)
                             viewModel.closePanels()
                         },
                         onCloseClick = { viewModel.closePanels() }

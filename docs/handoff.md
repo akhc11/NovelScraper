@@ -1,23 +1,14 @@
-# 引き継ぎ状況 - 最終更新: 2026-08-19 (ダークモード関連コード完全削除・初期クリーン復元完了)
+# 引き継ぎ状況 - 最終更新: 2026-08-25 (プロジェクト整理・レビュー完了)
 
 ## 現在の状態
-- **ダークモード実装コードを全ファイルから完全削除。クリーンな初期状態に戻した。**
-- `./gradlew assembleDebug` → BUILD SUCCESSFUL 確認済み。
-
-## 削除したファイルと内容
-
-| ファイル | 削除内容 |
-|---|---|
-| `gradle/libs.versions.toml` | `androidxWebkit = "1.12.1"` と `androidx-webkit` エントリ |
-| `app/build.gradle.kts` | `implementation(libs.androidx.webkit)` と `jvmArgs` |
-| `app/src/main/res/values/themes.xml` | `android:isLightTheme=false` |
-| `WebViewHelper.kt` | `DARK_BG_COLOR`・`applyDarkMode()`・webkit import |
-| `MainUiState.kt` | `isWebViewDarkMode: Boolean` |
-| `PreferencesRepository.kt` | `WEBVIEW_DARK_MODE` キー・`webViewDarkModeFlow`・`saveWebViewDarkMode()` |
-| `ScrapingViewModel.kt` | `webViewDarkModeFlow` 購読・`toggleWebViewDarkMode()` |
-| `HeaderToolbar.kt` | `onToggleDarkModeClick` パラメータ・🌙/☀️ ボタン |
-| `SettingsPanel.kt` | `onToggleWebViewDarkModeClick`・スイッチUI |
-| `MainScreen.kt` | `nightCtx`・`applyDarkMode()`・`view.reload()`・`onToggleDarkModeClick` |
+- **プロジェクト整理**: ルートディレクトリの不要なログやスクリプトを削除し、過去の `handoff` ファイルを `docs/history/` へ整理しました。
+- **アーキテクチャレビュー**: MVVM パターンの整合性と `AGENTS.md` への準拠を確認済み。
+- **Graphify**: ナレッジグラフを最新の状態に更新済み。
+- **機能状況**: 
+    - ダークモード: 実装済み・安定。
+    - 翻訳機能: Google翻訳（手動操作再現）および DeepL 連携実装済み。
+    - URL共有: 受信・抽出機能実装済み。
 
 ## 次のステップ
-ユーザーの指示待ち。WebViewダークモードの再実装方針が決まり次第、改めて設計・実装を行う。
+- 特になし（ユーザーの指示待ち）。
+- 今後の新機能実装時は、この `handoff.md` を更新するか、新しい `handoff_<機能名>.md` を作成して記録を継続してください。

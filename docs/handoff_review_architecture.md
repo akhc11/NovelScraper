@@ -1,6 +1,21 @@
 # 全体レビュー報告 - 堅牢性・パッチワーク・アーキテクチャ (作成日: 2026-08-25)
 
 > 対象: graphify更新後 (558ノード/746エッジ/51コミュニティ) のコードベース実査に基づく。
+> **進捗: P1-1〜P1-5 + A-2 実装完了（2026-08-25、コミット 0eabdcd 以降）。** 検証: compileDebugKotlin/testDebugUnitTest SUCCESS。実機確認済み(〜P1-4)。
+
+### 実装詳細（P1-5 + A-2）
+| 項目 | 実装内容 |
+|---|---|
+| P1-5 | buildScrapingScript のデバッグ行セレクタ検出を「TreeWalker 1回の事前収集配列」方式へ変更（旧: 行ごとに再走査 O(lines×nodes)）。意味論は維持（文書順で最初に一致したテキストノードの親） |
+| A-2 | `MainScreenCallbacks` data class 新設（11ラムダ集約）。MainScreen 署名を `(viewModel, callbacks)` に縮減、MainActivity 呼び出し側を対応 |
+
+### 実装詳細（P1-1〜P1-4）
+| 項目 | 実装内容 |
+|---|---|
+| P1-1 | `JS_UNIQUE_SELECTOR` / `JS_SHORT_SELECTOR` 定数化し3スクリプト（scraping/popup/probe）で共有。raw文字列の単一バックスラッシュ規約をコメント明記 |
+| P1-2 | `setupSystemUI` から非推奨 `statusBarColor` を削除。エッジトゥエッジ+Scaffold黒背景で外見維持。`android.graphics.Color` import削除、警告解消 |
+| P1-3 | DialogHelperの静的boolean廃止 → `WeakReference<AlertDialog>` + 同一コンテキスト&isShowing判定へ。Activity再生成後のフラグ固定バグを構造的に排除 |
+| P1-4 | 新規 `ExcludeSelectorCodec.kt`（merge/remove純粋関数）+ VM委譲リファクタ + `ExcludeSelectorCodecTest.kt` 9ケース追加（空/重複/trim/空要素/正規化）全パス |
 
 ## 1. 総評
 

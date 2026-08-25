@@ -130,24 +130,12 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     fun addExcludeSelector(selector: String) {
         if (selector.isEmpty()) return
-        updateCurrentConfig { old -> old.copy(exclude = mergedExclude(old.exclude, selector)) }
-    }
-
-    private fun mergedExclude(current: String, selector: String): String {
-        val list = current.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-        return if (list.contains(selector)) {
-            list.joinToString(", ")
-        } else {
-            (list + selector).joinToString(", ")
-        }
+        updateCurrentConfig { old -> old.copy(exclude = ExcludeSelectorCodec.merge(old.exclude, selector)) }
     }
 
     fun removeExcludeSelector(selector: String) {
         if (selector.isEmpty()) return
-        updateCurrentConfig { old ->
-            val list = old.exclude.split(",").map { it.trim() }.filter { it.isNotEmpty() && it != selector }
-            old.copy(exclude = list.joinToString(", "))
-        }
+        updateCurrentConfig { old -> old.copy(exclude = ExcludeSelectorCodec.remove(old.exclude, selector)) }
     }
 
     fun addTask(task: ScrapingTask) { taskList.add(task); refreshStatus() }
@@ -261,7 +249,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 SelectorField.CHAPTER -> state.currentConfig.copy(chapter = selector)
                 SelectorField.FOLDER -> state.currentConfig.copy(folder = selector)
                 SelectorField.FOLDER_LINK -> state.currentConfig.copy(folderLink = selector)
-                SelectorField.EXCLUDE -> state.currentConfig.copy(exclude = mergedExclude(state.currentConfig.exclude, selector))
+                SelectorField.EXCLUDE -> state.currentConfig.copy(exclude = ExcludeSelectorCodec.merge(state.currentConfig.exclude, selector))
             }
             state.copy(currentConfig = updated)
         }

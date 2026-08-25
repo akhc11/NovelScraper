@@ -6,6 +6,46 @@ import java.util.Base64
 
 object ScrapingScriptBuilder {
 
+    // --- JS共通スニペット（3スクリプト間の重複排除。仕様変更はここ1箇所のみ） ---
+    // 注意: Kotlin raw文字列のため `\s` 等はJSへそのまま渡る（二重エスケープ禁止）
+    private val JS_UNIQUE_SELECTOR = """
+        function getUniqueSelector(el) {
+            if (!el || el.nodeType !== 1) return '';
+            var path = [];
+            while (el && el.nodeType === 1) {
+                var sel = el.nodeName.toLowerCase();
+                if (el.id && !String(el.id).match(/^[0-9]/)) {
+                    sel += '#' + el.id;
+                    path.unshift(sel);
+                    break;
+                } else {
+                    var sib = el, nth = 1;
+                    while (sib = sib.previousElementSibling) {
+                        if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++;
+                    }
+                    if (nth !== 1) sel += ':nth-of-type(' + nth + ')';
+                }
+                path.unshift(sel);
+                el = el.parentNode;
+                if (path.length > 5 || (el && el.tagName === 'BODY')) break;
+            }
+            return path.join(' > ');
+        }
+    """.trimIndent()
+
+    private val JS_SHORT_SELECTOR = """
+        function shortSelector(node) {
+            var tag = node.tagName.toLowerCase();
+            if (node.id && !String(node.id).match(/^[0-9]/)) return tag + '#' + node.id;
+            if (typeof node.className === 'string' && node.className.trim()) {
+                var cls = node.className.trim().split(/\s+/)[0];
+                if (cls) return tag + '.' + cls;
+            }
+            return null;
+        }
+    """.trimIndent()
+
+
     fun buildScrapingScript(config: ScraperConfig, useImages: Boolean, isDebug: Boolean = false): String {
         val configJson = Json.encodeToString(config)
         val configBase64 = Base64.getEncoder().encodeToString(configJson.toByteArray(Charsets.UTF_8))
@@ -16,30 +56,9 @@ object ScrapingScriptBuilder {
                     var config = JSON.parse(decodeURIComponent(escape(atob('$configBase64'))));
                     var result = { title: "", content: "", nextUrl: "", chapter: "", folderName: "", debugLines: null };
                     function clean(t) { return t ? t.trim() : ""; }
-                    
-                    // --- CSS セレクタ取得ユーティリティ ---
-                    function getUniqueSelector(el) {
-                        if (!el || el.nodeType !== 1) return "";
-                        var path = [];
-                        while (el && el.nodeType === 1) {
-                            var sel = el.nodeName.toLowerCase();
-                            if (el.id && !el.id.match(/^[0-9]/)) {
-                                sel += '#' + el.id;
-                                path.unshift(sel);
-                                break;
-                            } else {
-                                var sib = el, nth = 1;
-                                while (sib = sib.previousElementSibling) {
-                                    if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++;
-                                }
-                                if (nth !== 1) sel += ':nth-of-type(' + nth + ')';
-                            }
-                            path.unshift(sel);
-                            el = el.parentNode;
-                            if (path.length > 5 || (el && el.tagName === 'BODY')) break;
-                        }
-                        return path.join(' > ');
-                    }
+
+                    // --- CSS セレクタ取得ユーティリティ（共通スニペット） ---
+                    ${JS_UNIQUE_SELECTOR}
 
                     // --- 除外処理 ---
                     // 前回実行で付与した除外マークを必ず剥離してから現configを適用する
@@ -133,6 +152,19 @@ object ScrapingScriptBuilder {
                         var formattedLines = [];
                         var debugLines = [];
 
+                        // デバッグ用テキストノードを1回だけ事前収集（行ごとのTreeWalker再走査を排除）。
+                        // 行→セレクタの意味論は変更しない（文書順で最初に一致したテキストノードの親）
+                        var dbgTexts = [];
+                        if (${isDebug}) {
+                            try {
+                                var dbgWalker = document.createTreeWalker(b, NodeFilter.SHOW_TEXT, null, false);
+                                var dbgNode;
+                                while ((dbgNode = dbgWalker.nextNode())) {
+                                    dbgTexts.push({ t: dbgNode.textContent, el: dbgNode.parentElement });
+                                }
+                            } catch(e){}
+                        }
+
                         lines.forEach(function(line) {
                             var l = line.replace(/^[　 \t\s]+|[　 \t\s]+$/g, '');
                             if (l.length === 0) return;
@@ -146,15 +178,12 @@ object ScrapingScriptBuilder {
                             formattedLines.push(processed);
 
                             if (${isDebug}) {
-                                // デバッグモード時：元の要素のセレクタを探す
+                                // 元の要素のセレクタを探す（事前収集配列を文書順に走査し最初の一致を採用）
                                 var selector = "";
                                 try {
-                                    // 完全に一致するテキストを持つ要素を元のコンテナ内から探す
-                                    var walker = document.createTreeWalker(b, NodeFilter.SHOW_TEXT, null, false);
-                                    var node;
-                                    while(node = walker.nextNode()) {
-                                        if (node.textContent.includes(l)) {
-                                            selector = getUniqueSelector(node.parentElement);
+                                    for (var di = 0; di < dbgTexts.length; di++) {
+                                        if (dbgTexts[di].t.includes(l)) {
+                                            selector = getUniqueSelector(dbgTexts[di].el);
                                             break;
                                         }
                                     }
@@ -285,28 +314,8 @@ object ScrapingScriptBuilder {
                 document.body.appendChild(hint);
                 setTimeout(function(){ if (hint.parentNode) hint.parentNode.removeChild(hint); }, 3000);
 
-                function getUniqueSelector(el) {
-                    if (!el || el.nodeType !== 1) return "";
-                    var path = [];
-                    while (el && el.nodeType === 1) {
-                        var sel = el.nodeName.toLowerCase();
-                        if (el.id && !el.id.match(/^[0-9]/)) {
-                            sel += '#' + el.id;
-                            path.unshift(sel);
-                            break;
-                        } else {
-                            var sib = el, nth = 1;
-                            while (sib = sib.previousElementSibling) {
-                                if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++;
-                            }
-                            if (nth !== 1) sel += ':nth-of-type(' + nth + ')';
-                        }
-                        path.unshift(sel);
-                        el = el.parentNode;
-                        if (path.length > 5 || (el && el.tagName === 'BODY')) break;
-                    }
-                    return path.join(' > ');
-                }
+                // CSS セレクタ取得ユーティリティ（共通スニペット）
+                ${JS_UNIQUE_SELECTOR}
 
                 function highlight(el) {
                     if (prevHighlight) prevHighlight.style.outline = '';
@@ -355,15 +364,8 @@ object ScrapingScriptBuilder {
                     return t || '(テキストなし)';
                 }
 
-                function shortSelector(node) {
-                    var tag = node.tagName.toLowerCase();
-                    if (node.id && !String(node.id).match(/^[0-9]/)) return tag + '#' + node.id;
-                    if (typeof node.className === 'string' && node.className.trim()) {
-                        var cls = node.className.trim().split(/\s+/)[0];
-                        if (cls) return tag + '.' + cls;
-                    }
-                    return null;
-                }
+                // 短縮セレクタ（共通スニペット）
+                ${JS_SHORT_SELECTOR}
 
                 function getCandidates(el) {
                     var cands = [];
@@ -573,34 +575,11 @@ object ScrapingScriptBuilder {
             (function(){
                 try {
                     var baseEl = document.querySelector('$safeSelector');
-                    if (!baseEl) return '[]';
-                    function getUniqueSelector(el) {
-                        if (!el || el.nodeType !== 1) return '';
-                        var path = [];
-                        while (el && el.nodeType === 1) {
-                            var sel = el.nodeName.toLowerCase();
-                            if (el.id && !String(el.id).match(/^[0-9]/)) { sel += '#' + el.id; path.unshift(sel); break; }
-                            else {
-                                var sib = el, nth = 1;
-                                while (sib = sib.previousElementSibling) { if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++; }
-                                if (nth !== 1) sel += ':nth-of-type(' + nth + ')';
-                            }
-                            path.unshift(sel);
-                            el = el.parentNode;
-                            if (path.length > 5 || (el && el.tagName === 'BODY')) break;
-                        }
-                        return path.join(' > ');
-                    }
-                    function shortSelector(node) {
-                        var tag = node.tagName.toLowerCase();
-                        if (node.id && !String(node.id).match(/^[0-9]/)) return tag + '#' + node.id;
-                        if (typeof node.className === 'string' && node.className.trim()) {
-                            var cls = node.className.trim().split(/\s+/)[0];
-                            if (cls) return tag + '.' + cls;
-                        }
-                        return null;
-                    }
-                    var cands = [];
+                if (!baseEl) return '[]';
+                // 共通スニペット
+                ${JS_UNIQUE_SELECTOR}
+                ${JS_SHORT_SELECTOR}
+                var cands = [];
                     var seen = {};
                     function push(node, label, sel) {
                         if (!node || node.nodeType !== 1) return;

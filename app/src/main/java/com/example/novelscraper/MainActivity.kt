@@ -2,7 +2,6 @@ package com.example.novelscraper
 
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -20,6 +19,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.novelscraper.ui.MainScreen
+import com.example.novelscraper.ui.MainScreenCallbacks
 import com.example.novelscraper.ui.theme.NovelScraperTheme
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -41,26 +41,28 @@ class MainActivity : ComponentActivity() {
             NovelScraperTheme {
                 MainScreen(
                     viewModel = viewModel,
-                    onStartScraping = { url -> viewModel.startScraping(url) },
-                    onResumeScraping = { url, folder -> viewModel.startScraping(url, folder) },
-                    onLaunchAnalysisTool = { view -> launchAnalysisTool(view) },
-                    onSetupWebView = { view -> setupWebView(view) },
-                    onInjectInspector = { view -> injectInspector(view) },
-                    onRemoveInspector = { view -> removeInspector(view) },
-                    onNavigate = { url, view -> performNavigation(url, view) },
-                    onRequestExclude = { selector -> handleExcludeRequest(selector) },
-                    onShowAddFavorite = { title, url ->
-                        DialogHelper.showAddFavoriteDialog(this, title) { name ->
-                            viewModel.saveFavorite(name, url)
-                        }
-                    },
-                    onShowSavePreset = {
-                        val state = viewModel.uiState.value
-                        DialogHelper.showSavePresetDialog(
-                            this, state.currentPresetName, state.currentUrl, viewModel.presets.value
-                        ) { name -> viewModel.savePreset(name, state.currentConfig) }
-                    },
-                    onTestRun = { view -> performTestRun(view) }
+                    callbacks = MainScreenCallbacks(
+                        onStartScraping = { url -> viewModel.startScraping(url) },
+                        onResumeScraping = { url, folder -> viewModel.startScraping(url, folder) },
+                        onLaunchAnalysisTool = { view -> launchAnalysisTool(view) },
+                        onSetupWebView = { view -> setupWebView(view) },
+                        onInjectInspector = { view -> injectInspector(view) },
+                        onRemoveInspector = { view -> removeInspector(view) },
+                        onNavigate = { url, view -> performNavigation(url, view) },
+                        onRequestExclude = { selector -> handleExcludeRequest(selector) },
+                        onShowAddFavorite = { title, url ->
+                            DialogHelper.showAddFavoriteDialog(this, title) { name ->
+                                viewModel.saveFavorite(name, url)
+                            }
+                        },
+                        onShowSavePreset = {
+                            val state = viewModel.uiState.value
+                            DialogHelper.showSavePresetDialog(
+                                this, state.currentPresetName, state.currentUrl, viewModel.presets.value
+                            ) { name -> viewModel.savePreset(name, state.currentConfig) }
+                        },
+                        onTestRun = { view -> performTestRun(view) }
+                    )
                 )
             }
         }
@@ -92,9 +94,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun setupSystemUI() {
-        window.statusBarColor = Color.BLACK
-        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = false
+        // API 35で非推奨のstatusBarColorの代替。エッジ・トゥ・エッジで描画し、
+        // ステータスバー領域はScaffoldの黒背景が見えるため外見は従来どおり黒。
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = false
     }
 
     override fun onResume() {

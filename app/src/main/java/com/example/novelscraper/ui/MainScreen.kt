@@ -31,20 +31,27 @@ import com.example.novelscraper.WebViewHelper
 import com.example.novelscraper.ui.components.*
 import com.example.novelscraper.ui.theme.AppColors
 
+/**
+ * MainScreen と Activity の境界コールバック集約（引数爆発の構造的解消）。
+ */
+data class MainScreenCallbacks(
+    val onStartScraping: (String) -> Unit,
+    val onResumeScraping: (String, String) -> Unit,
+    val onLaunchAnalysisTool: (WebView) -> Unit,
+    val onSetupWebView: (WebView) -> Unit,
+    val onInjectInspector: (WebView?) -> Unit,
+    val onRemoveInspector: (WebView?) -> Unit,
+    val onNavigate: (String, WebView) -> Unit,
+    val onShowAddFavorite: (String, String) -> Unit,
+    val onShowSavePreset: () -> Unit,
+    val onTestRun: (WebView) -> Unit,
+    val onRequestExclude: (String) -> Unit
+)
+
 @Composable
 fun MainScreen(
     viewModel: ScrapingViewModel,
-    onStartScraping: (String) -> Unit,
-    onResumeScraping: (String, String) -> Unit,
-    onLaunchAnalysisTool: (WebView) -> Unit,
-    onSetupWebView: (WebView) -> Unit,
-    onInjectInspector: (WebView?) -> Unit,
-    onRemoveInspector: (WebView?) -> Unit,
-    onNavigate: (String, WebView) -> Unit,
-    onShowAddFavorite: (String, String) -> Unit,
-    onShowSavePreset: () -> Unit,
-    onTestRun: (WebView) -> Unit,
-    onRequestExclude: (String) -> Unit
+    callbacks: MainScreenCallbacks
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val presets by viewModel.presets.collectAsState()
@@ -89,9 +96,9 @@ fun MainScreen(
     // インスペクター注入/破棄の単一管理（状態変化のみをトリガーにする）
     LaunchedEffect(uiState.isInspectMode) {
         if (uiState.isInspectMode) {
-            onInjectInspector(webViewRef)
+            callbacks.onInjectInspector(webViewRef)
         } else {
-            onRemoveInspector(webViewRef)
+            callbacks.onRemoveInspector(webViewRef)
         }
     }
 
@@ -114,7 +121,7 @@ fun MainScreen(
             val currentNormalized = view.url?.trimEnd('/') ?: ""
             val targetNormalized = uiState.currentUrl.trimEnd('/')
             if (currentNormalized != targetNormalized) {
-                onNavigate(uiState.currentUrl, view)
+                callbacks.onNavigate(uiState.currentUrl, view)
             }
         }
     }
@@ -129,7 +136,7 @@ fun MainScreen(
                     val url = webViewRef?.url ?: uiState.currentUrl
                     val title = webViewRef?.title ?: "No Title"
                     if (url.isNotEmpty()) {
-                        onShowAddFavorite(title, url)
+                        callbacks.onShowAddFavorite(title, url)
                     }
                 },
                 onStarLongClick = {
@@ -137,7 +144,7 @@ fun MainScreen(
                 },
                 onUrlSubmit = { url ->
                     viewModel.setInputUrl(url)
-                    webViewRef?.let { view -> onNavigate(url, view) }
+                    webViewRef?.let { view -> callbacks.onNavigate(url, view) }
                 },
                 onUrlChange = { viewModel.setInputUrl(it) },
                 onPanelToggle = { panel -> viewModel.togglePanel(panel) },
@@ -146,14 +153,14 @@ fun MainScreen(
                     viewModel.setInspectMode(!uiState.isInspectMode)
                 },
                 onInspectToolClick = {
-                    webViewRef?.let { onLaunchAnalysisTool(it) }
+                    webViewRef?.let { callbacks.onLaunchAnalysisTool(it) }
                 },
                 onTestRunClick = {
                     // トグル動作: 結果パネル表示中は閉じる、非表示ならテスト実行して開く
                     if (uiState.testResult != null) {
                         viewModel.setTestResult(null)
                     } else {
-                        webViewRef?.let { onTestRun(it) }
+                        webViewRef?.let { callbacks.onTestRun(it) }
                     }
                 },
                 onToggleDesktopModeClick = {
@@ -170,7 +177,7 @@ fun MainScreen(
                         if (currentTask != null) {
                             currentTask.stop()
                         } else {
-                            onStartScraping(url)
+                            callbacks.onStartScraping(url)
                         }
                     }
                 },
@@ -201,7 +208,7 @@ fun MainScreen(
                             WebViewHelper.applyStandardSettings(this, isDesktop = uiState.isDesktopMode)
                             WebViewHelper.applyDarkMode(this, uiState.isWebViewDarkMode)
                             tag = uiState.isWebViewDarkMode
-                            onSetupWebView(this)
+                            callbacks.onSetupWebView(this)
                             
                             webViewClient = object : android.webkit.WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -212,7 +219,7 @@ fun MainScreen(
                                         }
                                     }
                                     if (uiState.isInspectMode) {
-                                        onInjectInspector(view)
+                                        callbacks.onInjectInspector(view)
                                     }
                                 }
                             }
@@ -275,7 +282,7 @@ fun MainScreen(
                         presets = presets,
                         onCloseClick = { viewModel.closePanels() },
                         onPresetSelected = { name, config -> viewModel.applyPresetState(name, config) },
-                        onSavePresetClick = { onShowSavePreset() },
+                        onSavePresetClick = { callbacks.onShowSavePreset() },
                         onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
                         onConfigChange = { newConfig -> viewModel.updateCurrentConfig { newConfig } },
                         onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
@@ -292,7 +299,7 @@ fun MainScreen(
                         onCloseClick = { viewModel.closePanels() },
                         onStopTaskClick = { task -> task.stop(); viewModel.removeTask(task) },
                         onHistoryItemClick = { url -> 
-                            webViewRef?.let { onNavigate(url, it) }
+                            webViewRef?.let { callbacks.onNavigate(url, it) }
                             viewModel.setCurrentUrl(url)
                             viewModel.setInputUrl(url)
                             viewModel.closePanels()
@@ -304,7 +311,7 @@ fun MainScreen(
                                 val nextConfig = item.config.copy(chapter = "@${lastNum + 1}")
                                 val presetName = if (item.presetName.isNotEmpty()) item.presetName else "(履歴から再開)"
                                 viewModel.applyPresetState(presetName, nextConfig)
-                                onResumeScraping(item.nextUrl, folder)
+                                callbacks.onResumeScraping(item.nextUrl, folder)
                                 viewModel.closePanels()
                             } else {
                                 android.widget.Toast.makeText(context, "次のページが見つかりません（最新話か、古い履歴です）", android.widget.Toast.LENGTH_LONG).show()
@@ -317,7 +324,7 @@ fun MainScreen(
                     FavoritesPanel(
                         favorites = favorites,
                         onFavoriteClick = { url -> 
-                            webViewRef?.let { onNavigate(url, it) }
+                            webViewRef?.let { callbacks.onNavigate(url, it) }
                             viewModel.setCurrentUrl(url)
                             viewModel.setInputUrl(url)
                             viewModel.closePanels() 
@@ -341,7 +348,7 @@ fun MainScreen(
                                 TranslationEngine.GOOGLE -> "https://translate.google.com/?sl=auto&tl=ja&op=translate"
                                 TranslationEngine.DEEPL -> "https://www.deepl.com/ja/translator#auto/ja/"
                             }
-                            webViewRef?.let { onNavigate(targetUrl, it) }
+                            webViewRef?.let { callbacks.onNavigate(targetUrl, it) }
                             viewModel.setCurrentUrl(targetUrl)
                             viewModel.setInputUrl(targetUrl)
                             viewModel.closePanels()
@@ -365,7 +372,7 @@ fun MainScreen(
                 TestResultPanel(
                     result = result,
                     onDismiss = { viewModel.setTestResult(null) },
-                    onRequestExclude = onRequestExclude
+                    onRequestExclude = callbacks.onRequestExclude
                 )
                 uiState.excludeCandidates?.let { candidates ->
                     ExcludeCandidatesCard(
@@ -373,7 +380,7 @@ fun MainScreen(
                         onApply = { selector ->
                             viewModel.addExcludeSelector(selector)
                             viewModel.setExcludeCandidates(null)
-                            webViewRef?.let { onTestRun(it) }
+                            webViewRef?.let { callbacks.onTestRun(it) }
                         },
                         onDismiss = { viewModel.setExcludeCandidates(null) }
                     )

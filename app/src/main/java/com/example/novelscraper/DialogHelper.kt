@@ -51,15 +51,19 @@ object DialogHelper {
             .show()
     }
 
-    private var isShowingInspectDialog = false
+    // ライフサイクル安全ガード（旧isShowingInspectDialog静的booleanの置換）。
+    // 静的booleanはActivity再生成後にtrue固定となり二度とダイアログが出なくなるため、
+    // 「同一コンテキストで表示中のダイアログ」のみを抑止対象にするWeakReference方式。
+    private var activeInspectDialog: java.lang.ref.WeakReference<AlertDialog>? = null
 
     fun showInspectElementDialog(
         context: Context,
         selector: String,
         onApply: (SelectorField, String) -> Unit
     ) {
-        if (isShowingInspectDialog) return
-        isShowingInspectDialog = true
+        activeInspectDialog?.get()?.let { existing ->
+            if (existing.isShowing && existing.context === context) return
+        }
 
         val fields = SelectorField.entries.toTypedArray()
         val options = fields.map { "📝 ${it.displayName} に適用" }.toMutableList()
@@ -71,7 +75,7 @@ object DialogHelper {
             setSelection(selector.length)
         }
 
-        AlertDialog.Builder(context)
+        val dialog = AlertDialog.Builder(context)
             .setTitle("セレクタ取得・適用")
             .setView(input)
             .setItems(options.toTypedArray()) { _, which ->
@@ -87,10 +91,10 @@ object DialogHelper {
                 }
             }
             .setNegativeButton("閉じる", null)
-            .setOnDismissListener {
-                isShowingInspectDialog = false
-            }
-            .show()
+            .setOnDismissListener { activeInspectDialog = null }
+            .create()
+        dialog.show()
+        activeInspectDialog = java.lang.ref.WeakReference(dialog)
     }
 
     fun showInspectResultDialog(context: Context, selector: String) {

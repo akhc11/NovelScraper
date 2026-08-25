@@ -28,9 +28,23 @@ object ScrapingScriptBuilder {
                     } catch(e){}
 
                     var f = "";
-                    if (config.folder && !config.folder.startsWith('@')) {
+                    if (config.folder && config.folder.startsWith('@')) {
+                        f = config.folder.substring(1);
+                    } else if (config.folder) {
                         var el = document.querySelector(config.folder);
                         if (el) f = el.innerText;
+                    }
+                    if (!f && config.folderLink) {
+                        try {
+                            var fel = document.querySelector(config.folderLink);
+                            if (fel) {
+                                var a = fel.tagName === 'A' ? fel : fel.closest('a');
+                                if (a) {
+                                    var href = a.href || a.getAttribute('href');
+                                    if (href) f = '(別URL先で取得: ' + (new URL(href, location.href).href) + ')';
+                                }
+                            }
+                        } catch(e){}
                     }
                     if (!f) {
                         var el = document.querySelector('.series-title, .novel_title, .novel-title, .p-novel__title');
@@ -128,62 +142,154 @@ object ScrapingScriptBuilder {
         """.trimIndent()
     }
 
+    /**
+     * デバッグツール (Eruda) 起動スクリプト。
+     * 【重要】画面右下のフローティングボタン (eruda-entry-btn) は画面の邪魔になるため、
+     * Shadow DOM を含め CSS および API (eruda._entryBtn.hide()) で完全に非表示化し、
+     * アプリ上部のスパナボタンのみでトグル開閉させること。
+     */
     fun buildErudaScript(): String {
         return """
             (function() {
                 if (window.eruda) {
-                    if (window.__eruda_visible) { eruda.hide(); window.__eruda_visible = false; }
-                    else { eruda.show(); window.__eruda_visible = true; }
+                    if (window.__eruda_visible) {
+                        eruda.hide();
+                        if (eruda._entryBtn) eruda._entryBtn.hide();
+                        window.__eruda_visible = false;
+                    } else {
+                        eruda.show();
+                        if (eruda._entryBtn) eruda._entryBtn.hide();
+                        window.__eruda_visible = true;
+                    }
                     return;
                 }
                 var s = document.createElement('script');
                 s.src = 'https://cdn.jsdelivr.net/npm/eruda';
                 document.body.appendChild(s);
                 s.onload = function() {
-                    eruda.init();
+                    eruda.init({ autoShow: false });
+                    var hideCss = '.eruda-entry-btn, div[class*="eruda-entry-btn"] { display: none !important; visibility: hidden !important; width: 0 !important; height: 0 !important; }';
                     var st = document.createElement('style');
-                    st.innerHTML = 'div[class*="eruda-entry-btn"] { display: none !important; }';
+                    st.innerHTML = hideCss;
                     document.head.appendChild(st);
+                    if (eruda._shadowRoot) {
+                        var st2 = document.createElement('style');
+                        st2.innerHTML = hideCss;
+                        eruda._shadowRoot.appendChild(st2);
+                    }
+                    if (eruda._entryBtn) eruda._entryBtn.hide();
                     eruda.show();
+                    if (eruda._entryBtn) eruda._entryBtn.hide();
                     window.__eruda_visible = true;
                 };
             })();
         """.trimIndent()
     }
 
+    /**
+     * 要素インスペクター（CSSセレクタ調査）スクリプト。
+     * 
+     * 【超重要・開発時の苦戦ポイント & 絶対遵守事項】
+     * 1. Android WebView の @JavascriptInterface メソッドは、JavaScript 側で `typeof window.AndroidBridge.onInspectResult`
+     *    を実行すると 'function' を返さず 'object' や 'unknown' になる仕様（バグ）が存在する。
+     *    そのため、`typeof === 'function'` などの存在チェックは絶対に書いてはならない（判定が false になりダイアログが出なくなる）。
+     *    必ず `if (window.AndroidBridge) window.AndroidBridge.onInspectResult(selector);` のように直接呼び出すこと！
+     * 2. OFF時（stop()時）に `removeEventListener` でイベントリスナーを完全に破棄すること。
+     *    これを怠るとリスナーがゾンビ化し、通常のWeb操作（タップ・リンク移動）が不能になり多重発火バグの原因となる。
+     */
     fun buildInspectorScript(): String {
         return """
             (function(){
-                var prev=null;
-                function getCss(el){
-                    if(!(el instanceof Element))return "";
-                    var path=[];
-                    while(el.nodeType===Node.ELEMENT_NODE){
-                        var sel=el.nodeName.toLowerCase();
-                        if(el.id&&!el.id.match(/^[0-9]/)){ sel+='#'+el.id; path.unshift(sel); break; }
-                        else {
-                            var cls=el.className;
-                            if(typeof cls==='string'&&cls.trim()!==''){
-                                var valid=cls.trim().split(/\s+/).filter(c=>!c.match(/[0-9:\[\]\.]/));
-                                if(valid.length>0)sel+='.'+valid.join('.');
+                if (!window.__novelInspector) {
+                    var prev = null;
+                    var active = false;
+
+                    function getCss(el) {
+                        if (!el || el.nodeType !== Node.ELEMENT_NODE) return "";
+                        var path = [];
+                        while (el && el.nodeType === Node.ELEMENT_NODE) {
+                            var sel = el.nodeName.toLowerCase();
+                            if (el.id && !el.id.match(/^[0-9]/)) {
+                                sel += '#' + el.id;
+                                path.unshift(sel);
+                                break;
+                            } else {
+                                var cls = el.className;
+                                if (typeof cls === 'string' && cls.trim() !== '') {
+                                    var valid = cls.trim().split(/\s+/).filter(function(c) {
+                                        return !c.match(/[0-9:\[\]\.]/);
+                                    });
+                                    if (valid.length > 0) sel += '.' + valid.join('.');
+                                }
+                                var sib = el, nth = 1;
+                                while (sib = sib.previousElementSibling) {
+                                    if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++;
+                                }
+                                if (nth !== 1) sel += ':nth-of-type(' + nth + ')';
                             }
-                            var sib=el,nth=1; while(sib=sib.previousElementSibling) if(sib.nodeName.toLowerCase()==el.nodeName.toLowerCase())nth++;
-                            if(nth!=1)sel+=':nth-of-type('+nth+')';
+                            path.unshift(sel);
+                            el = el.parentNode;
+                            if (path.length > 3) break;
                         }
-                        path.unshift(sel); el=el.parentNode; if(path.length>3)break;
+                        return path.join(' > ');
                     }
-                    return path.join(' > ');
+
+                    function highlight(el) {
+                        if (prev && prev !== el) {
+                            prev.style.outline = '';
+                        }
+                        if (el && el.style) {
+                            el.style.outline = '3px solid #FF5722';
+                            prev = el;
+                        }
+                    }
+
+                    function clearHighlight() {
+                        if (prev) {
+                            prev.style.outline = '';
+                            prev = null;
+                        }
+                    }
+
+                    function handleClick(e) {
+                        if (!active) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        try {
+                            var target = e.target;
+                            highlight(target);
+                            var selector = getCss(target) || '?';
+                            // 【注意】typeof チェックは禁止。直接呼び出すこと
+                            if (window.AndroidBridge) {
+                                window.AndroidBridge.onInspectResult(selector);
+                            }
+                        } catch(err) {}
+                    }
+
+                    window.__novelInspector = {
+                        start: function() {
+                            this.stop();
+                            active = true;
+                            document.addEventListener('click', handleClick, true);
+                        },
+                        stop: function() {
+                            active = false;
+                            clearHighlight();
+                            document.removeEventListener('click', handleClick, true);
+                        }
+                    };
                 }
-                document.body.addEventListener('mouseover',function(e){
-                    if(prev)prev.style.outline=''; e.target.style.outline='2px solid red'; prev=e.target;
-                },true);
-                document.body.addEventListener('click',function(e){
-                    e.preventDefault(); e.stopPropagation();
-                    var selector = getCss(e.target) || '?';
-                    if (window.AndroidBridge) {
-                        window.AndroidBridge.onInspectResult(selector);
-                    }
-                },true);
+                window.__novelInspector.start();
+            })();
+        """.trimIndent()
+    }
+
+    fun buildInspectorStopScript(): String {
+        return """
+            (function(){
+                if (window.__novelInspector) {
+                    window.__novelInspector.stop();
+                }
             })();
         """.trimIndent()
     }

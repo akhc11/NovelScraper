@@ -16,64 +16,20 @@ object WebViewHelper {
 
     private const val TAG = "WebViewHelper"
 
-    // Chrome / Kiwi と完全に一致する正規 Android Chrome モバイル UA
-    const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-    // Android Chrome の PC版サイトモード正規 UA（Mobile のみ除去）
-    const val DESKTOP_UA = "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-
     val DARK_BG_COLOR = Color.parseColor("#121212")
 
     /**
-     * 安全で堅牢なステルス先行注入スクリプト。
-     * WebサイトのReactやフロントエンドJS（DeepL等）を破壊せず、
-     * navigator.webdriver の偽装と window.chrome の補完、
-     * およびWebView特有のCSSコンテナ高さ折りたたみバグ（DeepLの入力欄潰れ）を安全に補正する。
+     * 端末の正規デフォルトUA（端末の実際のOS/WebViewバージョンと100%一致）を取得する。
+     * isDesktop = true の場合は、端末正規UAから "Mobile " を除去してPC版サイト用UAを生成する。
      */
-    const val STEALTH_SCRIPT = """
-    (function() {
-        try {
-            // 1. navigator.webdriver の偽装（Bot判定フラグを完全解除）
-            if ('webdriver' in navigator) {
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                    configurable: true
-                });
-            }
-
-            // 2. window.chrome オブジェクトの安全なモック
-            if (!window.chrome) {
-                window.chrome = {
-                    app: { isInstalled: false },
-                    runtime: {},
-                    loadTimes: function() {},
-                    csi: function() {}
-                };
-            }
-
-            // 3. DeepL等のコンテナクエリ/高さ折りたたみバグの安全な補正（Kiwi/Chromeと同等のレイアウト保証）
-            var applyStyle = function() {
-                if (document.getElementById('novelscraper-responsive-fix')) return;
-                var style = document.createElement('style');
-                style.id = 'novelscraper-responsive-fix';
-                style.textContent = `
-                    main[data-layout-id="mainSection"],
-                    [data-layout-id="mainSectionWrapper"],
-                    div[id^="headlessui-tabs-panel"] {
-                        min-height: 480px !important;
-                        height: auto !important;
-                    }
-                `;
-                if (document.head) {
-                    document.head.appendChild(style);
-                } else if (document.documentElement) {
-                    document.documentElement.appendChild(style);
-                }
-            };
-            applyStyle();
-            document.addEventListener('DOMContentLoaded', applyStyle);
-        } catch (e) {}
-    })();
-    """
+    fun getUserAgent(context: Context, isDesktop: Boolean = false): String {
+        val defaultUA = WebSettings.getDefaultUserAgent(context)
+        return if (isDesktop) {
+            defaultUA.replace("Mobile Safari", "Safari").replace("Mobile ", "")
+        } else {
+            defaultUA
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     fun applyStandardSettings(webView: WebView, blockImages: Boolean = false, isDesktop: Boolean = false) {
@@ -81,22 +37,25 @@ object WebViewHelper {
             javaScriptEnabled = true
             domStorageEnabled = true
             javaScriptCanOpenWindowsAutomatically = true
-            userAgentString = if (isDesktop) DESKTOP_UA else MOBILE_UA
+            
+            // PC版サイトモード時のみUAを切り替え、通常時は端末デフォルトUAをそのまま使用（偽装ゼロ）
+            if (isDesktop) {
+                userAgentString = getUserAgent(webView.context, isDesktop = true)
+            }
+            
             blockNetworkImage = blockImages
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             textZoom = 100
             
-            // Viewport & レンダリング設定（Chrome / Kiwi と同一のモバイル自然表示）
+            // Viewport & レンダリング設定（Chrome / Kiwi と同一の標準表示）
+            loadWithOverviewMode = true
+            useWideViewPort = true
+
             if (isDesktop) {
-                loadWithOverviewMode = true
-                useWideViewPort = true
                 setSupportZoom(true)
                 builtInZoomControls = true
                 displayZoomControls = false
             } else {
-                // モバイル表示時は WideViewPort を無効化し、Webサイトのレスポンシブ meta viewport を忠実に再現
-                loadWithOverviewMode = false
-                useWideViewPort = false
                 setSupportZoom(false)
                 builtInZoomControls = false
                 displayZoomControls = false
@@ -107,22 +66,6 @@ object WebViewHelper {
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(webView, true)
-        }
-
-        // 最速タイミング（Document Start）での安全なステルススクリプト先行注入
-        injectDocumentStartStealthScript(webView)
-    }
-
-    /**
-     * Document Start 時点（HTMLパース前）にステルススクリプトを先行注入する。
-     */
-    fun injectDocumentStartStealthScript(webView: WebView) {
-        try {
-            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                WebViewCompat.addDocumentStartJavaScript(webView, STEALTH_SCRIPT, setOf("*"))
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to inject document start script", e)
         }
     }
 

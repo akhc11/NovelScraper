@@ -51,19 +51,50 @@ object DialogHelper {
             .show()
     }
 
-    fun showInspectResultDialog(context: Context, selector: String) {
-        val input = EditText(context)
-        input.setText(selector)
+    private var isShowingInspectDialog = false
+
+    fun showInspectElementDialog(
+        context: Context,
+        selector: String,
+        onApply: (SelectorField, String) -> Unit
+    ) {
+        if (isShowingInspectDialog) return
+        isShowingInspectDialog = true
+
+        val fields = SelectorField.entries.toTypedArray()
+        val options = fields.map { "📝 ${it.displayName} に適用" }.toMutableList()
+        options.add("📋 クリップボードにコピー")
+
+        val input = EditText(context).apply {
+            setText(selector)
+            setSingleLine(true)
+            setSelection(selector.length)
+        }
+
         AlertDialog.Builder(context)
-            .setTitle("セレクタ取得")
-            .setMessage("コピーしますか？")
+            .setTitle("セレクタ取得・適用")
             .setView(input)
-            .setPositiveButton("コピー") { _, _ ->
-                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                cm.setPrimaryClip(ClipData.newPlainText("Selector", input.text.toString()))
+            .setItems(options.toTypedArray()) { _, which ->
+                val currentSel = input.text.toString().trim()
+                if (which < fields.size) {
+                    val field = fields[which]
+                    onApply(field, currentSel)
+                    android.widget.Toast.makeText(context, "${field.displayName} にセレクタを反映しました", android.widget.Toast.LENGTH_SHORT).show()
+                } else {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText("Selector", currentSel))
+                    android.widget.Toast.makeText(context, "セレクタをコピーしました", android.widget.Toast.LENGTH_SHORT).show()
+                }
             }
             .setNegativeButton("閉じる", null)
+            .setOnDismissListener {
+                isShowingInspectDialog = false
+            }
             .show()
+    }
+
+    fun showInspectResultDialog(context: Context, selector: String) {
+        showInspectElementDialog(context, selector) { _, _ -> }
     }
 
     fun showTestResultDialog(

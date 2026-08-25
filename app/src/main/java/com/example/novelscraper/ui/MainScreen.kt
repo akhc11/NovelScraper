@@ -6,14 +6,18 @@ import android.webkit.WebView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -32,9 +36,10 @@ fun MainScreen(
     viewModel: ScrapingViewModel,
     onStartScraping: (String) -> Unit,
     onResumeScraping: (String, String) -> Unit,
-    onInspectResult: (String, (String) -> Unit) -> Unit,
     onLaunchAnalysisTool: (WebView) -> Unit,
+    onSetupWebView: (WebView) -> Unit,
     onInjectInspector: (WebView?) -> Unit,
+    onRemoveInspector: (WebView?) -> Unit,
     onNavigate: (String, WebView) -> Unit,
     onShowAddFavorite: (String, String) -> Unit,
     onShowSavePreset: () -> Unit,
@@ -80,9 +85,15 @@ fun MainScreen(
         }
     }
 
-    BackHandler(enabled = uiState.openedPanel != PanelType.NONE || (webViewRef?.canGoBack() == true)) {
-        if (uiState.openedPanel != PanelType.NONE) viewModel.closePanels()
-        else if (webViewRef?.canGoBack() == true) webViewRef?.goBack()
+    BackHandler(enabled = uiState.isInspectMode || uiState.openedPanel != PanelType.NONE || (webViewRef?.canGoBack() == true)) {
+        if (uiState.isInspectMode) {
+            viewModel.setInspectMode(false)
+            onRemoveInspector(webViewRef)
+        } else if (uiState.openedPanel != PanelType.NONE) {
+            viewModel.closePanels()
+        } else if (webViewRef?.canGoBack() == true) {
+            webViewRef?.goBack()
+        }
     }
 
     // URL変更時のナビゲーション（正規化比較により同一URLの不要な二重リロードを完全防止）
@@ -110,8 +121,11 @@ fun MainScreen(
                         onShowAddFavorite(title, url)
                     }
                 },
+                onStarLongClick = {
+                    viewModel.togglePanel(PanelType.FAVORITES)
+                },
                 onUrlSubmit = { url ->
-                    viewModel.setCurrentUrl(url)
+                    viewModel.setInputUrl(url)
                     webViewRef?.let { view -> onNavigate(url, view) }
                 },
                 onUrlChange = { viewModel.setInputUrl(it) },
@@ -121,10 +135,15 @@ fun MainScreen(
                     viewModel.setInspectMode(nextMode)
                     if (nextMode) {
                         onInjectInspector(webViewRef)
+                    } else {
+                        onRemoveInspector(webViewRef)
                     }
                 },
                 onInspectToolClick = {
                     webViewRef?.let { onLaunchAnalysisTool(it) }
+                },
+                onTestRunClick = {
+                    webViewRef?.let { onTestRun(it) }
                 },
                 onToggleDesktopModeClick = {
                     val nextDesktop = !uiState.isDesktopMode
@@ -163,9 +182,15 @@ fun MainScreen(
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx).apply {
+                            layoutParams = android.view.ViewGroup.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            webChromeClient = android.webkit.WebChromeClient()
                             WebViewHelper.applyStandardSettings(this, isDesktop = uiState.isDesktopMode)
                             WebViewHelper.applyDarkMode(this, uiState.isWebViewDarkMode)
                             tag = uiState.isWebViewDarkMode
+                            onSetupWebView(this)
                             
                             webViewClient = object : android.webkit.WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -189,7 +214,7 @@ fun MainScreen(
                             view.settings.blockNetworkImage = uiState.blockImages
                         }
                         // デスクトップモードの変更時のみUA更新＆リロード
-                        val targetUA = if (uiState.isDesktopMode) WebViewHelper.DESKTOP_UA else WebViewHelper.MOBILE_UA
+                        val targetUA = WebViewHelper.getUserAgent(view.context, isDesktop = uiState.isDesktopMode)
                         if (view.settings.userAgentString != targetUA) {
                             view.settings.userAgentString = targetUA
                             view.reload()
@@ -296,6 +321,7 @@ fun MainScreen(
                         onSelectFolderClick = { folderLauncher.launch(null) },
                         onRemoveFolderClick = { engine, index -> viewModel.removeTranslationFolder(engine, index) },
                         onClearFoldersClick = { engine -> viewModel.clearTranslationFolders(engine) },
+                        onUpdateDelays = { engine, chunkDelay, fileDelay -> viewModel.updateTranslationDelays(engine, chunkDelay, fileDelay) },
                         onStartTranslationClick = { engine -> viewModel.startTranslation(engine) },
                         onStopTranslationClick = { engine -> viewModel.stopTranslation(engine) },
                         onOpenWebTranslateClick = { engine ->

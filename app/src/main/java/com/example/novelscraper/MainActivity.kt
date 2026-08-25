@@ -42,9 +42,10 @@ class MainActivity : ComponentActivity() {
                     viewModel = viewModel,
                     onStartScraping = { url -> viewModel.startScraping(url) },
                     onResumeScraping = { url, folder -> viewModel.startScraping(url, folder) },
-                    onInspectResult = { sel, _ -> DialogHelper.showInspectResultDialog(this, sel) },
                     onLaunchAnalysisTool = { view -> launchAnalysisTool(view) },
+                    onSetupWebView = { view -> setupWebView(view) },
                     onInjectInspector = { view -> injectInspector(view) },
+                    onRemoveInspector = { view -> removeInspector(view) },
                     onNavigate = { url, view -> performNavigation(url, view) },
                     onShowAddFavorite = { title, url ->
                         DialogHelper.showAddFavoriteDialog(this, title) { name ->
@@ -164,9 +165,20 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun onInspectResult(selector: String) {
             mainHandler.post {
-                DialogHelper.showInspectResultDialog(this@MainActivity, selector)
+                DialogHelper.showInspectElementDialog(
+                    this@MainActivity,
+                    selector = selector,
+                    onApply = { field, sel ->
+                        viewModel.applySelectorToConfig(field, sel)
+                    }
+                )
             }
         }
+    }
+
+    @android.annotation.SuppressLint("JavascriptInterface")
+    private fun setupWebView(view: WebView) {
+        view.addJavascriptInterface(NovelScraperBridge(), "AndroidBridge")
     }
 
     @android.annotation.SuppressLint("JavascriptInterface")
@@ -174,6 +186,12 @@ class MainActivity : ComponentActivity() {
         view?.let { v ->
             v.addJavascriptInterface(NovelScraperBridge(), "AndroidBridge")
             v.evaluateJavascript(ScrapingScriptBuilder.buildInspectorScript(), null)
+        }
+    }
+
+    private fun removeInspector(view: WebView?) {
+        view?.let { v ->
+            v.evaluateJavascript(ScrapingScriptBuilder.buildInspectorStopScript(), null)
         }
     }
 

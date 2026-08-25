@@ -67,6 +67,28 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             }
         }
 
+        // 翻訳待機時間設定の購読
+        viewModelScope.launch {
+            repository.googleChunkDelayFlow.collect { delay ->
+                _uiState.update { it.copy(googleTranslationState = it.googleTranslationState.copy(chunkDelay = delay)) }
+            }
+        }
+        viewModelScope.launch {
+            repository.googleFileDelayFlow.collect { delay ->
+                _uiState.update { it.copy(googleTranslationState = it.googleTranslationState.copy(fileDelay = delay)) }
+            }
+        }
+        viewModelScope.launch {
+            repository.deeplChunkDelayFlow.collect { delay ->
+                _uiState.update { it.copy(deeplTranslationState = it.deeplTranslationState.copy(chunkDelay = delay)) }
+            }
+        }
+        viewModelScope.launch {
+            repository.deeplFileDelayFlow.collect { delay ->
+                _uiState.update { it.copy(deeplTranslationState = it.deeplTranslationState.copy(fileDelay = delay)) }
+            }
+        }
+
         viewModelScope.launch {
             repository.setupDoneFlow.collect { done ->
                 if (!done) {
@@ -175,7 +197,26 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setInspectMode(active: Boolean) {
-        _uiState.update { it.copy(isInspectMode = active, openedPanel = if (active) PanelType.SETTINGS else it.openedPanel) }
+        _uiState.update { 
+            it.copy(
+                isInspectMode = active, 
+                openedPanel = if (active && it.openedPanel != PanelType.NONE) PanelType.NONE else it.openedPanel
+            ) 
+        }
+    }
+
+    fun applySelectorToConfig(field: SelectorField, selector: String) {
+        _uiState.update { state ->
+            val updated = when (field) {
+                SelectorField.BODY -> state.currentConfig.copy(body = selector)
+                SelectorField.TITLE -> state.currentConfig.copy(title = selector)
+                SelectorField.NEXT -> state.currentConfig.copy(next = selector)
+                SelectorField.CHAPTER -> state.currentConfig.copy(chapter = selector)
+                SelectorField.FOLDER -> state.currentConfig.copy(folder = selector)
+                SelectorField.FOLDER_LINK -> state.currentConfig.copy(folderLink = selector)
+            }
+            state.copy(currentConfig = updated)
+        }
     }
 
     fun setActiveHistoryTab(tab: Int) { _uiState.update { it.copy(activeHistoryTab = tab) } }
@@ -314,6 +355,31 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun updateTranslationDelays(engine: TranslationEngine, chunkDelay: String, fileDelay: String) {
+        viewModelScope.launch {
+            when (engine) {
+                TranslationEngine.GOOGLE -> {
+                    repository.saveGoogleDelays(chunkDelay, fileDelay)
+                    _uiState.update { s ->
+                        s.copy(googleTranslationState = s.googleTranslationState.copy(
+                            chunkDelay = chunkDelay,
+                            fileDelay = fileDelay
+                        ))
+                    }
+                }
+                TranslationEngine.DEEPL -> {
+                    repository.saveDeeplDelays(chunkDelay, fileDelay)
+                    _uiState.update { s ->
+                        s.copy(deeplTranslationState = s.deeplTranslationState.copy(
+                            chunkDelay = chunkDelay,
+                            fileDelay = fileDelay
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
     fun startTranslation(engine: TranslationEngine) {
         val engineState = when (engine) {
             TranslationEngine.GOOGLE -> _uiState.value.googleTranslationState
@@ -412,6 +478,8 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                     folderUri = targetUri,
                     sourceLang = engineState.sourceLang,
                     targetLang = engineState.targetLang,
+                    chunkDelay = engineState.chunkDelay,
+                    fileDelay = engineState.fileDelay,
                     listener = object : TranslationTask.TranslationListener {
                         override fun onProgress(
                             completedFiles: Int,
@@ -465,6 +533,8 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                     folderUri = targetUri,
                     sourceLang = engineState.sourceLang,
                     targetLang = engineState.targetLang,
+                    chunkDelay = engineState.chunkDelay,
+                    fileDelay = engineState.fileDelay,
                     listener = object : TranslationTask.TranslationListener {
                         override fun onProgress(
                             completedFiles: Int,

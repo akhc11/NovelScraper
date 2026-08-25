@@ -12,11 +12,15 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+import kotlin.random.Random
+
 class DeeplTranslationTask(
     private val context: Context,
     private val folderUri: Uri,
     private val sourceLang: String = "auto",
     private val targetLang: String = "ja",
+    private val chunkDelay: String = "3-8",
+    private val fileDelay: String = "2-5",
     private val listener: TranslationTask.TranslationListener
 ) {
 
@@ -57,15 +61,41 @@ class DeeplTranslationTask(
         /** 結果エリアが空か確認 */
         private const val JS_CHECK_EMPTY = """(function(){var targetEl=document.querySelector('div[data-testid="translator-target-input"]')||document.querySelector('d-textarea[name="target"]')||document.querySelector('section[aria-label*="Translation"] [contenteditable="true"]')||document.querySelector('div[aria-label*="Translation"]')||document.querySelector('div[aria-label*="訳文"]')||document.querySelector('#target-dummydiv');if(!targetEl)return"EMPTY";var text=targetEl.innerText||targetEl.textContent||'';return text.trim().length===0?"EMPTY":"NOT_EMPTY"})()"""
 
+        /** 1. 入力エリアへのフォーカス & 選択 */
+        private const val JS_FOCUS_AND_SELECT = """(function(){try{var el=document.querySelector('div[data-testid="translator-source-input"]')||document.querySelector('d-textarea[name="source"]')||document.querySelector('section[aria-label*="Source"] [contenteditable="true"]')||document.querySelector('div[aria-label*="Source text"]')||document.querySelector('div[aria-label*="原文"]')||document.querySelector('textarea')||document.querySelector('div[contenteditable="true"]');if(!el)return"NO_INPUT_ELEMENT";var targetInput=(el.getAttribute('contenteditable')==='true')?el:(el.querySelector('[contenteditable="true"]')||el);targetInput.focus();if(targetInput.tagName==='TEXTAREA'||targetInput.tagName==='INPUT'){targetInput.select()}else{var range=document.createRange();range.selectNodeContents(targetInput);var sel=window.getSelection();sel.removeAllRanges();sel.addRange(range)}return"OK"}catch(e){return"ERROR: "+e.message}})()"""
+
         /**
-         * DeepL用手動貼り付け再現スクリプトテンプレート。
+         * 2. DeepL用手動貼り付け再現スクリプトテンプレート。
          * %s を JSONエンコード済みテキストで置換して使用する。
-         * ClipboardEvent paste → InputEvent insertFromPaste の順で発火。
+         * ClipboardEvent paste → InputEvent insertFromPaste → change の順で発火。
          */
-        private const val JS_INPUT_TEMPLATE = """(function(){try{var el=document.querySelector('div[data-testid="translator-source-input"]')||document.querySelector('d-textarea[name="source"]')||document.querySelector('section[aria-label*="Source"] [contenteditable="true"]')||document.querySelector('div[aria-label*="Source text"]')||document.querySelector('div[aria-label*="原文"]')||document.querySelector('textarea')||document.querySelector('div[contenteditable="true"]');if(!el)return"NO_INPUT_ELEMENT";var targetInput=(el.getAttribute('contenteditable')==='true')?el:(el.querySelector('[contenteditable="true"]')||el);targetInput.focus();if(targetInput.tagName==='TEXTAREA'||targetInput.tagName==='INPUT'){targetInput.select()}else{var range=document.createRange();range.selectNodeContents(targetInput);var sel=window.getSelection();sel.removeAllRanges();sel.addRange(range)}var text=%s;var dt=new DataTransfer();dt.setData('text/plain',text);var pe=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt});targetInput.dispatchEvent(pe);var currentVal=(targetInput.tagName==='TEXTAREA'||targetInput.tagName==='INPUT')?targetInput.value:targetInput.innerText;if(!currentVal||currentVal.trim().length===0){if(targetInput.tagName==='TEXTAREA'||targetInput.tagName==='INPUT'){targetInput.value=text}else{targetInput.innerText=text}}targetInput.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertFromPaste',data:text}));targetInput.dispatchEvent(new Event('change',{bubbles:true}));return"OK"}catch(e){return"ERROR: "+e.message}})()"""
+        private const val JS_PASTE_AND_INPUT = """(function(){try{var el=document.querySelector('div[data-testid="translator-source-input"]')||document.querySelector('d-textarea[name="source"]')||document.querySelector('section[aria-label*="Source"] [contenteditable="true"]')||document.querySelector('div[aria-label*="Source text"]')||document.querySelector('div[aria-label*="原文"]')||document.querySelector('textarea')||document.querySelector('div[contenteditable="true"]');if(!el)return"NO_INPUT_ELEMENT";var targetInput=(el.getAttribute('contenteditable')==='true')?el:(el.querySelector('[contenteditable="true"]')||el);var text=%s;var dt=new DataTransfer();dt.setData('text/plain',text);var pe=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt});targetInput.dispatchEvent(pe);var currentVal=(targetInput.tagName==='TEXTAREA'||targetInput.tagName==='INPUT')?targetInput.value:targetInput.innerText;if(!currentVal||currentVal.trim().length===0){if(targetInput.tagName==='TEXTAREA'||targetInput.tagName==='INPUT'){targetInput.value=text}else{targetInput.innerText=text}}targetInput.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertFromPaste',data:text}));targetInput.dispatchEvent(new Event('change',{bubbles:true}));return"OK"}catch(e){return"ERROR: "+e.message}})()"""
 
         /** 翻訳結果取得（エラー監視・プログレス監視・翻訳本文抽出） */
         private const val JS_GET_RESULT = """(function(){try{var alertEl=document.querySelector('div[role="alert"]')||document.querySelector('.lmt__alert');if(alertEl){var at=alertEl.innerText||'';if(at.indexOf("文字")!==-1||at.indexOf("character")!==-1||at.indexOf("制限")!==-1){return JSON.stringify({status:"LIMIT_ERROR",message:at})}}var loaders=document.querySelectorAll('div[role="progressbar"],div[class*="loading"],div[class*="spinner"],svg[class*="spin"]');for(var i=0;i<loaders.length;i++){var s=window.getComputedStyle(loaders[i]);if(s.display!=='none'&&s.visibility!=='hidden'&&loaders[i].offsetParent!==null){return JSON.stringify({status:"TRANSLATING",text:""})}}var targetEl=document.querySelector('div[data-testid="translator-target-input"]')||document.querySelector('d-textarea[name="target"]')||document.querySelector('section[aria-label*="Translation"] [contenteditable="true"]')||document.querySelector('div[aria-label*="Translation"]')||document.querySelector('div[aria-label*="訳文"]')||document.querySelector('#target-dummydiv');if(targetEl){var tt=(targetEl.innerText||targetEl.textContent||'').trim();if(tt.length>0&&tt!=="翻訳"&&tt!=="Translation"&&tt.indexOf("翻訳中")===-1){return JSON.stringify({status:"OK",text:tt})}}return JSON.stringify({status:"WAITING",text:""})}catch(e){return JSON.stringify({status:"ERROR",message:e.message})}})()"""
+
+        /**
+         * 範囲指定（"30-80" や "3-8"）または単一指定からランダムな待機時間（ミリ秒）を計算する。
+         */
+        fun calculateDelayMs(delayStr: String, defaultSec: Double = 3.0): Long {
+            return try {
+                if (delayStr.contains("-")) {
+                    val parts = delayStr.split("-")
+                    val min = parts[0].trim().toDoubleOrNull() ?: defaultSec
+                    val max = parts.getOrNull(1)?.trim()?.toDoubleOrNull() ?: min
+                    val actualMin = min.coerceAtLeast(0.1)
+                    val actualMax = max.coerceAtLeast(actualMin)
+                    val randomSec = if (actualMin >= actualMax) actualMin else Random.nextDouble(actualMin, actualMax)
+                    (randomSec * 1000).toLong()
+                } else {
+                    val sec = delayStr.toDoubleOrNull() ?: defaultSec
+                    val jitter = Random.nextDouble(-0.4, 0.4)
+                    ((sec + jitter).coerceAtLeast(0.1) * 1000).toLong()
+                }
+            } catch (_: Exception) {
+                (defaultSec * 1000).toLong()
+            }
+        }
     }
 
     init {
@@ -178,7 +208,7 @@ class DeeplTranslationTask(
                             chunkResult = translateChunk(webView, chunkText, lastChunkResultText)
                             if (chunkResult != null && chunkResult.isNotBlank()) break
                             Log.w(TAG, "Chunk $currentChunkNum retry $retry of file ${fileInfo.name}")
-                            delay(2500L)
+                            delay(2500L + Random.nextLong(0, 500))
                         }
 
                         if (chunkResult == null || chunkResult.isBlank()) {
@@ -198,8 +228,10 @@ class DeeplTranslationTask(
 
                         translatedChunks.add(formattedChunk)
                         lastChunkResultText = chunkResult
-                        // DeepLのレートリミット対策でチャンク間に適切なインターバルを設ける
-                        delay(2000L)
+
+                        // DeepLのレートリミット対策でチャンク間に適切なインターバル（範囲ランダム指定）を設ける
+                        val actualChunkDelay = calculateDelayMs(chunkDelay, 3.0)
+                        delay(actualChunkDelay)
                     }
 
                     if (fileSuccess && isRunning && translatedChunks.size == totalChunks) {
@@ -222,7 +254,9 @@ class DeeplTranslationTask(
                         Log.e(TAG, "File ${fileInfo.name} failed or cancelled. translatedChunks=${translatedChunks.size}/$totalChunks")
                     }
 
-                    delay(1000L)
+                    // ファイル間待機（範囲ランダム指定）
+                    val actualFileDelay = calculateDelayMs(fileDelay, 2.0)
+                    delay(actualFileDelay)
                 }
 
                 if (isRunning) {
@@ -252,7 +286,16 @@ class DeeplTranslationTask(
     }
 
     /**
-     * 単一チャンクの翻訳処理。
+     * 単一チャンクの翻訳処理。手動操作フローを模倣。
+     *
+     * 1. クリアボタンクリック ＋ 入力エリアクリア
+     * 2. 結果エリアが空になるまで待機
+     * 3. 人間的ディレイ（400〜700ms）
+     * 4. 入力エリアへのフォーカス ＆ 選択
+     * 5. 人間的ディレイ（250〜500ms、貼り付けキー入力までのタイムラグ）
+     * 6. ClipboardEvent paste → InputEvent insertFromPaste → change でユーザー貼り付けを完全再現
+     * 7. 翻訳開始待機（2200〜2800ms）
+     * 8. 翻訳完了（スピナー消滅 & 翻訳本文の安定）を待機
      */
     private suspend fun translateChunk(view: WebView, text: String, lastResultText: String): String? {
         if (!isRunning) return null
@@ -266,21 +309,29 @@ class DeeplTranslationTask(
             if (unquoteJs(evalJs(view, JS_CHECK_EMPTY)) == "EMPTY") break
             delay(200L)
         }
-        delay(400L)
 
-        // 3. ユーザーの手動貼り付けを完全再現するテキスト入力
+        // 3. クリア後～フォーカスまでの人間的タイムラグ
+        delay(Random.nextLong(400, 700))
+
+        // 4. 入力エリアへのフォーカス & 選択
+        evalJs(view, JS_FOCUS_AND_SELECT)
+
+        // 5. フォーカス後～Ctrl+V貼り付けまでの人間的タイムラグ
+        delay(Random.nextLong(250, 500))
+
+        // 6. ユーザーの手動貼り付けを完全再現するテキスト入力 & 確定
         val jsonText = json.encodeToString(text)
-        val inputScript = JS_INPUT_TEMPLATE.format(jsonText)
+        val inputScript = JS_PASTE_AND_INPUT.format(jsonText)
         val inputStatus = unquoteJs(evalJs(view, inputScript))
         if (inputStatus != "OK") {
             Log.e(TAG, "DeepL Input failed: $inputStatus")
             return null
         }
 
-        // 入力直後、DeepL翻訳が開始するまで待機
-        delay(2500L)
+        // 7. 入力直後、DeepL翻訳が開始するまで待機
+        delay(Random.nextLong(2200, 2800))
 
-        // 4. 翻訳結果の安定待機
+        // 8. 翻訳結果の安定待機
         var currentCandidate = ""
         var stableCount = 0
         val maxWaitMs = 50000L

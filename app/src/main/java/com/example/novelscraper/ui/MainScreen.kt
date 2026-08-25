@@ -43,7 +43,8 @@ fun MainScreen(
     onNavigate: (String, WebView) -> Unit,
     onShowAddFavorite: (String, String) -> Unit,
     onShowSavePreset: () -> Unit,
-    onTestRun: (WebView) -> Unit
+    onTestRun: (WebView) -> Unit,
+    onRequestExclude: (String) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val presets by viewModel.presets.collectAsState()
@@ -85,14 +86,24 @@ fun MainScreen(
         }
     }
 
-    BackHandler(enabled = uiState.isInspectMode || uiState.openedPanel != PanelType.NONE || (webViewRef?.canGoBack() == true)) {
+    // インスペクター注入/破棄の単一管理（状態変化のみをトリガーにする）
+    LaunchedEffect(uiState.isInspectMode) {
         if (uiState.isInspectMode) {
-            viewModel.setInspectMode(false)
+            onInjectInspector(webViewRef)
+        } else {
             onRemoveInspector(webViewRef)
-        } else if (uiState.openedPanel != PanelType.NONE) {
-            viewModel.closePanels()
-        } else if (webViewRef?.canGoBack() == true) {
-            webViewRef?.goBack()
+        }
+    }
+
+    BackHandler(enabled = uiState.excludeCandidates != null || uiState.testResult != null || uiState.isInspectMode || uiState.openedPanel != PanelType.NONE || (webViewRef?.canGoBack() == true)) {
+        when {
+            uiState.excludeCandidates != null -> viewModel.setExcludeCandidates(null)
+            uiState.testResult != null -> viewModel.setTestResult(null)
+            uiState.isInspectMode -> viewModel.setInspectMode(false)
+            uiState.openedPanel != PanelType.NONE -> viewModel.closePanels()
+            else -> webViewRef?.let { view ->
+                if (view.canGoBack()) view.goBack()
+            }
         }
     }
 
@@ -131,19 +142,19 @@ fun MainScreen(
                 onUrlChange = { viewModel.setInputUrl(it) },
                 onPanelToggle = { panel -> viewModel.togglePanel(panel) },
                 onInspectModeToggle = {
-                    val nextMode = !uiState.isInspectMode
-                    viewModel.setInspectMode(nextMode)
-                    if (nextMode) {
-                        onInjectInspector(webViewRef)
-                    } else {
-                        onRemoveInspector(webViewRef)
-                    }
+                    // 注入/破棄は LaunchedEffect(isInspectMode) が単一管理
+                    viewModel.setInspectMode(!uiState.isInspectMode)
                 },
                 onInspectToolClick = {
                     webViewRef?.let { onLaunchAnalysisTool(it) }
                 },
                 onTestRunClick = {
-                    webViewRef?.let { onTestRun(it) }
+                    // トグル動作: 結果パネル表示中は閉じる、非表示ならテスト実行して開く
+                    if (uiState.testResult != null) {
+                        viewModel.setTestResult(null)
+                    } else {
+                        webViewRef?.let { onTestRun(it) }
+                    }
                 },
                 onToggleDesktopModeClick = {
                     val nextDesktop = !uiState.isDesktopMode
@@ -229,11 +240,11 @@ fun MainScreen(
                     },
                     modifier = Modifier
                         .weight(1f)
-                        .graphicsLayer {
-                            clip = true
-                            // パネル表示中はGPU描画コマンドの発行を完全スキップ（オクルージョン・カリング）
-                            alpha = if (uiState.openedPanel == PanelType.NONE) 1f else 0f
-                        }
+                    .graphicsLayer {
+                        clip = true
+                        // パネル・テスト結果表示中はGPU描画コマンドの発行を完全スキップ（オクルージョン・カリング）
+                        alpha = if (uiState.openedPanel == PanelType.NONE && uiState.testResult == null) 1f else 0f
+                    }
                 )
 
                 val isAnyTranslating = uiState.isAnyTranslating
@@ -278,6 +289,7 @@ fun MainScreen(
                         onTabSelected = { viewModel.setActiveHistoryTab(it) },
                         activeTasks = activeTasks,
                         history = history,
+                        onCloseClick = { viewModel.closePanels() },
                         onStopTaskClick = { task -> task.stop(); viewModel.removeTask(task) },
                         onHistoryItemClick = { url -> 
                             webViewRef?.let { onNavigate(url, it) }
@@ -339,6 +351,32 @@ fun MainScreen(
                 }
                 PanelType.NONE -> {
                     // パネル非表示
+                }
+            }
+        }
+
+        // 前面レイヤー: テスト結果パネル（非モーダルoverlay・オーバーレイ単一化は ViewModel 担当）
+        uiState.testResult?.let { result ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+            ) {
+                TestResultPanel(
+                    result = result,
+                    onDismiss = { viewModel.setTestResult(null) },
+                    onRequestExclude = onRequestExclude
+                )
+                uiState.excludeCandidates?.let { candidates ->
+                    ExcludeCandidatesCard(
+                        state = candidates,
+                        onApply = { selector ->
+                            viewModel.addExcludeSelector(selector)
+                            viewModel.setExcludeCandidates(null)
+                            webViewRef?.let { onTestRun(it) }
+                        },
+                        onDismiss = { viewModel.setExcludeCandidates(null) }
+                    )
                 }
             }
         }

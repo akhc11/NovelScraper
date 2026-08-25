@@ -28,6 +28,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var viewModel: ScrapingViewModel
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var mainWebView: WebView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,6 +48,7 @@ class MainActivity : ComponentActivity() {
                     onInjectInspector = { view -> injectInspector(view) },
                     onRemoveInspector = { view -> removeInspector(view) },
                     onNavigate = { url, view -> performNavigation(url, view) },
+                    onRequestExclude = { selector -> handleExcludeRequest(selector) },
                     onShowAddFavorite = { title, url ->
                         DialogHelper.showAddFavoriteDialog(this, title) { name ->
                             viewModel.saveFavorite(name, url)
@@ -119,7 +121,7 @@ class MainActivity : ComponentActivity() {
 
     private fun performTestRun(view: WebView) {
         val config = viewModel.uiState.value.currentConfig
-        val jsCode = ScrapingScriptBuilder.buildScrapingScript(config, !viewModel.uiState.value.blockImages)
+        val jsCode = ScrapingScriptBuilder.buildScrapingScript(config, !viewModel.uiState.value.blockImages, true)
         view.evaluateJavascript(jsCode) { res ->
             if (res != null && res != "null") {
                 try {
@@ -134,8 +136,8 @@ class MainActivity : ComponentActivity() {
                     }
 
                     val data = Json.decodeFromString<ScrapingResult>(rawResult)
-                    val chap = ChapterNumberExtractor.extractForDisplay(data.chapter, config.chapter, view.url ?: "")
-                    DialogHelper.showTestResultDialog(this, data, chap)
+                    val chapDisplay = ChapterNumberExtractor.extractForDisplay(data.chapter, config.chapter, view.url ?: "")
+                    viewModel.setTestResult(data.copy(chapterDisplay = chapDisplay))
                 } catch (e: Exception) {
                     Toast.makeText(this, "解析失敗", Toast.LENGTH_SHORT).show()
                 }
@@ -174,24 +176,70 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+
+        @JavascriptInterface
+        fun onApplyCandidate(target: String, selector: String) {
+            mainHandler.post {
+                try {
+                    val field = SelectorField.valueOf(target.uppercase())
+                    viewModel.applySelectorToConfig(field, selector)
+                    Toast.makeText(this@MainActivity, "${field.displayName}に反映しました", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "適用失敗: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onRemoveExclude(selector: String) {
+            mainHandler.post {
+                viewModel.removeExcludeSelector(selector)
+            }
+        }
     }
 
     @android.annotation.SuppressLint("JavascriptInterface")
     private fun setupWebView(view: WebView) {
+        mainWebView = view
         view.addJavascriptInterface(NovelScraperBridge(), "AndroidBridge")
     }
 
     @android.annotation.SuppressLint("JavascriptInterface")
     private fun injectInspector(view: WebView?) {
         view?.let { v ->
+            mainWebView = v
+            val config = viewModel.uiState.value.currentConfig
             v.addJavascriptInterface(NovelScraperBridge(), "AndroidBridge")
-            v.evaluateJavascript(ScrapingScriptBuilder.buildInspectorScript(), null)
+            v.evaluateJavascript(ScrapingScriptBuilder.buildInspectorScript(config), null)
         }
     }
 
     private fun removeInspector(view: WebView?) {
         view?.let { v ->
             v.evaluateJavascript(ScrapingScriptBuilder.buildInspectorStopScript(), null)
+        }
+    }
+
+    /**
+     * テスト結果パネルの行タップ → 除外候補をプローブして状態に反映（WebView注入不要）。
+     * 候補カードの適用/自動再テストは Compose 側 (MainScreen) で行う。
+     */
+    private fun handleExcludeRequest(selector: String) {
+        val view = mainWebView ?: return
+        view.evaluateJavascript(ScrapingScriptBuilder.buildCandidateProbeScript(selector)) { res ->
+            if (res != null && res != "null") {
+                try {
+                    val raw = Json.decodeFromString<String>(res)
+                    val items = Json.decodeFromString<List<ExcludeCandidate>>(raw)
+                    if (items.isNotEmpty()) {
+                        viewModel.setExcludeCandidates(ExcludeCandidatesState(baseSelector = selector, items = items))
+                    } else {
+                        Toast.makeText(this, "除外候補が見つかりません", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(this, "候補取得失敗: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 

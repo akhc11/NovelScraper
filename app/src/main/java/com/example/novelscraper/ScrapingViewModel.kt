@@ -113,6 +113,43 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         syncServiceStatus()
     }
 
+    fun setTestResult(result: ScrapingResult?) {
+        _uiState.update {
+            if (result != null) {
+                // オーバーレイ単一化: 結果を開く場合は他パネル・候補カード・インスペクターを閉じる
+                it.copy(testResult = result, openedPanel = PanelType.NONE, excludeCandidates = null, isInspectMode = false)
+            } else {
+                it.copy(testResult = null, excludeCandidates = null)
+            }
+        }
+    }
+
+    fun setExcludeCandidates(state: ExcludeCandidatesState?) {
+        _uiState.update { it.copy(excludeCandidates = state) }
+    }
+
+    fun addExcludeSelector(selector: String) {
+        if (selector.isEmpty()) return
+        updateCurrentConfig { old -> old.copy(exclude = mergedExclude(old.exclude, selector)) }
+    }
+
+    private fun mergedExclude(current: String, selector: String): String {
+        val list = current.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        return if (list.contains(selector)) {
+            list.joinToString(", ")
+        } else {
+            (list + selector).joinToString(", ")
+        }
+    }
+
+    fun removeExcludeSelector(selector: String) {
+        if (selector.isEmpty()) return
+        updateCurrentConfig { old ->
+            val list = old.exclude.split(",").map { it.trim() }.filter { it.isNotEmpty() && it != selector }
+            old.copy(exclude = list.joinToString(", "))
+        }
+    }
+
     fun addTask(task: ScrapingTask) { taskList.add(task); refreshStatus() }
     fun removeTask(task: ScrapingTask) { taskList.remove(task); refreshStatus() }
     fun updateStatus() { refreshStatus() }
@@ -189,19 +226,29 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun togglePanel(panel: PanelType) {
-        _uiState.update { it.copy(openedPanel = if (it.openedPanel == panel) PanelType.NONE else panel) }
+        // オーバーレイ単一化: パネル切替時はテスト結果・候補カード・インスペクターも閉じる
+        _uiState.update {
+            it.copy(
+                openedPanel = if (it.openedPanel == panel) PanelType.NONE else panel,
+                testResult = null,
+                excludeCandidates = null,
+                isInspectMode = false
+            )
+        }
     }
 
     fun closePanels() {
-        _uiState.update { it.copy(openedPanel = PanelType.NONE, isInspectMode = false) }
+        _uiState.update { it.copy(openedPanel = PanelType.NONE, isInspectMode = false, testResult = null, excludeCandidates = null) }
     }
 
     fun setInspectMode(active: Boolean) {
-        _uiState.update { 
+        _uiState.update {
             it.copy(
-                isInspectMode = active, 
-                openedPanel = if (active && it.openedPanel != PanelType.NONE) PanelType.NONE else it.openedPanel
-            ) 
+                isInspectMode = active,
+                openedPanel = if (active && it.openedPanel != PanelType.NONE) PanelType.NONE else it.openedPanel,
+                testResult = if (active) null else it.testResult,
+                excludeCandidates = if (active) null else it.excludeCandidates
+            )
         }
     }
 
@@ -214,6 +261,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 SelectorField.CHAPTER -> state.currentConfig.copy(chapter = selector)
                 SelectorField.FOLDER -> state.currentConfig.copy(folder = selector)
                 SelectorField.FOLDER_LINK -> state.currentConfig.copy(folderLink = selector)
+                SelectorField.EXCLUDE -> state.currentConfig.copy(exclude = mergedExclude(state.currentConfig.exclude, selector))
             }
             state.copy(currentConfig = updated)
         }

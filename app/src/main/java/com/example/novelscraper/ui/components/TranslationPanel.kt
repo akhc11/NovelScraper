@@ -62,7 +62,7 @@ fun TranslationPanel(
                 .fillMaxWidth()
                 .padding(12.dp)
         ) {
-            // ヘッダー行
+            // ヘッダー行（全パネル統一形式: 機能名 + 右側に閉じるボタン）
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -74,16 +74,13 @@ fun TranslationPanel(
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold
                 )
-                IconButton(
+                Button(
                     onClick = onCloseClick,
-                    modifier = Modifier.size(24.dp)
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceLight),
+                    shape = RoundedCornerShape(6.dp),
+                    modifier = Modifier.height(34.dp)
                 ) {
-                    Icon(
-                        Icons.Filled.Close,
-                        contentDescription = "閉じる",
-                        tint = AppColors.textSecondary,
-                        modifier = Modifier.size(18.dp)
-                    )
+                    Text("閉じる", color = AppColors.textPrimary, fontSize = 12.sp)
                 }
             }
 

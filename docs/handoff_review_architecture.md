@@ -1,7 +1,17 @@
 # 全体レビュー報告 - 堅牢性・パッチワーク・アーキテクチャ (作成日: 2026-08-25)
 
 > 対象: graphify更新後 (558ノード/746エッジ/51コミュニティ) のコードベース実査に基づく。
-> **進捗: P1-1〜P1-5 + A-2 実装完了（2026-08-25、コミット 0eabdcd 以降）。** 検証: compileDebugKotlin/testDebugUnitTest SUCCESS。実機確認済み(〜P1-4)。
+> **進捗: P1-1〜P1-5 + A-2 + A-3 実装完了（2026-08-25、コミット 0eabdcd/2adc008 以降）。** 検証: compileDebugKotlin/testDebugUnitTest SUCCESS。実機確認済み(〜A-2)。
+
+### 実装詳細（A-3: オーバーレイ状態のsealed化）
+| 項目 | 内容 |
+|---|---|
+| 新型 | `sealed interface Overlay { None / Panel(type) / TestResult(result, excludeCandidates?) / InspectMode }` を MainUiState.kt に新設。PanelType から NONE を削除し「開いていない」は `Overlay.None` で表現 |
+| 単一排他の構造化 | 旧4フィールド(openedPanel/isInspectMode/testResult/excludeCandidates)分散を `MainUiState.overlay` 1フィールドへ統合。「同時に1つ」がコンパイラ保証に |
+| 互換派生プロパティ | `isInspectMode` / `activePanelType` を MainUiState に残し HeaderToolbar 等の既存参照を最小差分で維持 |
+| VM書換 | togglePanel/closePanels/setInspectMode/setTestResult/setExcludeCandidates を overlay copy ベースに統一。setTestResult(null) は TestResult表示中のみ閉じる冪等動作に改善 |
+| UI書換 | MainScreen: LaunchedEffect(inspectActive)/BackHandler/alpha条件/when再構成(TestResult を前面レイヤー内へ統合・二重Box解消)。HeaderToolbar: activePanelType 参照 |
+| 検証 | BUILD SUCCESSFUL（エラー・警告ゼロ）。旧フィールドへの参照残は grep でゼロ確認 |
 
 ### 実装詳細（P1-5 + A-2）
 | 項目 | 実装内容 |

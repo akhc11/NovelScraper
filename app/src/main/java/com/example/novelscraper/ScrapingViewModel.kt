@@ -115,17 +115,21 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     fun setTestResult(result: ScrapingResult?) {
         _uiState.update {
-            if (result != null) {
-                // オーバーレイ単一化: 結果を開く場合は他パネル・候補カード・インスペクターを閉じる
-                it.copy(testResult = result, openedPanel = PanelType.NONE, excludeCandidates = null, isInspectMode = false)
-            } else {
-                it.copy(testResult = null, excludeCandidates = null)
+            when {
+                // 結果を開く場合は他のオーバーレイを閉じて TestResult へ
+                result != null -> it.copy(overlay = Overlay.TestResult(result))
+                // nullは「閉じる」: テスト結果表示中のみ閉じる（他オーバーレイは保持）
+                it.overlay is Overlay.TestResult -> it.copy(overlay = Overlay.None)
+                else -> it
             }
         }
     }
 
     fun setExcludeCandidates(state: ExcludeCandidatesState?) {
-        _uiState.update { it.copy(excludeCandidates = state) }
+        _uiState.update {
+            val ov = it.overlay
+            if (ov is Overlay.TestResult) it.copy(overlay = ov.copy(excludeCandidates = state)) else it
+        }
     }
 
     fun addExcludeSelector(selector: String) {
@@ -214,29 +218,23 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun togglePanel(panel: PanelType) {
-        // オーバーレイ単一化: パネル切替時はテスト結果・候補カード・インスペクターも閉じる
         _uiState.update {
-            it.copy(
-                openedPanel = if (it.openedPanel == panel) PanelType.NONE else panel,
-                testResult = null,
-                excludeCandidates = null,
-                isInspectMode = false
-            )
+            val current = it.overlay as? Overlay.Panel
+            it.copy(overlay = if (current?.type == panel) Overlay.None else Overlay.Panel(panel))
         }
     }
 
     fun closePanels() {
-        _uiState.update { it.copy(openedPanel = PanelType.NONE, isInspectMode = false, testResult = null, excludeCandidates = null) }
+        _uiState.update { it.copy(overlay = Overlay.None) }
     }
 
     fun setInspectMode(active: Boolean) {
         _uiState.update {
-            it.copy(
-                isInspectMode = active,
-                openedPanel = if (active && it.openedPanel != PanelType.NONE) PanelType.NONE else it.openedPanel,
-                testResult = if (active) null else it.testResult,
-                excludeCandidates = if (active) null else it.excludeCandidates
-            )
+            when {
+                active -> it.copy(overlay = Overlay.InspectMode)
+                it.overlay is Overlay.InspectMode -> it.copy(overlay = Overlay.None)
+                else -> it
+            }
         }
     }
 

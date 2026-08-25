@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.MainUiState
+import com.example.novelscraper.Overlay
 import com.example.novelscraper.PanelType
 import com.example.novelscraper.ScraperConfig
 import com.example.novelscraper.ScrapingViewModel
@@ -94,20 +95,22 @@ fun MainScreen(
     }
 
     // インスペクター注入/破棄の単一管理（状態変化のみをトリガーにする）
-    LaunchedEffect(uiState.isInspectMode) {
-        if (uiState.isInspectMode) {
+    val inspectActive = uiState.overlay is Overlay.InspectMode
+    LaunchedEffect(inspectActive) {
+        if (inspectActive) {
             callbacks.onInjectInspector(webViewRef)
         } else {
             callbacks.onRemoveInspector(webViewRef)
         }
     }
 
-    BackHandler(enabled = uiState.excludeCandidates != null || uiState.testResult != null || uiState.isInspectMode || uiState.openedPanel != PanelType.NONE || (webViewRef?.canGoBack() == true)) {
+    BackHandler(enabled = uiState.overlay != Overlay.None || (webViewRef?.canGoBack() == true)) {
+        val ov = uiState.overlay
         when {
-            uiState.excludeCandidates != null -> viewModel.setExcludeCandidates(null)
-            uiState.testResult != null -> viewModel.setTestResult(null)
-            uiState.isInspectMode -> viewModel.setInspectMode(false)
-            uiState.openedPanel != PanelType.NONE -> viewModel.closePanels()
+            ov is Overlay.TestResult && ov.excludeCandidates != null -> viewModel.setExcludeCandidates(null)
+            ov is Overlay.TestResult -> viewModel.setTestResult(null)
+            ov is Overlay.InspectMode -> viewModel.setInspectMode(false)
+            ov is Overlay.Panel -> viewModel.closePanels()
             else -> webViewRef?.let { view ->
                 if (view.canGoBack()) view.goBack()
             }
@@ -157,7 +160,7 @@ fun MainScreen(
                 },
                 onTestRunClick = {
                     // トグル動作: 結果パネル表示中は閉じる、非表示ならテスト実行して開く
-                    if (uiState.testResult != null) {
+                    if (uiState.overlay is Overlay.TestResult) {
                         viewModel.setTestResult(null)
                     } else {
                         webViewRef?.let { callbacks.onTestRun(it) }
@@ -250,7 +253,7 @@ fun MainScreen(
                     .graphicsLayer {
                         clip = true
                         // パネル・テスト結果表示中はGPU描画コマンドの発行を完全スキップ（オクルージョン・カリング）
-                        alpha = if (uiState.openedPanel == PanelType.NONE && uiState.testResult == null) 1f else 0f
+                        alpha = if (uiState.overlay == Overlay.None) 1f else 0f
                     }
                 )
 
@@ -275,115 +278,110 @@ fun MainScreen(
             }
 
             // 前面レイヤー: パネル群（ゼロ遅延・GPUアルファ合成なしの完全不透明スタック描画）
-            when (uiState.openedPanel) {
-                PanelType.SETTINGS -> {
-                    SettingsPanel(
-                        uiState = uiState,
-                        presets = presets,
-                        onCloseClick = { viewModel.closePanels() },
-                        onPresetSelected = { name, config -> viewModel.applyPresetState(name, config) },
-                        onSavePresetClick = { callbacks.onShowSavePreset() },
-                        onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
-                        onConfigChange = { newConfig -> viewModel.updateCurrentConfig { newConfig } },
-                        onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
-                        onExportPresetsClick = { exportLauncher.launch("novel_scraper_presets.json") },
-                        onToggleWebViewDarkModeClick = { viewModel.toggleWebViewDarkMode() }
-                    )
-                }
-                PanelType.HISTORY -> {
-                    HistoryPanel(
-                        activeTab = uiState.activeHistoryTab,
-                        onTabSelected = { viewModel.setActiveHistoryTab(it) },
-                        activeTasks = activeTasks,
-                        history = history,
-                        onCloseClick = { viewModel.closePanels() },
-                        onStopTaskClick = { task -> task.stop(); viewModel.removeTask(task) },
-                        onHistoryItemClick = { url -> 
-                            webViewRef?.let { callbacks.onNavigate(url, it) }
-                            viewModel.setCurrentUrl(url)
-                            viewModel.setInputUrl(url)
-                            viewModel.closePanels()
-                        },
-                        onHistoryResumeClick = { folder ->
-                            val item = history[folder] ?: return@HistoryPanel
-                            if (item.nextUrl.isNotEmpty()) {
-                                val lastNum = item.chapter.filter { it.isDigit() }.toIntOrNull() ?: 0
-                                val nextConfig = item.config.copy(chapter = "@${lastNum + 1}")
-                                val presetName = if (item.presetName.isNotEmpty()) item.presetName else "(履歴から再開)"
-                                viewModel.applyPresetState(presetName, nextConfig)
-                                callbacks.onResumeScraping(item.nextUrl, folder)
+            when (val ov = uiState.overlay) {
+                is Overlay.Panel -> when (ov.type) {
+                    PanelType.SETTINGS -> {
+                        SettingsPanel(
+                            uiState = uiState,
+                            presets = presets,
+                            onCloseClick = { viewModel.closePanels() },
+                            onPresetSelected = { name, config -> viewModel.applyPresetState(name, config) },
+                            onSavePresetClick = { callbacks.onShowSavePreset() },
+                            onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
+                            onConfigChange = { newConfig -> viewModel.updateCurrentConfig { newConfig } },
+                            onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
+                            onExportPresetsClick = { exportLauncher.launch("novel_scraper_presets.json") },
+                            onToggleWebViewDarkModeClick = { viewModel.toggleWebViewDarkMode() }
+                        )
+                    }
+                    PanelType.HISTORY -> {
+                        HistoryPanel(
+                            activeTab = uiState.activeHistoryTab,
+                            onTabSelected = { viewModel.setActiveHistoryTab(it) },
+                            activeTasks = activeTasks,
+                            history = history,
+                            onCloseClick = { viewModel.closePanels() },
+                            onStopTaskClick = { task -> task.stop(); viewModel.removeTask(task) },
+                            onHistoryItemClick = { url ->
+                                webViewRef?.let { callbacks.onNavigate(url, it) }
+                                viewModel.setCurrentUrl(url)
+                                viewModel.setInputUrl(url)
                                 viewModel.closePanels()
-                            } else {
-                                android.widget.Toast.makeText(context, "次のページが見つかりません（最新話か、古い履歴です）", android.widget.Toast.LENGTH_LONG).show()
-                            }
-                        },
-                        onDeleteHistoryClick = { folder -> viewModel.deleteHistory(folder) }
-                    )
+                            },
+                            onHistoryResumeClick = { folder ->
+                                val item = history[folder] ?: return@HistoryPanel
+                                if (item.nextUrl.isNotEmpty()) {
+                                    val lastNum = item.chapter.filter { it.isDigit() }.toIntOrNull() ?: 0
+                                    val nextConfig = item.config.copy(chapter = "@${lastNum + 1}")
+                                    val presetName = if (item.presetName.isNotEmpty()) item.presetName else "(履歴から再開)"
+                                    viewModel.applyPresetState(presetName, nextConfig)
+                                    callbacks.onResumeScraping(item.nextUrl, folder)
+                                    viewModel.closePanels()
+                                } else {
+                                    android.widget.Toast.makeText(context, "次のページが見つかりません（最新話か、古い履歴です）", android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            },
+                            onDeleteHistoryClick = { folder -> viewModel.deleteHistory(folder) }
+                        )
+                    }
+                    PanelType.FAVORITES -> {
+                        FavoritesPanel(
+                            favorites = favorites,
+                            onFavoriteClick = { url ->
+                                webViewRef?.let { callbacks.onNavigate(url, it) }
+                                viewModel.setCurrentUrl(url)
+                                viewModel.setInputUrl(url)
+                                viewModel.closePanels()
+                            },
+                            onDeleteClick = { name -> viewModel.deleteFavorite(name) },
+                            onCloseClick = { viewModel.closePanels() }
+                        )
+                    }
+                    PanelType.TRANSLATION -> {
+                        TranslationPanel(
+                            uiState = uiState,
+                            onSelectEngineTab = { engine -> viewModel.setActiveTranslationEngine(engine) },
+                            onSelectFolderClick = { folderLauncher.launch(null) },
+                            onRemoveFolderClick = { engine, index -> viewModel.removeTranslationFolder(engine, index) },
+                            onClearFoldersClick = { engine -> viewModel.clearTranslationFolders(engine) },
+                            onUpdateDelays = { engine, chunkDelay, fileDelay -> viewModel.updateTranslationDelays(engine, chunkDelay, fileDelay) },
+                            onStartTranslationClick = { engine -> viewModel.startTranslation(engine) },
+                            onStopTranslationClick = { engine -> viewModel.stopTranslation(engine) },
+                            onOpenWebTranslateClick = { engine ->
+                                val targetUrl = when (engine) {
+                                    TranslationEngine.GOOGLE -> "https://translate.google.com/?sl=auto&tl=ja&op=translate"
+                                    TranslationEngine.DEEPL -> "https://www.deepl.com/ja/translator#auto/ja/"
+                                }
+                                webViewRef?.let { callbacks.onNavigate(targetUrl, it) }
+                                viewModel.setCurrentUrl(targetUrl)
+                                viewModel.setInputUrl(targetUrl)
+                                viewModel.closePanels()
+                            },
+                            onCloseClick = { viewModel.closePanels() }
+                        )
+                    }
                 }
-                PanelType.FAVORITES -> {
-                    FavoritesPanel(
-                        favorites = favorites,
-                        onFavoriteClick = { url -> 
-                            webViewRef?.let { callbacks.onNavigate(url, it) }
-                            viewModel.setCurrentUrl(url)
-                            viewModel.setInputUrl(url)
-                            viewModel.closePanels() 
-                        },
-                        onDeleteClick = { name -> viewModel.deleteFavorite(name) },
-                        onCloseClick = { viewModel.closePanels() }
+                is Overlay.TestResult -> {
+                    // テスト結果パネル（除外候補カードはその子UI）
+                    TestResultPanel(
+                        result = ov.result,
+                        onDismiss = { viewModel.setTestResult(null) },
+                        onRequestExclude = callbacks.onRequestExclude
                     )
+                    ov.excludeCandidates?.let { candidates ->
+                        ExcludeCandidatesCard(
+                            state = candidates,
+                            onApply = { selector ->
+                                viewModel.addExcludeSelector(selector)
+                                viewModel.setExcludeCandidates(null)
+                                webViewRef?.let { callbacks.onTestRun(it) }
+                            },
+                            onDismiss = { viewModel.setExcludeCandidates(null) }
+                        )
+                    }
                 }
-                PanelType.TRANSLATION -> {
-                    TranslationPanel(
-                        uiState = uiState,
-                        onSelectEngineTab = { engine -> viewModel.setActiveTranslationEngine(engine) },
-                        onSelectFolderClick = { folderLauncher.launch(null) },
-                        onRemoveFolderClick = { engine, index -> viewModel.removeTranslationFolder(engine, index) },
-                        onClearFoldersClick = { engine -> viewModel.clearTranslationFolders(engine) },
-                        onUpdateDelays = { engine, chunkDelay, fileDelay -> viewModel.updateTranslationDelays(engine, chunkDelay, fileDelay) },
-                        onStartTranslationClick = { engine -> viewModel.startTranslation(engine) },
-                        onStopTranslationClick = { engine -> viewModel.stopTranslation(engine) },
-                        onOpenWebTranslateClick = { engine ->
-                            val targetUrl = when (engine) {
-                                TranslationEngine.GOOGLE -> "https://translate.google.com/?sl=auto&tl=ja&op=translate"
-                                TranslationEngine.DEEPL -> "https://www.deepl.com/ja/translator#auto/ja/"
-                            }
-                            webViewRef?.let { callbacks.onNavigate(targetUrl, it) }
-                            viewModel.setCurrentUrl(targetUrl)
-                            viewModel.setInputUrl(targetUrl)
-                            viewModel.closePanels()
-                        },
-                        onCloseClick = { viewModel.closePanels() }
-                    )
-                }
-                PanelType.NONE -> {
-                    // パネル非表示
-                }
-            }
-        }
-
-        // 前面レイヤー: テスト結果パネル（非モーダルoverlay・オーバーレイ単一化は ViewModel 担当）
-        uiState.testResult?.let { result ->
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-            ) {
-                TestResultPanel(
-                    result = result,
-                    onDismiss = { viewModel.setTestResult(null) },
-                    onRequestExclude = callbacks.onRequestExclude
-                )
-                uiState.excludeCandidates?.let { candidates ->
-                    ExcludeCandidatesCard(
-                        state = candidates,
-                        onApply = { selector ->
-                            viewModel.addExcludeSelector(selector)
-                            viewModel.setExcludeCandidates(null)
-                            webViewRef?.let { callbacks.onTestRun(it) }
-                        },
-                        onDismiss = { viewModel.setExcludeCandidates(null) }
-                    )
+                else -> {
+                    // オーバーレイ非表示
                 }
             }
         }

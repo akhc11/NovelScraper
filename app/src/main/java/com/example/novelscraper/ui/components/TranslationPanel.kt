@@ -7,15 +7,23 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -30,6 +38,7 @@ fun TranslationPanel(
     onSelectFolderClick: () -> Unit,
     onRemoveFolderClick: (TranslationEngine, Int) -> Unit,
     onClearFoldersClick: (TranslationEngine) -> Unit,
+    onUpdateDelays: (TranslationEngine, String, String) -> Unit,
     onStartTranslationClick: (TranslationEngine) -> Unit,
     onStopTranslationClick: (TranslationEngine) -> Unit,
     onOpenWebTranslateClick: (TranslationEngine) -> Unit,
@@ -290,6 +299,92 @@ fun TranslationPanel(
 
             Spacer(modifier = Modifier.height(8.dp))
 
+            // 待機時間設定セクション
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(AppColors.surfaceMedium, RoundedCornerShape(4.dp))
+                    .padding(8.dp)
+            ) {
+                Text(
+                    text = "待機時間設定 (${if (activeEngine == TranslationEngine.GOOGLE) "Google" else "DeepL"}):",
+                    color = AppColors.textSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // チャンク間待機
+                DelaySettingInputRow(
+                    label = "チャンク間待機:",
+                    value = engineState.chunkDelay,
+                    enabled = !engineState.isTranslating,
+                    onValueChange = { newChunkDelay ->
+                        onUpdateDelays(activeEngine, newChunkDelay, engineState.fileDelay)
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // ファイル間待機
+                DelaySettingInputRow(
+                    label = "ファイル間待機:",
+                    value = engineState.fileDelay,
+                    enabled = !engineState.isTranslating,
+                    onValueChange = { newFileDelay ->
+                        onUpdateDelays(activeEngine, engineState.chunkDelay, newFileDelay)
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // おすすめプリセット候補チップス
+                val presets = if (activeEngine == TranslationEngine.GOOGLE) {
+                    listOf("1-3", "2-5", "5-10", "30-80")
+                } else {
+                    listOf("3-8", "5-15", "10-30", "30-80")
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "推奨例:",
+                        color = AppColors.textTertiary,
+                        fontSize = 10.sp
+                    )
+                    presets.forEach { preset ->
+                        val isSelected = engineState.chunkDelay == preset && engineState.fileDelay == preset
+                        Box(
+                            modifier = Modifier
+                                .background(AppColors.backgroundDark, RoundedCornerShape(3.dp))
+                                .border(1.dp, if (isSelected) AppColors.accentTealLight else Color.DarkGray, RoundedCornerShape(3.dp))
+                                .clickable(enabled = !engineState.isTranslating) {
+                                    onUpdateDelays(activeEngine, preset, preset)
+                                }
+                                .padding(horizontal = 5.dp, vertical = 2.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "${preset}秒",
+                                color = if (isSelected) AppColors.accentTealLight else AppColors.textSecondary,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "※「30-80」のように最小-最大秒数の範囲ランダム指定、または単一秒数指定が可能です",
+                    color = AppColors.textTertiary,
+                    fontSize = 9.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
             // 進捗表示エリア
             Column(
                 modifier = Modifier
@@ -380,6 +475,69 @@ fun TranslationPanel(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun DelaySettingInputRow(
+    label: String,
+    value: String,
+    enabled: Boolean,
+    onValueChange: (String) -> Unit
+) {
+    var textValue by remember(value) { mutableStateOf(value) }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            color = AppColors.textSecondary,
+            fontSize = 11.sp
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(90.dp)
+                    .height(28.dp)
+                    .background(AppColors.backgroundDark, RoundedCornerShape(4.dp))
+                    .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                BasicTextField(
+                    value = textValue,
+                    onValueChange = { newText ->
+                        textValue = newText
+                        onValueChange(newText)
+                    },
+                    enabled = enabled,
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        color = if (enabled) AppColors.accentTealLight else Color.Gray,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    ),
+                    cursorBrush = SolidColor(AppColors.accentTealLight),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Text,
+                        imeAction = ImeAction.Done
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            Text(
+                text = "秒",
+                color = AppColors.textTertiary,
+                fontSize = 11.sp
+            )
         }
     }
 }

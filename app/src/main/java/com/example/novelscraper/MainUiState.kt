@@ -17,7 +17,9 @@ data class EngineTranslationState(
     val currentFileName: String = "",
     val chunkProgress: Pair<Int, Int> = Pair(0, 0), // (現在チャンク, 総チャンク)
     val sourceLang: String = "auto",
-    val targetLang: String = "ja"
+    val targetLang: String = "ja",
+    val chunkDelay: String = "1-3",
+    val fileDelay: String = "1-2"
 )
 
 data class MainUiState(
@@ -34,8 +36,8 @@ data class MainUiState(
     
     // 翻訳関連の状態（エンジンごとに独立管理）
     val activeTranslationEngine: TranslationEngine = TranslationEngine.GOOGLE,
-    val googleTranslationState: EngineTranslationState = EngineTranslationState(),
-    val deeplTranslationState: EngineTranslationState = EngineTranslationState()
+    val googleTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "1-3", fileDelay = "1-2"),
+    val deeplTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "3-8", fileDelay = "2-5")
 ) {
     /** 現在選択中のタブの翻訳エンジン状態 */
     val currentEngineState: EngineTranslationState

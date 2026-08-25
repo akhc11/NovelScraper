@@ -31,3 +31,12 @@ data class ScraperConfig(
         }
     }
 }
+
+enum class SelectorField(val displayName: String) {
+    BODY("本文"),
+    TITLE("タイトル"),
+    NEXT("次ページ"),
+    CHAPTER("チャプター番号"),
+    FOLDER("作品名"),
+    FOLDER_LINK("別URL取得")
+}

@@ -40,6 +40,10 @@ class PreferencesRepository(private val context: Context) {
         val HISTORY = stringPreferencesKey("history_json_v2")
         val SETUP_DONE = stringPreferencesKey("is_setup_done")
         val WEBVIEW_DARK_MODE = stringPreferencesKey("webview_dark_mode")
+        val GOOGLE_CHUNK_DELAY = stringPreferencesKey("google_chunk_delay")
+        val GOOGLE_FILE_DELAY = stringPreferencesKey("google_file_delay")
+        val DEEPL_CHUNK_DELAY = stringPreferencesKey("deepl_chunk_delay")
+        val DEEPL_FILE_DELAY = stringPreferencesKey("deepl_file_delay")
     }
 
     private val json = Json {
@@ -54,6 +58,38 @@ class PreferencesRepository(private val context: Context) {
     suspend fun saveWebViewDarkMode(enabled: Boolean) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.WEBVIEW_DARK_MODE] = enabled.toString()
+        }
+    }
+
+    // Google翻訳 待機時間 (例: "1-3", "30-80", "2.0")
+    val googleChunkDelayFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.GOOGLE_CHUNK_DELAY]?.ifEmpty { null } ?: "1-3"
+    }.flowOn(Dispatchers.IO)
+
+    val googleFileDelayFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.GOOGLE_FILE_DELAY]?.ifEmpty { null } ?: "1-2"
+    }.flowOn(Dispatchers.IO)
+
+    suspend fun saveGoogleDelays(chunkDelay: String, fileDelay: String) = withContext(Dispatchers.IO) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.GOOGLE_CHUNK_DELAY] = chunkDelay.trim()
+            preferences[PreferencesKeys.GOOGLE_FILE_DELAY] = fileDelay.trim()
+        }
+    }
+
+    // DeepL翻訳 待機時間 (例: "3-8", "30-80", "2.5")
+    val deeplChunkDelayFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.DEEPL_CHUNK_DELAY]?.ifEmpty { null } ?: "3-8"
+    }.flowOn(Dispatchers.IO)
+
+    val deeplFileDelayFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.DEEPL_FILE_DELAY]?.ifEmpty { null } ?: "2-5"
+    }.flowOn(Dispatchers.IO)
+
+    suspend fun saveDeeplDelays(chunkDelay: String, fileDelay: String) = withContext(Dispatchers.IO) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.DEEPL_CHUNK_DELAY] = chunkDelay.trim()
+            preferences[PreferencesKeys.DEEPL_FILE_DELAY] = fileDelay.trim()
         }
     }
 

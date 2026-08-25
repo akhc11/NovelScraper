@@ -124,12 +124,12 @@ fun HeaderToolbar(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                ToolButton(Icons.AutoMirrored.Filled.List, { onPanelToggle(PanelType.HISTORY) }, uiState.openedPanel == PanelType.HISTORY)
-                ToolButton(null, { onPanelToggle(PanelType.TRANSLATION) }, uiState.openedPanel == PanelType.TRANSLATION, text = "翻")
+                ToolButton(Icons.AutoMirrored.Filled.List, { onPanelToggle(PanelType.HISTORY) }, uiState.activePanelType == PanelType.HISTORY)
+                ToolButton(null, { onPanelToggle(PanelType.TRANSLATION) }, uiState.activePanelType == PanelType.TRANSLATION, text = "翻")
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                ToolButton(Icons.Filled.Settings, { onPanelToggle(PanelType.SETTINGS) }, uiState.openedPanel == PanelType.SETTINGS)
+                ToolButton(Icons.Filled.Settings, { onPanelToggle(PanelType.SETTINGS) }, uiState.activePanelType == PanelType.SETTINGS)
                 ToolButton(Icons.Filled.CheckCircle, onTestRunClick, false, AppColors.surfaceLight)
                 ToolButton(Icons.Filled.Search, onInspectModeToggle, uiState.isInspectMode, if (uiState.isInspectMode) AppColors.inspectActive else AppColors.surfaceMedium)
                 ToolButton(Icons.Filled.Build, onInspectToolClick, false, AppColors.accentTeal)

@@ -3,7 +3,21 @@ package com.example.novelscraper
 import android.net.Uri
 import kotlinx.serialization.Serializable
 
-enum class PanelType { NONE, SETTINGS, HISTORY, FAVORITES, TRANSLATION }
+enum class PanelType { SETTINGS, HISTORY, FAVORITES, TRANSLATION }
+
+/**
+ * オーバーレイ状態（単一排他を型で保証）。
+ * 同時に1つしか開けない: パネル / テスト結果(+除外候補カードはその子) / インスペクター。
+ */
+sealed interface Overlay {
+    data object None : Overlay
+    data class Panel(val type: PanelType) : Overlay
+    data class TestResult(
+        val result: ScrapingResult,
+        val excludeCandidates: ExcludeCandidatesState? = null
+    ) : Overlay
+    data object InspectMode : Overlay
+}
 
 enum class TranslationEngine { GOOGLE, DEEPL }
 
@@ -39,22 +53,27 @@ data class EngineTranslationState(
 data class MainUiState(
     val currentUrl: String = "",
     val inputUrl: String = "",
-    val openedPanel: PanelType = PanelType.NONE,
-    val isInspectMode: Boolean = false,
+    val overlay: Overlay = Overlay.None,
     val currentPresetName: String = "",
     val currentConfig: ScraperConfig = ScraperConfig(),
     val activeHistoryTab: Int = 0, // 0: History, 1: Active Tasks
     val blockImages: Boolean = false,
     val isDesktopMode: Boolean = false,
     val isWebViewDarkMode: Boolean = true,
-    val testResult: ScrapingResult? = null,
-    val excludeCandidates: ExcludeCandidatesState? = null,
     
     // 翻訳関連の状態（エンジンごとに独立管理）
     val activeTranslationEngine: TranslationEngine = TranslationEngine.GOOGLE,
     val googleTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "1-3", fileDelay = "1-2"),
     val deeplTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "3-8", fileDelay = "2-5")
 ) {
+    /** インスペクター有効か（既存参照互換の派生プロパティ） */
+    val isInspectMode: Boolean
+        get() = overlay is Overlay.InspectMode
+
+    /** 現在開いているパネル（なければnull・既存参照互換の派生プロパティ） */
+    val activePanelType: PanelType?
+        get() = (overlay as? Overlay.Panel)?.type
+
     /** 現在選択中のタブの翻訳エンジン状態 */
     val currentEngineState: EngineTranslationState
         get() = when (activeTranslationEngine) {

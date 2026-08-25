@@ -2,9 +2,8 @@ NovelScraper2/
 ├── AGENTS.md                    ← 今回見せてもらった不変ルール（そのままでOK）
 ├── graphify-out/                ← 構造マップ（前回設定済み）
 └── docs/
-    ├── handoff.md                ← 進捗報告（機能系統ごとに分離）
-    ├── handoff_darkmode.md       ← ダークモード機能の仕様・実機テスト手順
-    └── translation_specification.md ← 翻訳機能・品質維持の仕様書
+    ├── handoff.md                ← 進捗報告（直近・主要）
+    └── history/                  ← 過去の仕様書・機能別進捗（歴史的記録）
 
 
 # NovelScraper2 開発遵守事項（絶対遵守）
@@ -14,6 +13,7 @@ NovelScraper2/
 - **作業中・作業終了前の進捗記録 (handoffの分離管理)**:
   - 進捗報告やプランは `docs/` 配下の handoff ファイルに記載・更新すること。
   - **【絶対遵守】別種・別機能の実装時の分離:** 直前の実装と全く異なる種類・機能の実装を行う場合（例: ダークモードの実装とURL共有の実装のように系統が異なる場合）、既存の `docs/handoff.md` を上書きして過去の記録を消してはならない。`docs/handoff2.md` や `docs/handoff_<機能名>.md` のようにファイルを分けて作成・記録すること。
+  - **完了後の整理:** 実装やプランが完了した handoff ファイル（`handoff_<機能名>.md` 等）は、すみやかに `docs/history/` フォルダへ移動し、ルートの `docs/` フォルダを常にクリーンに保つこと。
 
 
 ## 1. 修正時の鉄則

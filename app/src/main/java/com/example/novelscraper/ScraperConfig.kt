@@ -17,7 +17,8 @@ data class ScraperConfig(
     val chapterRegex: String = "",
     val delay: String = "15-30",
     val endCheck: String = "list|index|toc|javascript|null",
-    val autoUrl: String = ""
+    val autoUrl: String = "",
+    val exclude: String = ""
 ) {
     fun toJson(): String = Json.encodeToString(this)
 
@@ -38,5 +39,6 @@ enum class SelectorField(val displayName: String) {
     NEXT("次ページ"),
     CHAPTER("チャプター番号"),
     FOLDER("作品名"),
-    FOLDER_LINK("別URL取得")
+    FOLDER_LINK("別URL取得"),
+    EXCLUDE("除外要素")
 }

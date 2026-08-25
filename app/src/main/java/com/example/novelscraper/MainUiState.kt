@@ -1,10 +1,24 @@
 package com.example.novelscraper
 
 import android.net.Uri
+import kotlinx.serialization.Serializable
 
 enum class PanelType { NONE, SETTINGS, HISTORY, FAVORITES, TRANSLATION }
 
 enum class TranslationEngine { GOOGLE, DEEPL }
+
+@Serializable
+data class ExcludeCandidate(
+    val label: String,
+    val selector: String,
+    val metric: String,
+    val preview: String
+)
+
+data class ExcludeCandidatesState(
+    val baseSelector: String,
+    val items: List<ExcludeCandidate>
+)
 
 data class EngineTranslationState(
     val folderUri: Uri? = null,
@@ -33,6 +47,8 @@ data class MainUiState(
     val blockImages: Boolean = false,
     val isDesktopMode: Boolean = false,
     val isWebViewDarkMode: Boolean = true,
+    val testResult: ScrapingResult? = null,
+    val excludeCandidates: ExcludeCandidatesState? = null,
     
     // 翻訳関連の状態（エンジンごとに独立管理）
     val activeTranslationEngine: TranslationEngine = TranslationEngine.GOOGLE,

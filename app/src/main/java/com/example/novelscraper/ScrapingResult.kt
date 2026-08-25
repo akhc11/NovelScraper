@@ -8,5 +8,13 @@ data class ScrapingResult(
     val content: String = "",
     val nextUrl: String = "",
     val chapter: String = "",
-    val folderName: String = ""
+    val folderName: String = "",
+    val chapterDisplay: String? = null,
+    val debugLines: List<DebugLine>? = null
+)
+
+@Serializable
+data class DebugLine(
+    val text: String,
+    val selector: String
 )

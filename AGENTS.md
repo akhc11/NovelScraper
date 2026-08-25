@@ -76,12 +76,14 @@ NovelScraper2/
 
 ## 8. 実機テスト＆ビルド環境の標準手順
 - **環境設定（PowerShell必須）:**
-  - 日本語パスの文字化け・Gradle文字コードエラー防止のため、Gradle コマンド実行前に必ず以下を設定すること：
+  - **JDK 21 固定（必須）:** Android Studio 同梱 JBR は JDK 25 に更新されており、Gradle 8.13 / AGP 8.6.1 / Kotlin 2.0.21 の組み合わせでは起動に失敗する（`IllegalArgumentException: 25.0.2`）。必ず JDK 21 を使用すること：
     ```powershell
     $env:JAVA_TOOL_OPTIONS = "-Dfile.encoding=UTF-8"
-    $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+    $env:JAVA_HOME = "C:\Users\asan6\.jdks\ms-21.0.12.1"
     $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
     ```
+  - **デーモン停止:** JDK を切り替えた直後や「25.0.2」系エラーが出るときは、ビルド前に `.\gradlew --stop` を実行して旧デーモン（JDK 25）を破棄すること。
+  - 日本語パスの文字化け・Gradle文字コードエラー防止のため、Gradle コマンド実行前に必ず上記を設定すること。
   - ADB パス: `C:\Users\asan6\AppData\Local\Android\Sdk\platform-tools\adb.exe`
 - **実機インストール＆完全再起動コマンド:**
   ```powershell

@@ -6,7 +6,7 @@ import java.util.Base64
 
 object ScrapingScriptBuilder {
 
-    fun buildScrapingScript(config: ScraperConfig, useImages: Boolean): String {
+    fun buildScrapingScript(config: ScraperConfig, useImages: Boolean, isDebug: Boolean = false): String {
         val configJson = Json.encodeToString(config)
         val configBase64 = Base64.getEncoder().encodeToString(configJson.toByteArray(Charsets.UTF_8))
         return """
@@ -14,8 +14,49 @@ object ScrapingScriptBuilder {
                 try {
                     if (document.title.includes("Just a moment") || document.body.innerText.includes("Verify you are human")) return "CF_DETECTED";
                     var config = JSON.parse(decodeURIComponent(escape(atob('$configBase64'))));
-                    var result = { title: "", content: "", nextUrl: "", chapter: "", folderName: "" };
+                    var result = { title: "", content: "", nextUrl: "", chapter: "", folderName: "", debugLines: null };
                     function clean(t) { return t ? t.trim() : ""; }
+                    
+                    // --- CSS セレクタ取得ユーティリティ ---
+                    function getUniqueSelector(el) {
+                        if (!el || el.nodeType !== 1) return "";
+                        var path = [];
+                        while (el && el.nodeType === 1) {
+                            var sel = el.nodeName.toLowerCase();
+                            if (el.id && !el.id.match(/^[0-9]/)) {
+                                sel += '#' + el.id;
+                                path.unshift(sel);
+                                break;
+                            } else {
+                                var sib = el, nth = 1;
+                                while (sib = sib.previousElementSibling) {
+                                    if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++;
+                                }
+                                if (nth !== 1) sel += ':nth-of-type(' + nth + ')';
+                            }
+                            path.unshift(sel);
+                            el = el.parentNode;
+                            if (path.length > 5 || (el && el.tagName === 'BODY')) break;
+                        }
+                        return path.join(' > ');
+                    }
+
+                    // --- 除外処理 ---
+                    // 前回実行で付与した除外マークを必ず剥離してから現configを適用する
+                    // （設定から除外セレクタを削除した際に古いマークが残留するバグの根因修正）
+                    try {
+                        document.querySelectorAll('.__novel_exclude').forEach(function(el) { el.classList.remove('__novel_exclude'); });
+                    } catch(e){}
+                    if (config.exclude) {
+                        try {
+                            config.exclude.split(',').forEach(function(s) {
+                                var sel = s.trim();
+                                if (sel) {
+                                    document.querySelectorAll(sel).forEach(function(el) { el.classList.add('__novel_exclude'); });
+                                }
+                            });
+                        } catch(e){}
+                    }
 
                     var meta = {};
                     try {
@@ -78,7 +119,7 @@ object ScrapingScriptBuilder {
                     }
                     if (b) {
                         var clone = b.cloneNode(true);
-                        clone.querySelectorAll('script, style, noscript, iframe, template, .ad, .ads, [class*="advertisement"]').forEach(n => n.remove());
+                        clone.querySelectorAll('script, style, noscript, iframe, template, .ad, .ads, [class*="advertisement"], .__novel_exclude').forEach(n => n.remove());
                         if (!${useImages}) clone.querySelectorAll('img, picture, svg').forEach(n => n.remove());
                         
                         // 1. 改行の確保
@@ -89,17 +130,36 @@ object ScrapingScriptBuilder {
 
                         // 2. テキストの分解とプロ仕様の整形
                         var lines = clone.innerText.split('\n');
-                        var formattedLines = lines.map(function(line) {
-                            // 行頭・行末の不安定な空白をすべて削除（リセット）
-                            var l = line.replace(/^[　 \t\s]+|[　 \t\s]+$/g, '');
-                            if (l.length === 0) return "";
+                        var formattedLines = [];
+                        var debugLines = [];
 
-                            // 小説の作法ルール適用
-                            // 記号（「『（【［など）で始まる場合は字下げしない、それ以外は全角スペースを1つ付与
+                        lines.forEach(function(line) {
+                            var l = line.replace(/^[　 \t\s]+|[　 \t\s]+$/g, '');
+                            if (l.length === 0) return;
+
+                            var processed = "";
                             if (/^[\u300c\u300e\uff08\u28\u3010\u3014\uff3b]/.test(l)) {
-                                return l;
+                                processed = l;
                             } else {
-                                return "\u3000" + l; // 全角スペース1文字を強制
+                                processed = "\u3000" + l;
+                            }
+                            formattedLines.push(processed);
+
+                            if (${isDebug}) {
+                                // デバッグモード時：元の要素のセレクタを探す
+                                var selector = "";
+                                try {
+                                    // 完全に一致するテキストを持つ要素を元のコンテナ内から探す
+                                    var walker = document.createTreeWalker(b, NodeFilter.SHOW_TEXT, null, false);
+                                    var node;
+                                    while(node = walker.nextNode()) {
+                                        if (node.textContent.includes(l)) {
+                                            selector = getUniqueSelector(node.parentElement);
+                                            break;
+                                        }
+                                    }
+                                } catch(e){}
+                                debugLines.push({ text: processed, selector: selector });
                             }
                         });
 
@@ -107,6 +167,7 @@ object ScrapingScriptBuilder {
                         result.content = formattedLines.join('\n')
                             .replace(/\n{3,}/g, '\n\n') // 連続空行を整理
                             .trim();
+                        if (${isDebug}) result.debugLines = debugLines;
                     }
 
                     // プロパティチェーンのみ許可する安全な解決関数（eval禁止）
@@ -187,99 +248,404 @@ object ScrapingScriptBuilder {
     }
 
     /**
-     * 要素インスペクター（CSSセレクタ調査）スクリプト。
-     * 
-     * 【超重要・開発時の苦戦ポイント & 絶対遵守事項】
-     * 1. Android WebView の @JavascriptInterface メソッドは、JavaScript 側で `typeof window.AndroidBridge.onInspectResult`
-     *    を実行すると 'function' を返さず 'object' や 'unknown' になる仕様（バグ）が存在する。
-     *    そのため、`typeof === 'function'` などの存在チェックは絶対に書いてはならない（判定が false になりダイアログが出なくなる）。
-     *    必ず `if (window.AndroidBridge) window.AndroidBridge.onInspectResult(selector);` のように直接呼び出すこと！
-     * 2. OFF時（stop()時）に `removeEventListener` でイベントリスナーを完全に破棄すること。
-     *    これを怠るとリスナーがゾンビ化し、通常のWeb操作（タップ・リンク移動）が不能になり多重発火バグの原因となる。
+     * インスペクター v3（候補ポップアップ方式・即反映）
+     * - WebView内ツールバー廃止。終了は虫眼鏡トグル/戻る（buildInspectorStopScript）
+     * - タップ → 候補3種（要素自身/近い祖先/上位祖先）＋プレビュー → 割当先チップで即適用
+     * - 割当先: body/title/next/folder/exclude（SelectorField と対応）
      */
-    fun buildInspectorScript(): String {
+    fun buildInspectorScript(config: ScraperConfig): String {
+        val configJson = Json.encodeToString(config)
+        val configBase64 = Base64.getEncoder().encodeToString(configJson.toByteArray(Charsets.UTF_8))
         return """
             (function(){
-                if (!window.__novelInspector) {
-                    var prev = null;
-                    var active = false;
+                if (window.__novelInspectActive) return;
+                window.__novelInspectActive = true;
+                var config = JSON.parse(decodeURIComponent(escape(atob('$configBase64'))));
+                var active = true;
+                var prevHighlight = null;
+                var lastTarget = 'body';
+                var popup = null;
 
-                    function getCss(el) {
-                        if (!el || el.nodeType !== Node.ELEMENT_NODE) return "";
-                        var path = [];
-                        while (el && el.nodeType === Node.ELEMENT_NODE) {
-                            var sel = el.nodeName.toLowerCase();
-                            if (el.id && !el.id.match(/^[0-9]/)) {
-                                sel += '#' + el.id;
-                                path.unshift(sel);
-                                break;
+                var TARGETS = [
+                    { key: 'body',    label: '本文' },
+                    { key: 'title',   label: 'タイトル' },
+                    { key: 'next',    label: '次へ' },
+                    { key: 'folder',  label: '作品名' },
+                    { key: 'exclude', label: '除外' }
+                ];
+
+                var style = document.createElement('style');
+                style.innerHTML = '.__novel_mark_title { outline: 3px solid #2196F3 !important; } .__novel_mark_body { outline: 3px solid #4CAF50 !important; } .__novel_mark_next { outline: 3px solid #FF9800 !important; }';
+                document.head.appendChild(style);
+
+                var hint = document.createElement('div');
+                hint.id = '__novel_hint';
+                hint.innerText = '要素をタップして候補から設定';
+                hint.style = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.85);color:#fff;padding:6px 14px;border-radius:16px;z-index:2147483647;font-size:12px;';
+                document.body.appendChild(hint);
+                setTimeout(function(){ if (hint.parentNode) hint.parentNode.removeChild(hint); }, 3000);
+
+                function getUniqueSelector(el) {
+                    if (!el || el.nodeType !== 1) return "";
+                    var path = [];
+                    while (el && el.nodeType === 1) {
+                        var sel = el.nodeName.toLowerCase();
+                        if (el.id && !el.id.match(/^[0-9]/)) {
+                            sel += '#' + el.id;
+                            path.unshift(sel);
+                            break;
+                        } else {
+                            var sib = el, nth = 1;
+                            while (sib = sib.previousElementSibling) {
+                                if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++;
+                            }
+                            if (nth !== 1) sel += ':nth-of-type(' + nth + ')';
+                        }
+                        path.unshift(sel);
+                        el = el.parentNode;
+                        if (path.length > 5 || (el && el.tagName === 'BODY')) break;
+                    }
+                    return path.join(' > ');
+                }
+
+                function highlight(el) {
+                    if (prevHighlight) prevHighlight.style.outline = '';
+                    if (el && el.style) {
+                        el.style.outline = '3px solid #FF5722';
+                        prevHighlight = el;
+                    }
+                }
+
+                function applyCurrentConfig() {
+                    document.querySelectorAll('.__novel_mark_title, .__novel_mark_body, .__novel_mark_next').forEach(function(el){
+                        el.style.outline = '';
+                        el.classList.remove('__novel_mark_title', '__novel_mark_body', '__novel_mark_next');
+                    });
+                    try {
+                        if (config.title) document.querySelector(config.title).classList.add('__novel_mark_title');
+                        if (config.body) document.querySelector(config.body).classList.add('__novel_mark_body');
+                        if (config.next) document.querySelector(config.next).classList.add('__novel_mark_next');
+                        if (config.exclude) {
+                            config.exclude.split(',').forEach(function(s) {
+                                var sel = s.trim();
+                                if (sel) document.querySelectorAll(sel).forEach(function(el){ el.style.opacity = '0.3'; });
+                            });
+                        }
+                    } catch(e){}
+                }
+
+                function getExcludeList() {
+                    return config.exclude ? config.exclude.split(',').map(function(s){ return s.trim(); }).filter(Boolean) : [];
+                }
+                function isExcluded(sel) { return getExcludeList().indexOf(sel) > -1; }
+
+                function buildPreview(sel, target) {
+                    var el = null;
+                    try { el = document.querySelector(sel); } catch(e) {}
+                    if (!el) return '(一致なし)';
+                    if (target === 'next') {
+                        var a = (el.tagName === 'A') ? el : (el.querySelector ? el.querySelector('a') : null);
+                        if (!a && el.closest) a = el.closest('a');
+                        var href = a ? (a.href || a.getAttribute('href') || '') : '';
+                        if (href) { try { href = new URL(href, location.href).href; } catch(e){} }
+                        return href || '(リンクなし)';
+                    }
+                    var t = ((el.innerText || el.textContent || '') + '').replace(/\s+/g, ' ').trim();
+                    if (t.length > 100) t = t.substring(0, 100) + '…';
+                    return t || '(テキストなし)';
+                }
+
+                function shortSelector(node) {
+                    var tag = node.tagName.toLowerCase();
+                    if (node.id && !String(node.id).match(/^[0-9]/)) return tag + '#' + node.id;
+                    if (typeof node.className === 'string' && node.className.trim()) {
+                        var cls = node.className.trim().split(/\s+/)[0];
+                        if (cls) return tag + '.' + cls;
+                    }
+                    return null;
+                }
+
+                function getCandidates(el) {
+                    var cands = [];
+                    var seen = {};
+                    function push(node, label, sel) {
+                        if (!node || node.nodeType !== 1) return;
+                        var tag = (node.tagName || '').toUpperCase();
+                        if (tag === 'BODY' || tag === 'HTML') return;
+                        var s = sel || shortSelector(node);
+                        if (!s) s = getUniqueSelector(node);
+                        if (!s || seen[s]) return;
+                        seen[s] = true;
+                        var m = 0;
+                        try { m = document.querySelectorAll(s).length; } catch(e) {}
+                        cands.push({ node: node, selector: s, label: label, matchCount: m });
+                    }
+                    push(el, '要素自身', getUniqueSelector(el));
+                    var p = el.parentElement;
+                    while (p && p.tagName !== 'BODY' && !(p.id && !String(p.id).match(/^[0-9]/))) p = p.parentElement;
+                    if (p && p.tagName !== 'BODY') push(p, 'ID祖先');
+                    var q = el.parentElement;
+                    while (q && q.tagName !== 'BODY' && !(typeof q.className === 'string' && q.className.trim())) q = q.parentElement;
+                    if (q && q.tagName !== 'BODY') push(q, 'Class祖先');
+                    var sem = null;
+                    try { sem = el.closest('article, main, [role="main"], section'); } catch(e){}
+                    if (sem && sem !== p && sem !== q && sem.tagName !== 'BODY') {
+                        push(sem, '意味コンテナ', sem.tagName.toLowerCase());
+                    }
+                    // フォールバック: id/class/semantic が見つからない構造では親要素連鎖で補完
+                    if (cands.length < 3) {
+                        var n = el.parentElement;
+                        while (n && n.tagName !== 'BODY' && cands.length < 3) {
+                            push(n, '親要素');
+                            n = n.parentElement;
+                        }
+                    }
+                    return cands.slice(0, 4);
+                }
+
+                function closePopup() {
+                    if (popup && popup.parentNode) popup.parentNode.removeChild(popup);
+                    popup = null;
+                }
+
+                function showCandidatePopup(cands, x, y) {
+                    closePopup();
+                    var pendingTarget = lastTarget;
+
+                    popup = document.createElement('div');
+                    popup.id = '__novel_popup';
+                    popup.style = 'position:fixed;background:#222;color:#fff;z-index:2147483646;font-size:12px;border-radius:6px;box-shadow:0 3px 10px rgba(0,0,0,0.6);max-width:360px;width:min(92vw,360px);max-height:70vh;display:flex;flex-direction:column;overflow:hidden;';
+
+                    var header = document.createElement('div');
+                    header.style = 'display:flex;align-items:center;padding:5px 8px;background:#333;flex-shrink:0;';
+                    var title = document.createElement('span');
+                    title.innerText = '候補を選択して適用';
+                    title.style = 'flex:1;color:#ddd;';
+                    var closeBtn = document.createElement('button');
+                    closeBtn.innerText = '×';
+                    closeBtn.style = 'background:#f44336;color:#fff;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;';
+                    closeBtn.onclick = function(ev) { ev.stopPropagation(); closePopup(); };
+                    header.appendChild(title);
+                    header.appendChild(closeBtn);
+                    popup.appendChild(header);
+
+                    var chips = document.createElement('div');
+                    chips.style = 'display:flex;flex-wrap:wrap;gap:4px;padding:5px 8px;background:#2a2a2a;flex-shrink:0;';
+                    var chipBtns = {};
+                    TARGETS.forEach(function(t) {
+                        var b = document.createElement('button');
+                        b.innerText = t.label;
+                        b.style = 'background:#555;color:#fff;border:none;border-radius:3px;padding:3px 7px;cursor:pointer;';
+                        b.onclick = function(ev) {
+                            ev.stopPropagation();
+                            pendingTarget = t.key;
+                            updateChips();
+                            refreshRows();
+                        };
+                        chipBtns[t.key] = b;
+                        chips.appendChild(b);
+                    });
+                    function updateChips() {
+                        TARGETS.forEach(function(t) {
+                            chipBtns[t.key].style.background = (pendingTarget === t.key) ? '#FF5722' : '#555';
+                        });
+                    }
+                    updateChips();
+                    popup.appendChild(chips);
+
+                    var rowsBox = document.createElement('div');
+                    rowsBox.style = 'overflow-y:auto;min-height:0;';
+                    popup.appendChild(rowsBox);
+
+                    function refreshRows() {
+                        rowsBox.innerHTML = '';
+                        cands.forEach(function(c) {
+                            var removable = (pendingTarget === 'exclude') && isExcluded(c.selector);
+                            var row = document.createElement('div');
+                            row.style = 'padding:6px 8px;border-top:1px solid #444;cursor:pointer;';
+                            var head = document.createElement('div');
+                            head.style = 'display:flex;gap:6px;align-items:center;';
+                            var lab = document.createElement('b');
+                            lab.innerText = removable ? 'この除外を解除' : c.label;
+                            lab.style = 'color:' + (removable ? '#4CAF50' : '#8ab4f8') + ';flex-shrink:0;';
+                            var selSpan = document.createElement('span');
+                            selSpan.innerText = c.selector;
+                            selSpan.style = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aaa;';
+                            var cnt = document.createElement('span');
+                            if (pendingTarget === 'exclude') {
+                                cnt.innerText = '一致' + c.matchCount;
+                            } else if (pendingTarget === 'next') {
+                                cnt.innerText = '';
                             } else {
-                                var cls = el.className;
-                                if (typeof cls === 'string' && cls.trim() !== '') {
-                                    var valid = cls.trim().split(/\s+/).filter(function(c) {
-                                        return !c.match(/[0-9:\[\]\.]/);
-                                    });
-                                    if (valid.length > 0) sel += '.' + valid.join('.');
+                                var tEl = null;
+                                try { tEl = document.querySelector(c.selector); } catch(e) {}
+                                var txt = ((tEl && tEl.innerText) || '') + '';
+                                var lineCount = txt ? txt.split('\n').filter(function(x){ return x.trim(); }).length : 0;
+                                cnt.innerText = txt.replace(/\s+/g, '').length + '字/' + lineCount + '行';
+                            }
+                            cnt.style = 'flex-shrink:0;color:#888;';
+                            head.appendChild(lab);
+                            head.appendChild(selSpan);
+                            head.appendChild(cnt);
+                            var prev = document.createElement('div');
+                            prev.innerText = buildPreview(c.selector, pendingTarget);
+                            prev.style = 'margin-top:4px;color:#ddd;max-height:110px;overflow-y:auto;line-height:16px;padding:4px;background:#111;border-radius:4px;white-space:pre-wrap;word-break:break-all;';
+                            row.appendChild(head);
+                            row.appendChild(prev);
+                            row.onclick = function(ev) {
+                                ev.stopPropagation();
+                                if (window.AndroidBridge) {
+                                    if (pendingTarget === 'exclude') {
+                                        if (removable) {
+                                            config.exclude = getExcludeList().filter(function(s){ return s !== c.selector; }).join(', ');
+                                            window.AndroidBridge.onRemoveExclude(c.selector);
+                                            try { document.querySelectorAll(c.selector).forEach(function(n){ n.style.opacity = ''; }); } catch(e){}
+                                        } else {
+                                            var list = getExcludeList();
+                                            if (list.indexOf(c.selector) < 0) list.push(c.selector);
+                                            config.exclude = list.join(', ');
+                                            window.AndroidBridge.onApplyCandidate('exclude', c.selector);
+                                            try { document.querySelectorAll(c.selector).forEach(function(n){ n.style.opacity = '0.3'; }); } catch(e){}
+                                        }
+                                    } else {
+                                        config[pendingTarget] = c.selector;
+                                        window.AndroidBridge.onApplyCandidate(pendingTarget, c.selector);
+                                        highlight(c.node);
+                                    }
                                 }
+                                lastTarget = pendingTarget;
+                                applyCurrentConfig();
+                                closePopup();
+                            };
+                            rowsBox.appendChild(row);
+                        });
+                    }
+                    refreshRows();
+
+                    document.body.appendChild(popup);
+
+                    var w = popup.offsetWidth || 320;
+                    var h = popup.offsetHeight || 200;
+                    var maxL = (window.innerWidth || 360) - w - 8;
+                    var left = Math.min(Math.max(8, x - w / 2), Math.max(8, maxL));
+                    var maxY = (window.innerHeight || 640) - h - 8;
+                    var top = (y + 12 > maxY) ? Math.max(8, y - h - 12) : y + 12;
+                    popup.style.left = left + 'px';
+                    popup.style.top = top + 'px';
+                }
+
+                function handleClick(e) {
+                    if (!active) return;
+                    if (e.target.closest('#__novel_popup')) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    var cands = getCandidates(e.target);
+                    if (!cands.length) return;
+                    showCandidatePopup(cands, e.clientX || 0, e.clientY || 0);
+                }
+
+                document.addEventListener('click', handleClick, true);
+                applyCurrentConfig();
+
+                window.__novelInspector = {
+                    stop: function() {
+                        active = false;
+                        document.removeEventListener('click', handleClick, true);
+                        closePopup();
+                        var h = document.getElementById('__novel_hint');
+                        if (h && h.parentNode) h.parentNode.removeChild(h);
+                        if (prevHighlight) prevHighlight.style.outline = '';
+                        window.__novelInspectActive = false;
+                    }
+                };
+            })();
+        """.trimIndent()
+    }
+
+    /**
+     * 除外候補プローブ: 指定セレクタの要素から4種類の候補（要素自身/ID祖先/Class祖先/意味コンテナ）を
+     * JSON配列で返す（evaluateJavascript の戻り値として受領。WebViewへの注入不要）。
+     * metric は除外用に「一致数・消える文字数」を含む。
+     */
+    fun buildCandidateProbeScript(baseSelector: String): String {
+        val safeSelector = baseSelector.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
+        return """
+            (function(){
+                try {
+                    var baseEl = document.querySelector('$safeSelector');
+                    if (!baseEl) return '[]';
+                    function getUniqueSelector(el) {
+                        if (!el || el.nodeType !== 1) return '';
+                        var path = [];
+                        while (el && el.nodeType === 1) {
+                            var sel = el.nodeName.toLowerCase();
+                            if (el.id && !String(el.id).match(/^[0-9]/)) { sel += '#' + el.id; path.unshift(sel); break; }
+                            else {
                                 var sib = el, nth = 1;
-                                while (sib = sib.previousElementSibling) {
-                                    if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++;
-                                }
+                                while (sib = sib.previousElementSibling) { if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++; }
                                 if (nth !== 1) sel += ':nth-of-type(' + nth + ')';
                             }
                             path.unshift(sel);
                             el = el.parentNode;
-                            if (path.length > 3) break;
+                            if (path.length > 5 || (el && el.tagName === 'BODY')) break;
                         }
                         return path.join(' > ');
                     }
-
-                    function highlight(el) {
-                        if (prev && prev !== el) {
-                            prev.style.outline = '';
+                    function shortSelector(node) {
+                        var tag = node.tagName.toLowerCase();
+                        if (node.id && !String(node.id).match(/^[0-9]/)) return tag + '#' + node.id;
+                        if (typeof node.className === 'string' && node.className.trim()) {
+                            var cls = node.className.trim().split(/\s+/)[0];
+                            if (cls) return tag + '.' + cls;
                         }
-                        if (el && el.style) {
-                            el.style.outline = '3px solid #FF5722';
-                            prev = el;
-                        }
+                        return null;
                     }
-
-                    function clearHighlight() {
-                        if (prev) {
-                            prev.style.outline = '';
-                            prev = null;
-                        }
-                    }
-
-                    function handleClick(e) {
-                        if (!active) return;
-                        e.preventDefault();
-                        e.stopPropagation();
+                    var cands = [];
+                    var seen = {};
+                    function push(node, label, sel) {
+                        if (!node || node.nodeType !== 1) return;
+                        var tag = (node.tagName || '').toUpperCase();
+                        if (tag === 'BODY' || tag === 'HTML') return;
+                        var s = sel || shortSelector(node);
+                        if (!s) s = getUniqueSelector(node);
+                        if (!s || seen[s]) return;
+                        seen[s] = true;
+                        var count = 0, chars = 0, lines = 0, preview = '(テキストなし)';
                         try {
-                            var target = e.target;
-                            highlight(target);
-                            var selector = getCss(target) || '?';
-                            // 【注意】typeof チェックは禁止。直接呼び出すこと
-                            if (window.AndroidBridge) {
-                                window.AndroidBridge.onInspectResult(selector);
+                            count = document.querySelectorAll(s).length;
+                            var first = document.querySelector(s);
+                            if (first) {
+                                var t = ((first.innerText || '') + '').replace(/[ \t]+/g, ' ');
+                                lines = t.split('\n').filter(function(x){ return x.trim(); }).length;
+                                chars = t.replace(/\s+/g, '').length;
+                                var p = t.trim().replace(/\s+/g, ' ');
+                                preview = (p.length > 120) ? p.substring(0, 120) + '…' : (p || '(テキストなし)');
                             }
-                        } catch(err) {}
+                        } catch(e){}
+                        cands.push({ label: label, selector: s, metric: count + '件・約' + chars + '字/' + lines + '行', preview: preview });
                     }
-
-                    window.__novelInspector = {
-                        start: function() {
-                            this.stop();
-                            active = true;
-                            document.addEventListener('click', handleClick, true);
-                        },
-                        stop: function() {
-                            active = false;
-                            clearHighlight();
-                            document.removeEventListener('click', handleClick, true);
+                    push(baseEl, '要素自身', getUniqueSelector(baseEl));
+                    var p = baseEl.parentElement;
+                    while (p && p.tagName !== 'BODY' && !(p.id && !String(p.id).match(/^[0-9]/))) p = p.parentElement;
+                    if (p && p.tagName !== 'BODY') push(p, 'ID祖先');
+                    var q = baseEl.parentElement;
+                    while (q && q.tagName !== 'BODY' && !(typeof q.className === 'string' && q.className.trim())) q = q.parentElement;
+                    if (q && q.tagName !== 'BODY') push(q, 'Class祖先');
+                    var sem = null;
+                    try { sem = baseEl.closest('article, main, [role="main"], section'); } catch(e){}
+                    if (sem && sem !== p && sem !== q && sem.tagName !== 'BODY') {
+                        push(sem, '意味コンテナ', sem.tagName.toLowerCase());
+                    }
+                    // フォールバック: id/class/semantic が見つからない構造では親要素連鎖で補完
+                    if (cands.length < 3) {
+                        var n = baseEl.parentElement;
+                        while (n && n.tagName !== 'BODY' && cands.length < 3) {
+                            push(n, '親要素');
+                            n = n.parentElement;
                         }
-                    };
-                }
-                window.__novelInspector.start();
+                    }
+                    return JSON.stringify(cands.slice(0, 4));
+                } catch(e) { return '[]'; }
             })();
         """.trimIndent()
     }
@@ -289,6 +655,26 @@ object ScrapingScriptBuilder {
             (function(){
                 if (window.__novelInspector) {
                     window.__novelInspector.stop();
+                }
+            })();
+        """.trimIndent()
+    }
+
+    fun buildHighlightScript(selector: String): String {
+        val safeSelector = selector.replace("'", "\\'")
+        return """
+            (function(){
+                var el = document.querySelector('$safeSelector');
+                if (el) {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    var oldOutline = el.style.outline;
+                    var oldBg = el.style.backgroundColor;
+                    el.style.outline = '5px solid #FF5722';
+                    el.style.backgroundColor = 'rgba(255, 87, 34, 0.2)';
+                    setTimeout(function(){
+                        el.style.outline = oldOutline;
+                        el.style.backgroundColor = oldBg;
+                    }, 3000);
                 }
             })();
         """.trimIndent()

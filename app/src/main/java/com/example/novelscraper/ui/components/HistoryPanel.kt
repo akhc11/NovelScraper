@@ -30,6 +30,7 @@ fun HistoryPanel(
     onTabSelected: (Int) -> Unit,
     activeTasks: List<ScrapingTask>,
     history: Map<String, HistoryItem>,
+    onCloseClick: () -> Unit,
     onStopTaskClick: (ScrapingTask) -> Unit,
     onHistoryItemClick: (String) -> Unit,
     onHistoryResumeClick: (String) -> Unit,
@@ -37,6 +38,31 @@ fun HistoryPanel(
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier.fillMaxSize().background(AppColors.backgroundDarkest)) {
+        // ヘッダー行（全パネル統一形式: 機能名 + 右側に閉じるボタン）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(AppColors.backgroundDark)
+                .padding(horizontal = 15.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "履歴",
+                color = AppColors.textPrimary,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Button(
+                onClick = onCloseClick,
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceLight),
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier.height(34.dp)
+            ) {
+                Text("閉じる", color = AppColors.textPrimary, fontSize = 12.sp)
+            }
+        }
+
         val tabs = remember { listOf("実行中", "履歴") }
         TabRow(
             selectedTabIndex = activeTab,

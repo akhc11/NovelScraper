@@ -42,6 +42,7 @@ class SettingsFormState(initialConfig: ScraperConfig) {
     var endCheck by mutableStateOf(initialConfig.endCheck)
     var delay by mutableStateOf(initialConfig.delay)
     var autoUrl by mutableStateOf(initialConfig.autoUrl)
+    var exclude by mutableStateOf(initialConfig.exclude)
 
     fun updateAll(config: ScraperConfig) {
         folder = config.folder
@@ -56,6 +57,7 @@ class SettingsFormState(initialConfig: ScraperConfig) {
         endCheck = config.endCheck
         delay = config.delay
         autoUrl = config.autoUrl
+        exclude = config.exclude
     }
 
     fun toConfig(): ScraperConfig {
@@ -71,7 +73,8 @@ class SettingsFormState(initialConfig: ScraperConfig) {
             next = next,
             endCheck = endCheck,
             delay = delay,
-            autoUrl = autoUrl
+            autoUrl = autoUrl,
+            exclude = exclude
         )
     }
 }
@@ -246,6 +249,7 @@ fun SettingsPanel(
         // セクション2: 本文・巡回設定
         SettingsCard(title = "本文・ページ巡回設定") {
             ConfigInputField("本文 Selector", formState.body) { formState.body = it }
+            ConfigInputField("除外要素 (複数: , 区切り)", formState.exclude) { formState.exclude = it }
             ConfigInputField("次ページ Selector", formState.next) { formState.next = it }
             ConfigInputField("終了検知 Regex", formState.endCheck) { formState.endCheck = it }
         }

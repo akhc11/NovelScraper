@@ -125,7 +125,7 @@ class ScrapingStateMachine(
 
     private fun buildScrapePageAction(): Action {
         if (currentUrl == lastSuccessUrl) return Action.UpdateStatus("スキップ（同一URL）")
-        val jsCode = ScrapingScriptBuilder.buildScrapingScript(config, true)
+        val jsCode = ScrapingScriptBuilder.buildScrapingScript(config, true, false)
         return Action.EvaluateJs(jsCode, JsPurpose.SCRAPE_PAGE)
     }
 
@@ -144,7 +144,7 @@ class ScrapingStateMachine(
             folderName = config.folder.substring(1)
         }
         state = State.SCRAPING
-        val jsCode = ScrapingScriptBuilder.buildScrapingScript(config, true)
+        val jsCode = ScrapingScriptBuilder.buildScrapingScript(config, true, false)
         return Action.EvaluateJs(jsCode, JsPurpose.SCRAPE_PAGE)
     }
 

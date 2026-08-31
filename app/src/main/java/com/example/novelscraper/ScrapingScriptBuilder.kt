@@ -638,24 +638,4 @@ object ScrapingScriptBuilder {
             })();
         """.trimIndent()
     }
-
-    fun buildHighlightScript(selector: String): String {
-        val safeSelector = selector.replace("'", "\\'")
-        return """
-            (function(){
-                var el = document.querySelector('$safeSelector');
-                if (el) {
-                    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    var oldOutline = el.style.outline;
-                    var oldBg = el.style.backgroundColor;
-                    el.style.outline = '5px solid #FF5722';
-                    el.style.backgroundColor = 'rgba(255, 87, 34, 0.2)';
-                    setTimeout(function(){
-                        el.style.outline = oldOutline;
-                        el.style.backgroundColor = oldBg;
-                    }, 3000);
-                }
-            })();
-        """.trimIndent()
-    }
 }

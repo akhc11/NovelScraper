@@ -1,4 +1,4 @@
-package com.example.novelscraper
+﻿package com.example.novelscraper
 
 import android.net.Uri
 import kotlinx.serialization.Serializable
@@ -17,6 +17,16 @@ sealed interface Overlay {
         val excludeCandidates: ExcludeCandidatesState? = null
     ) : Overlay
     data object InspectMode : Overlay
+}
+
+/**
+ * 表示中のダイアログ状態（Jetpack Compose 駆動）。
+ */
+sealed interface ActiveDialog {
+    data object None : ActiveDialog
+    data class AddFavorite(val title: String, val url: String) : ActiveDialog
+    data class SavePreset(val defaultName: String, val currentUrl: String) : ActiveDialog
+    data class InspectElement(val selector: String) : ActiveDialog
 }
 
 enum class TranslationEngine { GOOGLE, DEEPL }
@@ -54,12 +64,14 @@ data class MainUiState(
     val currentUrl: String = "",
     val inputUrl: String = "",
     val overlay: Overlay = Overlay.None,
+    val activeDialog: ActiveDialog = ActiveDialog.None,
     val currentPresetName: String = "",
     val currentConfig: ScraperConfig = ScraperConfig(),
     val activeHistoryTab: Int = 0, // 0: History, 1: Active Tasks
     val blockImages: Boolean = false,
     val isDesktopMode: Boolean = false,
     val isWebViewDarkMode: Boolean = true,
+    val isWebPageTranslated: Boolean = false, // ブラウザ画面の翻訳状態
     
     // 翻訳関連の状態（エンジンごとに独立管理）
     val activeTranslationEngine: TranslationEngine = TranslationEngine.GOOGLE,

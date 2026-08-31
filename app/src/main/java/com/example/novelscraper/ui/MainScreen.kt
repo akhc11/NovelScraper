@@ -1,12 +1,15 @@
 package com.example.novelscraper.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.webkit.WebView
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,23 +20,33 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.documentfile.provider.DocumentFile
+import com.example.novelscraper.ActiveDialog
+import com.example.novelscraper.EngineTranslationState
 import com.example.novelscraper.MainUiState
 import com.example.novelscraper.Overlay
 import com.example.novelscraper.PanelType
-import com.example.novelscraper.ScraperConfig
 import com.example.novelscraper.ScrapingViewModel
 import com.example.novelscraper.TranslationEngine
 import com.example.novelscraper.WebViewHelper
+import com.example.novelscraper.WebTranslateHelper
 import com.example.novelscraper.ui.components.*
 import com.example.novelscraper.ui.theme.AppColors
 
 /**
- * MainScreen と Activity の境界コールバック集約（引数爆発の構造的解消）。
+ * 原文復帰リロード後に自動実行する保留アクション。
+ */
+private enum class PendingPostReloadAction {
+    NONE,
+    TEST_RUN,
+    INSPECT_MODE
+}
+
+/**
+ * MainScreen と Activity の境界コールバック集約。
  */
 data class MainScreenCallbacks(
     val onStartScraping: (String) -> Unit,
@@ -43,8 +56,6 @@ data class MainScreenCallbacks(
     val onInjectInspector: (WebView?) -> Unit,
     val onRemoveInspector: (WebView?) -> Unit,
     val onNavigate: (String, WebView) -> Unit,
-    val onShowAddFavorite: (String, String) -> Unit,
-    val onShowSavePreset: () -> Unit,
     val onTestRun: (WebView) -> Unit,
     val onRequestExclude: (String) -> Unit
 )
@@ -63,6 +74,7 @@ fun MainScreen(
     val context = LocalContext.current
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var pendingPostReloadAction by remember { mutableStateOf(PendingPostReloadAction.NONE) }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -85,7 +97,7 @@ fun MainScreen(
                     treeUri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // セキュリティ例外等のハンドリング
             }
             val doc = DocumentFile.fromTreeUri(context, treeUri)
@@ -104,7 +116,11 @@ fun MainScreen(
         }
     }
 
-    BackHandler(enabled = uiState.overlay != Overlay.None || (webViewRef?.canGoBack() == true)) {
+    BackHandler(enabled = uiState.activeDialog !is ActiveDialog.None || uiState.overlay != Overlay.None || (webViewRef?.canGoBack() == true)) {
+        if (uiState.activeDialog !is ActiveDialog.None) {
+            viewModel.dismissDialog()
+            return@BackHandler
+        }
         val ov = uiState.overlay
         when {
             ov is Overlay.TestResult && ov.excludeCandidates != null -> viewModel.setExcludeCandidates(null)
@@ -139,7 +155,7 @@ fun MainScreen(
                     val url = webViewRef?.url ?: uiState.currentUrl
                     val title = webViewRef?.title ?: "No Title"
                     if (url.isNotEmpty()) {
-                        callbacks.onShowAddFavorite(title, url)
+                        viewModel.showAddFavoriteDialog(title, url)
                     }
                 },
                 onStarLongClick = {
@@ -152,30 +168,61 @@ fun MainScreen(
                 onUrlChange = { viewModel.setInputUrl(it) },
                 onPanelToggle = { panel -> viewModel.togglePanel(panel) },
                 onInspectModeToggle = {
-                    // 注入/破棄は LaunchedEffect(isInspectMode) が単一管理
+                    // 安全ガード: 翻訳ONの時は自動で原文復帰し、リロード完了後に自動でインスペクター起動（二度手間解消）
+                    if (uiState.isWebPageTranslated) {
+                        pendingPostReloadAction = PendingPostReloadAction.INSPECT_MODE
+                        viewModel.setWebPageTranslated(false)
+                        webViewRef?.evaluateJavascript(WebTranslateHelper.buildRestoreScript(), null)
+                        Toast.makeText(context, "原文に戻してインスペクターを起動します...", Toast.LENGTH_SHORT).show()
+                        return@HeaderToolbar
+                    }
                     viewModel.setInspectMode(!uiState.isInspectMode)
                 },
                 onInspectToolClick = {
                     webViewRef?.let { callbacks.onLaunchAnalysisTool(it) }
                 },
                 onTestRunClick = {
-                    // トグル動作: 結果パネル表示中は閉じる、非表示ならテスト実行して開く
                     if (uiState.overlay is Overlay.TestResult) {
                         viewModel.setTestResult(null)
                     } else {
+                        // 安全ガード: 翻訳ONの時は自動で原文復帰し、リロード完了後に自動でテスト解析を実行（二度手間解消）
+                        if (uiState.isWebPageTranslated) {
+                            pendingPostReloadAction = PendingPostReloadAction.TEST_RUN
+                            viewModel.setWebPageTranslated(false)
+                            webViewRef?.evaluateJavascript(WebTranslateHelper.buildRestoreScript(), null)
+                            Toast.makeText(context, "原文に戻してテスト解析を実行します...", Toast.LENGTH_SHORT).show()
+                            return@HeaderToolbar
+                        }
                         webViewRef?.let { callbacks.onTestRun(it) }
                     }
                 },
                 onToggleDesktopModeClick = {
-                    val nextDesktop = !uiState.isDesktopMode
-                    viewModel.setDesktopMode(nextDesktop)
+                    viewModel.setDesktopMode(!uiState.isDesktopMode)
                 },
                 onToggleDarkModeClick = {
                     viewModel.toggleWebViewDarkMode()
                 },
+                onToggleWebTranslateClick = {
+                    val isCurrentlyTranslated = uiState.isWebPageTranslated
+                    val nextState = !isCurrentlyTranslated
+                    viewModel.setWebPageTranslated(nextState)
+                    webViewRef?.let { view ->
+                        val jsCode = if (nextState) {
+                            WebTranslateHelper.buildTranslateScript()
+                        } else {
+                            WebTranslateHelper.buildRestoreScript()
+                        }
+                        view.evaluateJavascript(jsCode, null)
+                    }
+                },
                 onStartScrapingClick = {
                     val url = uiState.currentUrl
                     if (url.isNotEmpty()) {
+                        // 安全ガード: 翻訳状態を同期してOFFにし、画面WebViewを確実に原文にリロード復元
+                        if (uiState.isWebPageTranslated) {
+                            viewModel.setWebPageTranslated(false)
+                            webViewRef?.evaluateJavascript(WebTranslateHelper.buildRestoreScript(), null)
+                        }
                         val currentTask = activeTasks.firstOrNull { it.currentUrl == url }
                         if (currentTask != null) {
                             currentTask.stop()
@@ -183,12 +230,7 @@ fun MainScreen(
                             callbacks.onStartScraping(url)
                         }
                     }
-                },
-                onToggleImagesClick = {
-                    val nextBlock = !uiState.blockImages
-                    viewModel.setBlockImages(nextBlock)
-                },
-                isDesktopMode = uiState.isDesktopMode
+                }
             )
         },
         containerColor = Color.Black
@@ -221,8 +263,24 @@ fun MainScreen(
                                             viewModel.setCurrentUrl(it)
                                         }
                                     }
-                                    if (uiState.isInspectMode) {
-                                        callbacks.onInjectInspector(view)
+                                    // 原文復帰後のスクロール位置自動復元
+                                    view?.evaluateJavascript(WebTranslateHelper.buildScrollRestoreScript(), null)
+
+                                    // 保留アクション（テスト実行 / インスペクター）の自動実行（二度手間解消）
+                                    when (pendingPostReloadAction) {
+                                        PendingPostReloadAction.TEST_RUN -> {
+                                            pendingPostReloadAction = PendingPostReloadAction.NONE
+                                            view?.let { callbacks.onTestRun(it) }
+                                        }
+                                        PendingPostReloadAction.INSPECT_MODE -> {
+                                            pendingPostReloadAction = PendingPostReloadAction.NONE
+                                            viewModel.setInspectMode(true)
+                                        }
+                                        PendingPostReloadAction.NONE -> {
+                                            if (uiState.isInspectMode) {
+                                                callbacks.onInjectInspector(view)
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -230,17 +288,17 @@ fun MainScreen(
                         }
                     },
                     update = { view ->
-                        // 画像ブロックの変更時のみ設定を更新
+                        // UIスレッドを同期ブロックする view.visibility 切り替えを廃止し、
+                        // タッチ入力と graphicsLayer アルファのみで安全・瞬時に制御
+                        view.isEnabled = uiState.overlay == Overlay.None || uiState.overlay is Overlay.InspectMode
                         if (view.settings.blockNetworkImage != uiState.blockImages) {
                             view.settings.blockNetworkImage = uiState.blockImages
                         }
-                        // デスクトップモードの変更時のみUA更新＆リロード
                         val targetUA = WebViewHelper.getUserAgent(view.context, isDesktop = uiState.isDesktopMode)
                         if (view.settings.userAgentString != targetUA) {
                             view.settings.userAgentString = targetUA
                             view.reload()
                         }
-                        // ダークモード状態の更新
                         val lastDarkMode = view.tag as? Boolean
                         if (lastDarkMode != uiState.isWebViewDarkMode) {
                             view.tag = uiState.isWebViewDarkMode
@@ -250,43 +308,33 @@ fun MainScreen(
                     },
                     modifier = Modifier
                         .weight(1f)
-                    .graphicsLayer {
-                        clip = true
-                        // パネル・テスト結果表示中はGPU描画コマンドの発行を完全スキップ（オクルージョン・カリング）
-                        alpha = if (uiState.overlay == Overlay.None) 1f else 0f
-                    }
+                        .graphicsLayer {
+                            clip = true
+                            alpha = if (uiState.overlay == Overlay.None) 1f else 0f
+                        }
                 )
 
-                val isAnyTranslating = uiState.isAnyTranslating
-                val translationStatus = when {
-                    uiState.googleTranslationState.isTranslating && uiState.deeplTranslationState.isTranslating ->
-                        "Google: ${uiState.googleTranslationState.progress.first}/${uiState.googleTranslationState.progress.second}件 | DeepL: ${uiState.deeplTranslationState.progress.first}/${uiState.deeplTranslationState.progress.second}件"
-                    uiState.googleTranslationState.isTranslating ->
-                        "Google翻訳: ${uiState.googleTranslationState.statusText}"
-                    uiState.deeplTranslationState.isTranslating ->
-                        "DeepL翻訳: ${uiState.deeplTranslationState.statusText}"
-                    else -> currentStatusText
-                }
-
-                Text(
-                    text = if (isAnyTranslating) translationStatus else currentStatusText,
-                    modifier = Modifier.fillMaxWidth().background(AppColors.backgroundMedium).padding(4.dp),
-                    color = if (isAnyTranslating) AppColors.accentTealLight else AppColors.textMuted,
-                    fontSize = 11.sp,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                // 独立したステータスバー（翻訳高頻度更新時のリコンポジションを局所化）
+                AppStatusBar(
+                    isAnyTranslating = uiState.isAnyTranslating,
+                    googleState = uiState.googleTranslationState,
+                    deeplState = uiState.deeplTranslationState,
+                    currentStatusText = currentStatusText
                 )
             }
 
-            // 前面レイヤー: パネル群（ゼロ遅延・GPUアルファ合成なしの完全不透明スタック描画）
+            // 前面レイヤー: パネル群
             when (val ov = uiState.overlay) {
                 is Overlay.Panel -> when (ov.type) {
                     PanelType.SETTINGS -> {
                         SettingsPanel(
-                            uiState = uiState,
+                            currentConfig = uiState.currentConfig,
+                            currentPresetName = uiState.currentPresetName,
+                            isWebViewDarkMode = uiState.isWebViewDarkMode,
                             presets = presets,
                             onCloseClick = { viewModel.closePanels() },
                             onPresetSelected = { name, config -> viewModel.applyPresetState(name, config) },
-                            onSavePresetClick = { callbacks.onShowSavePreset() },
+                            onSavePresetClick = { viewModel.showSavePresetDialog(uiState.currentPresetName, uiState.currentUrl) },
                             onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
                             onConfigChange = { newConfig -> viewModel.updateCurrentConfig { newConfig } },
                             onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
@@ -318,7 +366,7 @@ fun MainScreen(
                                     callbacks.onResumeScraping(item.nextUrl, folder)
                                     viewModel.closePanels()
                                 } else {
-                                    android.widget.Toast.makeText(context, "次のページが見つかりません（最新話か、古い履歴です）", android.widget.Toast.LENGTH_LONG).show()
+                                    Toast.makeText(context, "次のページが見つかりません（最新話か、古い履歴です）", Toast.LENGTH_LONG).show()
                                 }
                             },
                             onDeleteHistoryClick = { folder -> viewModel.deleteHistory(folder) }
@@ -362,7 +410,6 @@ fun MainScreen(
                     }
                 }
                 is Overlay.TestResult -> {
-                    // テスト結果パネル（除外候補カードはその子UI）
                     TestResultPanel(
                         result = ov.result,
                         onDismiss = { viewModel.setTestResult(null) },
@@ -380,10 +427,86 @@ fun MainScreen(
                         )
                     }
                 }
-                else -> {
-                    // オーバーレイ非表示
+                else -> {}
+            }
+
+            // Compose 駆動ダイアログ群
+            when (val dialog = uiState.activeDialog) {
+                is ActiveDialog.AddFavorite -> {
+                    AddFavoriteDialog(
+                        initialTitle = dialog.title,
+                        onConfirm = { name ->
+                            viewModel.saveFavorite(name, dialog.url)
+                            viewModel.dismissDialog()
+                            Toast.makeText(context, "お気に入りに追加しました", Toast.LENGTH_SHORT).show()
+                        },
+                        onDismiss = { viewModel.dismissDialog() }
+                    )
                 }
+                is ActiveDialog.SavePreset -> {
+                    SavePresetDialog(
+                        defaultPresetName = dialog.defaultName,
+                        currentUrl = dialog.currentUrl,
+                        existingPresets = presets,
+                        onConfirm = { name ->
+                            viewModel.savePreset(name, uiState.currentConfig)
+                            viewModel.dismissDialog()
+                            Toast.makeText(context, "プリセット「$name」を保存しました", Toast.LENGTH_SHORT).show()
+                        },
+                        onDismiss = { viewModel.dismissDialog() }
+                    )
+                }
+                is ActiveDialog.InspectElement -> {
+                    InspectElementDialog(
+                        initialSelector = dialog.selector,
+                        onApply = { field, sel ->
+                            viewModel.applySelectorToConfig(field, sel)
+                            viewModel.dismissDialog()
+                            Toast.makeText(context, "${field.displayName} にセレクタを反映しました", Toast.LENGTH_SHORT).show()
+                        },
+                        onCopy = { sel ->
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("Selector", sel))
+                            viewModel.dismissDialog()
+                            Toast.makeText(context, "セレクタをコピーしました", Toast.LENGTH_SHORT).show()
+                        },
+                        onDismiss = { viewModel.dismissDialog() }
+                    )
+                }
+                ActiveDialog.None -> {}
             }
         }
     }
+}
+
+/**
+ * 下部ステータスバー（独立コンポーネント化によりリコンポジションを局所化）
+ */
+@Composable
+private fun AppStatusBar(
+    isAnyTranslating: Boolean,
+    googleState: EngineTranslationState,
+    deeplState: EngineTranslationState,
+    currentStatusText: String
+) {
+    val translationStatus = when {
+        googleState.isTranslating && deeplState.isTranslating ->
+            "Google: ${googleState.progress.first}/${googleState.progress.second}件 | DeepL: ${deeplState.progress.first}/${deeplState.progress.second}件"
+        googleState.isTranslating ->
+            "Google翻訳: ${googleState.statusText}"
+        deeplState.isTranslating ->
+            "DeepL翻訳: ${deeplState.statusText}"
+        else -> currentStatusText
+    }
+
+    Text(
+        text = if (isAnyTranslating) translationStatus else currentStatusText,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(AppColors.backgroundMedium)
+            .padding(4.dp),
+        color = if (isAnyTranslating) AppColors.accentTealLight else AppColors.textMuted,
+        fontSize = 11.sp,
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+    )
 }

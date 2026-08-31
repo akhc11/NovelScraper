@@ -1,4 +1,4 @@
-package com.example.novelscraper
+﻿package com.example.novelscraper
 
 object TextChunker {
 
@@ -64,6 +64,7 @@ object TextChunker {
 
     /**
      * 上限を超える単一行を優先度順の区切り（空白・文末・読点・文字境界）で分割する。
+     * サロゲートペア（絵文字・異体字）の真ん中での切断による文字化けを防止する。
      */
     private fun splitLongLine(line: String, maxChunkSize: Int): List<String> {
         val result = mutableListOf<String>()
@@ -73,7 +74,15 @@ object TextChunker {
             val candidate = remaining.substring(0, maxChunkSize)
             val splitIndex = findBestSplitIndex(candidate)
 
-            val actualSplitIndex = if (splitIndex > 0) splitIndex else maxChunkSize
+            var actualSplitIndex = if (splitIndex > 0) splitIndex else maxChunkSize
+            // サロゲートペアの真ん中での切断を防止（上位サロゲートの手前で切る）
+            if (actualSplitIndex > 0 && actualSplitIndex < remaining.length && remaining[actualSplitIndex - 1].isHighSurrogate()) {
+                actualSplitIndex--
+            }
+            if (actualSplitIndex <= 0) {
+                actualSplitIndex = if (remaining.length >= 2 && remaining[0].isHighSurrogate()) 2 else 1
+            }
+
             result.add(remaining.substring(0, actualSplitIndex))
             remaining = remaining.substring(actualSplitIndex)
         }

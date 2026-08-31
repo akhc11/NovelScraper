@@ -1,4 +1,4 @@
-package com.example.novelscraper.ui.components
+﻿package com.example.novelscraper.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -51,11 +51,12 @@ fun HeaderToolbar(
     onInspectToolClick: () -> Unit,
     onToggleDesktopModeClick: () -> Unit = {},
     onToggleDarkModeClick: () -> Unit = {},
+    onToggleWebTranslateClick: () -> Unit = {},
     onStartScrapingClick: () -> Unit = {},
-    onTestRunClick: () -> Unit = {},
-    onToggleImagesClick: () -> Unit = {},
-    isDesktopMode: Boolean = false
+    onTestRunClick: () -> Unit = {}
 ) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -83,7 +84,7 @@ fun HeaderToolbar(
                 modifier = Modifier.weight(1f)
             )
 
-            // 星マークボタン: 通常タップでお気に入り追加、250ms長押しでお気に入り一覧を直接開閉
+            // 星マークボタン: 通常タップでお気に入り追加、250ms長押しでお気に入り一覧を直接開閉（ルール2厳守）
             Box(
                 modifier = Modifier
                     .size(34.dp)
@@ -117,26 +118,92 @@ fun HeaderToolbar(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Row 2: ツールボタン行（ハートボタンはお気に入り長押し統合により廃止・サイズは押しやすい35dpに統一）
+        // Row 2: ツールボタン行（主要ボタン ＋ [︙] メニュー化により画面幅320dpで完全収容）
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            // パネル系 (左): 履歴 & 翻訳キュー
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 ToolButton(Icons.AutoMirrored.Filled.List, { onPanelToggle(PanelType.HISTORY) }, uiState.activePanelType == PanelType.HISTORY)
                 ToolButton(null, { onPanelToggle(PanelType.TRANSLATION) }, uiState.activePanelType == PanelType.TRANSLATION, text = "翻")
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            // 主要操作系 (右): 設定, テスト, 虫眼鏡, 再生, 🌐, ︙
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 ToolButton(Icons.Filled.Settings, { onPanelToggle(PanelType.SETTINGS) }, uiState.activePanelType == PanelType.SETTINGS)
                 ToolButton(Icons.Filled.CheckCircle, onTestRunClick, false, AppColors.surfaceLight)
                 ToolButton(Icons.Filled.Search, onInspectModeToggle, uiState.isInspectMode, if (uiState.isInspectMode) AppColors.inspectActive else AppColors.surfaceMedium)
-                ToolButton(Icons.Filled.Build, onInspectToolClick, false, AppColors.accentTeal)
                 ToolButton(Icons.Filled.PlayArrow, onStartScrapingClick, false, AppColors.accentOrange)
-                ToolButton(null, onToggleImagesClick, uiState.blockImages, if (uiState.blockImages) AppColors.surfaceHighlight else AppColors.accentTeal, text = if (uiState.blockImages) "画✖" else "画〇")
-                ToolButton(null, onToggleDesktopModeClick, isDesktopMode, AppColors.surfaceLight, text = "PC")
-                ToolButton(null, onToggleDarkModeClick, uiState.isWebViewDarkMode, AppColors.accentTeal, text = if (uiState.isWebViewDarkMode) "🌙" else "☀️")
+                ToolButton(null, onToggleWebTranslateClick, uiState.isWebPageTranslated, AppColors.accentTeal, text = "🌐")
+
+                // その他メニュー [︙]
+                Box {
+                    ToolButton(Icons.Filled.MoreVert, { menuExpanded = true }, menuExpanded)
+
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false },
+                        modifier = Modifier.background(AppColors.surfaceDark)
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (uiState.isDesktopMode) "PC版サイト表示: ON" else "PC版サイト表示: OFF (モバイル)",
+                                    color = AppColors.textPrimary,
+                                    fontSize = 13.sp
+                                )
+                            },
+                            onClick = {
+                                onToggleDesktopModeClick()
+                                menuExpanded = false
+                            },
+                            leadingIcon = {
+                                Text("💻", fontSize = 14.sp)
+                            }
+                        )
+
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (uiState.isWebViewDarkMode) "ダークモード: ON" else "ダークモード: OFF",
+                                    color = AppColors.textPrimary,
+                                    fontSize = 13.sp
+                                )
+                            },
+                            onClick = {
+                                onToggleDarkModeClick()
+                                menuExpanded = false
+                            },
+                            leadingIcon = {
+                                Text(if (uiState.isWebViewDarkMode) "🌙" else "☀️", fontSize = 14.sp)
+                            }
+                        )
+
+                        HorizontalDivider(color = Color.DarkGray)
+
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "開発者ツール (Eruda)",
+                                    color = AppColors.accentTealLight,
+                                    fontSize = 13.sp
+                                )
+                            },
+                            onClick = {
+                                onInspectToolClick()
+                                menuExpanded = false
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Build, contentDescription = null, tint = AppColors.accentTealLight, modifier = Modifier.size(18.dp))
+                            }
+                        )
+                    }
+                }
             }
         }
     }

@@ -1,4 +1,4 @@
-package com.example.novelscraper
+﻿package com.example.novelscraper
 
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -23,6 +23,37 @@ import com.example.novelscraper.ui.MainScreenCallbacks
 import com.example.novelscraper.ui.theme.NovelScraperTheme
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+
+/**
+ * WebView との通信用ブリッジ。
+ * Activity への暗黙参照によるメモリリークを防止するため、独立クラスとして定義。
+ */
+class NovelScraperBridge(
+    private val onInspect: (String) -> Unit,
+    private val onApply: (String, String) -> Unit,
+    private val onRemove: (String) -> Unit,
+    private val onTranslateError: (String) -> Unit = {}
+) {
+    @JavascriptInterface
+    fun onInspectResult(selector: String) {
+        onInspect(selector)
+    }
+
+    @JavascriptInterface
+    fun onApplyCandidate(target: String, selector: String) {
+        onApply(target, selector)
+    }
+
+    @JavascriptInterface
+    fun onRemoveExclude(selector: String) {
+        onRemove(selector)
+    }
+
+    @JavascriptInterface
+    fun onTranslateError(reason: String) {
+        onTranslateError.invoke(reason)
+    }
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -50,17 +81,6 @@ class MainActivity : ComponentActivity() {
                         onRemoveInspector = { view -> removeInspector(view) },
                         onNavigate = { url, view -> performNavigation(url, view) },
                         onRequestExclude = { selector -> handleExcludeRequest(selector) },
-                        onShowAddFavorite = { title, url ->
-                            DialogHelper.showAddFavoriteDialog(this, title) { name ->
-                                viewModel.saveFavorite(name, url)
-                            }
-                        },
-                        onShowSavePreset = {
-                            val state = viewModel.uiState.value
-                            DialogHelper.showSavePresetDialog(
-                                this, state.currentPresetName, state.currentUrl, viewModel.presets.value
-                            ) { name -> viewModel.savePreset(name, state.currentConfig) }
-                        },
                         onTestRun = { view -> performTestRun(view) }
                     )
                 )
@@ -166,53 +186,57 @@ class MainActivity : ComponentActivity() {
         view.evaluateJavascript(ScrapingScriptBuilder.buildErudaScript(), null)
     }
 
-    inner class NovelScraperBridge {
-        @JavascriptInterface
-        fun onInspectResult(selector: String) {
-            mainHandler.post {
-                DialogHelper.showInspectElementDialog(
-                    this@MainActivity,
-                    selector = selector,
-                    onApply = { field, sel ->
-                        viewModel.applySelectorToConfig(field, sel)
-                    }
-                )
-            }
-        }
-
-        @JavascriptInterface
-        fun onApplyCandidate(target: String, selector: String) {
-            mainHandler.post {
-                try {
-                    val field = SelectorField.valueOf(target.uppercase())
-                    viewModel.applySelectorToConfig(field, selector)
-                    Toast.makeText(this@MainActivity, "${field.displayName}に反映しました", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(this@MainActivity, "適用失敗: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-        @JavascriptInterface
-        fun onRemoveExclude(selector: String) {
-            mainHandler.post {
-                viewModel.removeExcludeSelector(selector)
-            }
-        }
-    }
-
     @android.annotation.SuppressLint("JavascriptInterface")
     private fun setupWebView(view: WebView) {
         mainWebView = view
-        view.addJavascriptInterface(NovelScraperBridge(), "AndroidBridge")
+        val bridge = NovelScraperBridge(
+            onInspect = { selector ->
+                mainHandler.post {
+                    if (!isFinishing && !isDestroyed) {
+                        viewModel.showInspectElementDialog(selector)
+                    }
+                }
+            },
+            onApply = { target, selector ->
+                mainHandler.post {
+                    if (!isFinishing && !isDestroyed) {
+                        try {
+                            val field = SelectorField.valueOf(target.uppercase())
+                            viewModel.applySelectorToConfig(field, selector)
+                            Toast.makeText(this@MainActivity, "${field.displayName}に反映しました", Toast.LENGTH_SHORT).show()
+                        } catch (e: Exception) {
+                            Toast.makeText(this@MainActivity, "適用失敗: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            },
+            onRemove = { selector ->
+                mainHandler.post {
+                    if (!isFinishing && !isDestroyed) {
+                        viewModel.removeExcludeSelector(selector)
+                    }
+                }
+            },
+            onTranslateError = { reason ->
+                mainHandler.post {
+                    if (!isFinishing && !isDestroyed) {
+                        viewModel.setWebPageTranslated(false)
+                        if (reason == "CSP_BLOCKED") {
+                            Toast.makeText(this@MainActivity, "このサイトではセキュリティポリシー(CSP)によりページ翻訳がブロックされました", Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(this@MainActivity, "ページ翻訳エラー: $reason", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
+        )
+        view.addJavascriptInterface(bridge, "AndroidBridge")
     }
 
-    @android.annotation.SuppressLint("JavascriptInterface")
     private fun injectInspector(view: WebView?) {
         view?.let { v ->
             mainWebView = v
             val config = viewModel.uiState.value.currentConfig
-            v.addJavascriptInterface(NovelScraperBridge(), "AndroidBridge")
             v.evaluateJavascript(ScrapingScriptBuilder.buildInspectorScript(config), null)
         }
     }

@@ -168,7 +168,6 @@ class DeeplTranslationTask(
                     val readResult = fileStore.readTextFile(fileInfo.uri)
                     if (readResult.isFailure) {
                         Log.e(TAG, "Failed to read file: ${fileInfo.name}", readResult.exceptionOrNull())
-                        listener.onFileTranslated(fileInfo.name, false)
                         continue
                     }
 
@@ -176,7 +175,6 @@ class DeeplTranslationTask(
                     if (originalContent.isEmpty()) {
                         fileStore.saveTranslatedFile(folderUri, fileInfo.name, "")
                         completedCount++
-                        listener.onFileTranslated(fileInfo.name, true)
                         listener.onProgress(
                             completedCount, totalFiles, fileInfo.name, 1, 1,
                             "空ファイルを保存完了 ($currentFileNum/$totalFiles)"
@@ -240,18 +238,22 @@ class DeeplTranslationTask(
                         val saveResult = fileStore.saveTranslatedFile(folderUri, fileInfo.name, combinedResult)
                         if (saveResult.isSuccess) {
                             completedCount++
-                            listener.onFileTranslated(fileInfo.name, true)
                             listener.onProgress(
                                 completedCount, totalFiles, fileInfo.name, totalChunks, totalChunks,
                                 "保存完了 ($currentFileNum/$totalFiles)"
                             )
                         } else {
-                            listener.onFileTranslated(fileInfo.name, false)
                             Log.e(TAG, "Failed to save translated file: ${fileInfo.name}", saveResult.exceptionOrNull())
                         }
                     } else {
-                        listener.onFileTranslated(fileInfo.name, false)
                         Log.e(TAG, "File ${fileInfo.name} failed or cancelled. translatedChunks=${translatedChunks.size}/$totalChunks")
+                    }
+
+                    // 通信ゼロで Chromium の一時 RAM キャッシュをパージ（長時間稼働時のメモリ肥大化防止）
+                    mainHandler.post {
+                        if (isRunning) {
+                            try { webView.clearCache(false) } catch (_: Exception) {}
+                        }
                     }
 
                     // ファイル間待機（範囲ランダム指定）
@@ -287,15 +289,6 @@ class DeeplTranslationTask(
 
     /**
      * 単一チャンクの翻訳処理。手動操作フローを模倣。
-     *
-     * 1. クリアボタンクリック ＋ 入力エリアクリア
-     * 2. 結果エリアが空になるまで待機
-     * 3. 人間的ディレイ（400〜700ms）
-     * 4. 入力エリアへのフォーカス ＆ 選択
-     * 5. 人間的ディレイ（250〜500ms、貼り付けキー入力までのタイムラグ）
-     * 6. ClipboardEvent paste → InputEvent insertFromPaste → change でユーザー貼り付けを完全再現
-     * 7. 翻訳開始待機（2200〜2800ms）
-     * 8. 翻訳完了（スピナー消滅 & 翻訳本文の安定）を待機
      */
     private suspend fun translateChunk(view: WebView, text: String, lastResultText: String): String? {
         if (!isRunning) return null
@@ -331,11 +324,11 @@ class DeeplTranslationTask(
         // 7. 入力直後、DeepL翻訳が開始するまで待機
         delay(Random.nextLong(2200, 2800))
 
-        // 8. 翻訳結果の安定待機
+        // 8. 翻訳結果の安定待機（タイムアウトを28秒に最適化）
         var currentCandidate = ""
         var stableCount = 0
-        val maxWaitMs = 50000L
-        val intervalMs = 800L
+        val maxWaitMs = 28000L
+        val intervalMs = 700L
         val startTime = System.currentTimeMillis()
 
         while (isRunning && (System.currentTimeMillis() - startTime < maxWaitMs)) {
@@ -356,7 +349,7 @@ class DeeplTranslationTask(
                 }
                 if (domResult.text == currentCandidate) {
                     stableCount++
-                    // 3回連続（約2.4秒間）安定したら翻訳完了と確定
+                    // 3回連続（約2.1秒間）安定したら翻訳完了と確定
                     if (stableCount >= 3) return domResult.text
                 } else {
                     currentCandidate = domResult.text
@@ -412,6 +405,8 @@ class DeeplTranslationTask(
         mainHandler.post {
             try {
                 webView.stopLoading()
+                webView.webViewClient = object : WebViewClient() {}
+                webView.webChromeClient = null
                 webView.destroy()
             } catch (e: Exception) {
                 Log.w(TAG, "Error destroying webView", e)

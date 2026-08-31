@@ -33,7 +33,6 @@ class TranslationTask(
             totalChunks: Int,
             statusText: String
         )
-        fun onFileTranslated(fileName: String, success: Boolean)
         fun onTaskFinished(success: Boolean, message: String)
     }
 
@@ -71,7 +70,7 @@ class TranslationTask(
         private const val JS_CLEAR = """(function(){try{var b=document.querySelector('button[aria-label*="Clear"],button[aria-label*="消去"],button[aria-label*="クリア"],button[jsname="RPbQ0e"]');if(b)b.click();var ta=document.querySelector('textarea[aria-label]')||document.querySelector('textarea');if(ta){ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));ta.dispatchEvent(new Event('change',{bubbles:true}))}return"OK"}catch(e){return"ERROR: "+e.message}})()"""
 
         /** 結果エリアが空か確認 */
-        private const val JS_CHECK_EMPTY = """(function(){var s=document.querySelectorAll('span[jsname="W297wb"],span[jsname="jqKxS"]');if(!s||s.length===0)return"EMPTY";var t="";for(var i=0;i<s.length;i++)t+=(s[i].innerText||s[i].textContent||'');return t.trim().length===0?"EMPTY":"NOT_EMPTY"})()"""
+        private const val JS_CHECK_EMPTY = """(function(){var s=document.querySelectorAll('span[jsname="W297wb"],span[jsname="jqKxS"],div[data-result-index] span,span[data-language-to-translate-into]');if(!s||s.length===0)return"EMPTY";var t="";for(var i=0;i<s.length;i++)t+=(s[i].innerText||s[i].textContent||'');return t.trim().length===0?"EMPTY":"NOT_EMPTY"})()"""
 
         /** 1. 入力枠のフォーカス & 全選択（手動クリック操作を模倣） */
         private const val JS_FOCUS_AND_SELECT = """(function(){try{var ta=document.querySelector('textarea[aria-label]')||document.querySelector('textarea');if(!ta)return"NO_TEXTAREA";ta.focus();ta.select();return"OK"}catch(e){return"ERROR: "+e.message}})()"""
@@ -79,12 +78,12 @@ class TranslationTask(
         /**
          * 2. テキスト貼り付け & 確定スクリプトテンプレート（Ctrl+V 手動貼り付けの完全再現）。
          * %s を JSONエンコード済みテキストで置換して使用する。
-         * ClipboardEvent paste → InputEvent insertFromPaste → change の順で発火。
+         * ClipboardEvent paste → InputEvent insertFromPaste → change の順で発火（ルール7死守）。
          */
         private const val JS_PASTE_AND_INPUT = """(function(){try{var ta=document.querySelector('textarea[aria-label]')||document.querySelector('textarea');if(!ta)return"NO_TEXTAREA";var dt=new DataTransfer();dt.setData('text/plain',%s);var pe=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt});ta.dispatchEvent(pe);if(!ta.value||ta.value.trim().length===0)ta.value=%s;ta.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertFromPaste',data:%s}));ta.dispatchEvent(new Event('change',{bubbles:true}));return"OK"}catch(e){return"ERROR: "+e.message}})()"""
 
-        /** 翻訳結果取得（プログレスバーチェック + 純粋な翻訳本文spanのみ抽出） */
-        private const val JS_GET_RESULT = """(function(){try{var pb=document.querySelectorAll('div[role="progressbar"],div[aria-valuemin]');for(var i=0;i<pb.length;i++){var s=window.getComputedStyle(pb[i]);if(s.display!=='none'&&s.visibility!=='hidden'&&pb[i].offsetParent!==null)return JSON.stringify({status:"TRANSLATING",text:""})}var sp=document.querySelectorAll('span[jsname="W297wb"]');if(!sp||sp.length===0)sp=document.querySelectorAll('span[jsname="jqKxS"]');if(sp&&sp.length>0){var tp=[];for(var i=0;i<sp.length;i++){var t=sp[i].innerText||sp[i].textContent||'';if(t&&t.indexOf("翻訳結果を利用できます")===-1&&t.indexOf("Translation result")===-1&&t.indexOf("翻訳中")===-1)tp.push(t)}var c=tp.join('');if(c.trim().length>0)return JSON.stringify({status:"OK",text:c})}return JSON.stringify({status:"WAITING",text:""})}catch(e){return JSON.stringify({status:"ERROR",message:e.message})}})()"""
+        /** 翻訳結果取得（プログレスバーチェック + 難読化変更に耐えうる多層フォールバックセレクタ） */
+        private const val JS_GET_RESULT = """(function(){try{var pb=document.querySelectorAll('div[role="progressbar"],div[aria-valuemin]');for(var i=0;i<pb.length;i++){var s=window.getComputedStyle(pb[i]);if(s.display!=='none'&&s.visibility!=='hidden'&&pb[i].offsetParent!==null)return JSON.stringify({status:"TRANSLATING",text:""})}var sp=document.querySelectorAll('span[jsname="W297wb"],span[jsname="jqKxS"]');if(!sp||sp.length===0){sp=document.querySelectorAll('div[data-result-index] span,span[data-language-to-translate-into],div[role="region"] span,div[aria-live="polite"] span')}if(sp&&sp.length>0){var tp=[];for(var i=0;i<sp.length;i++){var t=sp[i].innerText||sp[i].textContent||'';if(t&&t.indexOf("翻訳結果を利用できます")===-1&&t.indexOf("Translation result")===-1&&t.indexOf("翻訳中")===-1)tp.push(t)}var c=tp.join('');if(c.trim().length>0)return JSON.stringify({status:"OK",text:c})}return JSON.stringify({status:"WAITING",text:""})}catch(e){return JSON.stringify({status:"ERROR",message:e.message})}})()"""
 
         /**
          * 範囲指定（"30-80" や "1-3"）または単一指定からランダムな待機時間（ミリ秒）を計算する。
@@ -179,7 +178,6 @@ class TranslationTask(
                     val readResult = fileStore.readTextFile(fileInfo.uri)
                     if (readResult.isFailure) {
                         Log.e(TAG, "Failed to read file: ${fileInfo.name}", readResult.exceptionOrNull())
-                        listener.onFileTranslated(fileInfo.name, false)
                         continue
                     }
 
@@ -187,7 +185,6 @@ class TranslationTask(
                     if (originalContent.isEmpty()) {
                         fileStore.saveTranslatedFile(folderUri, fileInfo.name, "")
                         completedCount++
-                        listener.onFileTranslated(fileInfo.name, true)
                         listener.onProgress(
                             completedCount, totalFiles, fileInfo.name, 1, 1,
                             "空ファイルを保存完了 ($currentFileNum/$totalFiles)"
@@ -228,7 +225,7 @@ class TranslationTask(
                             break
                         }
 
-                        // 元のチャンクが改行で終わっていた場合、翻訳結果末尾にも改行を保持
+                        // 元のチャンクの改行構造を保持
                         var formattedChunk = chunkResult
                         if (chunkText.endsWith("\n") && !formattedChunk.endsWith("\n")) {
                             formattedChunk += "\n"
@@ -251,18 +248,22 @@ class TranslationTask(
                         val saveResult = fileStore.saveTranslatedFile(folderUri, fileInfo.name, combinedResult)
                         if (saveResult.isSuccess) {
                             completedCount++
-                            listener.onFileTranslated(fileInfo.name, true)
                             listener.onProgress(
                                 completedCount, totalFiles, fileInfo.name, totalChunks, totalChunks,
                                 "保存完了 ($currentFileNum/$totalFiles)"
                             )
                         } else {
-                            listener.onFileTranslated(fileInfo.name, false)
                             Log.e(TAG, "Failed to save translated file: ${fileInfo.name}", saveResult.exceptionOrNull())
                         }
                     } else {
-                        listener.onFileTranslated(fileInfo.name, false)
                         Log.e(TAG, "File ${fileInfo.name} failed or cancelled. translatedChunks=${translatedChunks.size}/$totalChunks")
+                    }
+
+                    // 通信ゼロで Chromium の一時 RAM キャッシュをパージ（長時間稼働時のメモリ肥大化防止）
+                    mainHandler.post {
+                        if (isRunning) {
+                            try { webView.clearCache(false) } catch (_: Exception) {}
+                        }
                     }
 
                     // ファイル間待機（範囲ランダム指定）
@@ -306,7 +307,7 @@ class TranslationTask(
      * 5. 人間的ディレイ（200〜450ms、貼り付けキー入力までのタイムラグ）
      * 6. ClipboardEvent paste → InputEvent insertFromPaste → change でユーザー貼り付けを完全再現
      * 7. 翻訳開始待機（1800〜2400ms）
-     * 8. 翻訳完了（プログレスバー消滅 & 翻訳本文の安定）を待機
+     * 8. 翻訳完了（プログレスバー消滅 & 翻訳本文の安定）を待機（最大25秒に最適化）
      * 9. 前チャンクの結果と同一ならスキップ（重複防止）
      */
     private suspend fun translateChunk(view: WebView, text: String, lastResultText: String): String? {
@@ -343,11 +344,11 @@ class TranslationTask(
         // 7. 入力直後、Google翻訳が翻訳を開始するまで待機
         delay(Random.nextLong(1800, 2400))
 
-        // 8. 翻訳結果の安定待機
+        // 8. 翻訳結果の安定待機（タイムアウトを25秒に最適化）
         var currentCandidate = ""
         var stableCount = 0
-        val maxWaitMs = 45000L
-        val intervalMs = 700L
+        val maxWaitMs = 25000L
+        val intervalMs = 600L
         val startTime = System.currentTimeMillis()
 
         while (isRunning && (System.currentTimeMillis() - startTime < maxWaitMs)) {
@@ -363,7 +364,7 @@ class TranslationTask(
                 }
                 if (domResult.text == currentCandidate) {
                     stableCount++
-                    // 3回連続（約2.1秒間）安定したら翻訳完了と確定
+                    // 3回連続（約1.8秒間）安定したら翻訳完了と確定
                     if (stableCount >= 3) return domResult.text
                 } else {
                     currentCandidate = domResult.text
@@ -421,6 +422,8 @@ class TranslationTask(
         mainHandler.post {
             try {
                 webView.stopLoading()
+                webView.webViewClient = object : WebViewClient() {}
+                webView.webChromeClient = null
                 webView.destroy()
             } catch (e: Exception) {
                 Log.w(TAG, "Error destroying webView", e)

@@ -1,9 +1,7 @@
-package com.example.novelscraper
+﻿package com.example.novelscraper
 
 import android.app.Application
-import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -13,7 +11,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -23,6 +20,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     private val repository = PreferencesRepository(application)
     private val fileRepository = FileRepository(application)
+    private val serviceController = ScraperServiceController(application)
 
     private val taskList = CopyOnWriteArrayList<ScrapingTask>()
     private val _activeTasks = MutableStateFlow<List<ScrapingTask>>(emptyList())
@@ -43,9 +41,12 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
-    // Google翻訳 & DeepL翻訳の独立したバックグラウンドタスク
-    private var googleTranslationTask: TranslationTask? = null
-    private var deeplTranslationTask: DeeplTranslationTask? = null
+    // 翻訳キュー管理（Google/DeepLの実行ロジックは専任クラスへ分離。状態はcollectで合成）
+    private val translationManager = TranslationQueueManager(
+        appContext = application,
+        scope = viewModelScope,
+        repository = repository
+    )
 
     init {
         // 過去のバグで保存されてしまった不正な履歴を起動時にクリーンアップ
@@ -67,27 +68,18 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             }
         }
 
-        // 翻訳待機時間設定の購読
+        // 翻訳キュー状態の合成（Manager の StateFlow → MainUiState）
         viewModelScope.launch {
-            repository.googleChunkDelayFlow.collect { delay ->
-                _uiState.update { it.copy(googleTranslationState = it.googleTranslationState.copy(chunkDelay = delay)) }
+            translationManager.googleState.collect { gs ->
+                _uiState.update { it.copy(googleTranslationState = gs) }
             }
         }
         viewModelScope.launch {
-            repository.googleFileDelayFlow.collect { delay ->
-                _uiState.update { it.copy(googleTranslationState = it.googleTranslationState.copy(fileDelay = delay)) }
+            translationManager.deeplState.collect { ds ->
+                _uiState.update { it.copy(deeplTranslationState = ds) }
             }
         }
-        viewModelScope.launch {
-            repository.deeplChunkDelayFlow.collect { delay ->
-                _uiState.update { it.copy(deeplTranslationState = it.deeplTranslationState.copy(chunkDelay = delay)) }
-            }
-        }
-        viewModelScope.launch {
-            repository.deeplFileDelayFlow.collect { delay ->
-                _uiState.update { it.copy(deeplTranslationState = it.deeplTranslationState.copy(fileDelay = delay)) }
-            }
-        }
+        translationManager.onActivityChanged = { syncServiceStatus() }
 
         viewModelScope.launch {
             repository.setupDoneFlow.collect { done ->
@@ -109,8 +101,26 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     private fun refreshStatus() {
         _activeTasks.value = taskList.toList()
-        _currentStatusText.value = taskList.lastOrNull()?.status ?: if (taskList.isNotEmpty()) "実行中: ${taskList.size}件" else "待機中"
+        _currentStatusText.value = taskList.lastOrNull()?.status ?: if (taskList.isNotEmpty()) "実行中: 件" else "待機中"
         syncServiceStatus()
+    }
+
+    // ---- ダイアログ状態管理（Compose駆動） ----
+
+    fun showAddFavoriteDialog(title: String, url: String) {
+        _uiState.update { it.copy(activeDialog = ActiveDialog.AddFavorite(title, url)) }
+    }
+
+    fun showSavePresetDialog(defaultName: String, currentUrl: String) {
+        _uiState.update { it.copy(activeDialog = ActiveDialog.SavePreset(defaultName, currentUrl)) }
+    }
+
+    fun showInspectElementDialog(selector: String) {
+        _uiState.update { it.copy(activeDialog = ActiveDialog.InspectElement(selector)) }
+    }
+
+    fun dismissDialog() {
+        _uiState.update { it.copy(activeDialog = ActiveDialog.None) }
     }
 
     fun setTestResult(result: ScrapingResult?) {
@@ -195,7 +205,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     fun setInputUrl(url: String) { _uiState.update { it.copy(inputUrl = url) } }
 
     fun setCurrentUrl(url: String) {
-        _uiState.update { it.copy(currentUrl = url, inputUrl = url) }
+        _uiState.update { it.copy(currentUrl = url, inputUrl = url, isWebPageTranslated = false) }
         viewModelScope.launch {
             val presetsMap = _presets.value
             for ((name, config) in presetsMap) {
@@ -215,6 +225,14 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
     fun toggleWebViewDarkMode() {
         setWebViewDarkMode(!_uiState.value.isWebViewDarkMode)
+    }
+
+    fun setWebPageTranslated(translated: Boolean) {
+        _uiState.update { it.copy(isWebPageTranslated = translated) }
+    }
+
+    fun toggleWebPageTranslation() {
+        _uiState.update { it.copy(isWebPageTranslated = !it.isWebPageTranslated) }
     }
 
     fun togglePanel(panel: PanelType) {
@@ -265,440 +283,63 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     /** OSピッカーで選択されたフォルダをキューに追加（重複防止） */
     fun addTranslationFolder(engine: TranslationEngine, uri: Uri, folderName: String) {
-        val newItem = FolderItem(
-            path = uri.path ?: uri.toString(),
-            name = folderName,
-            uri = uri
-        )
-        _uiState.update { state ->
-            val currState = when (engine) {
-                TranslationEngine.GOOGLE -> state.googleTranslationState
-                TranslationEngine.DEEPL -> state.deeplTranslationState
-            }
-            val existing = currState.selectedFolders
-            val updatedList = if (existing.any { it.uri == uri || (it.path.isNotEmpty() && it.path == newItem.path) }) {
-                existing
-            } else {
-                existing + newItem
-            }
-            val firstUri = updatedList.firstOrNull()?.uri
-            val displayName = when (updatedList.size) {
-                0 -> ""
-                1 -> updatedList.first().name
-                else -> "${updatedList.first().name} (他${updatedList.size - 1}件)"
-            }
-
-            when (engine) {
-                TranslationEngine.GOOGLE -> state.copy(
-                    googleTranslationState = state.googleTranslationState.copy(
-                        selectedFolders = updatedList,
-                        folderUri = firstUri,
-                        folderName = displayName
-                    )
-                )
-                TranslationEngine.DEEPL -> state.copy(
-                    deeplTranslationState = state.deeplTranslationState.copy(
-                        selectedFolders = updatedList,
-                        folderUri = firstUri,
-                        folderName = displayName
-                    )
-                )
-            }
-        }
+        translationManager.addFolder(engine, uri, folderName)
     }
 
     /** 選択中フォルダをキューから1件削除 */
     fun removeTranslationFolder(engine: TranslationEngine, index: Int) {
-        _uiState.update { state ->
-            val currState = when (engine) {
-                TranslationEngine.GOOGLE -> state.googleTranslationState
-                TranslationEngine.DEEPL -> state.deeplTranslationState
-            }
-            val updatedList = currState.selectedFolders.toMutableList().apply {
-                if (index in indices) removeAt(index)
-            }
-            val firstUri = updatedList.firstOrNull()?.uri
-            val displayName = when (updatedList.size) {
-                0 -> ""
-                1 -> updatedList.first().name
-                else -> "${updatedList.first().name} (他${updatedList.size - 1}件)"
-            }
-
-            when (engine) {
-                TranslationEngine.GOOGLE -> state.copy(
-                    googleTranslationState = state.googleTranslationState.copy(
-                        selectedFolders = updatedList,
-                        folderUri = firstUri,
-                        folderName = displayName
-                    )
-                )
-                TranslationEngine.DEEPL -> state.copy(
-                    deeplTranslationState = state.deeplTranslationState.copy(
-                        selectedFolders = updatedList,
-                        folderUri = firstUri,
-                        folderName = displayName
-                    )
-                )
-            }
-        }
+        translationManager.removeFolder(engine, index)
     }
 
     /** 選択中フォルダのキューを全解除 */
     fun clearTranslationFolders(engine: TranslationEngine) {
-        _uiState.update { state ->
-            when (engine) {
-                TranslationEngine.GOOGLE -> state.copy(
-                    googleTranslationState = state.googleTranslationState.copy(
-                        selectedFolders = emptyList(),
-                        folderUri = null,
-                        folderName = ""
-                    )
-                )
-                TranslationEngine.DEEPL -> state.copy(
-                    deeplTranslationState = state.deeplTranslationState.copy(
-                        selectedFolders = emptyList(),
-                        folderUri = null,
-                        folderName = ""
-                    )
-                )
-            }
-        }
-    }
-
-    /** 単一フォルダ（SAF経由等）をセット */
-    fun setTranslationFolder(engine: TranslationEngine, uri: Uri, folderName: String) {
-        addTranslationFolder(engine, uri, folderName)
-    }
-
-    fun setTranslationLanguages(engine: TranslationEngine, source: String, target: String) {
-        _uiState.update { state ->
-            when (engine) {
-                TranslationEngine.GOOGLE -> state.copy(
-                    googleTranslationState = state.googleTranslationState.copy(
-                        sourceLang = source,
-                        targetLang = target
-                    )
-                )
-                TranslationEngine.DEEPL -> state.copy(
-                    deeplTranslationState = state.deeplTranslationState.copy(
-                        sourceLang = source,
-                        targetLang = target
-                    )
-                )
-            }
-        }
+        translationManager.clearFolders(engine)
     }
 
     fun updateTranslationDelays(engine: TranslationEngine, chunkDelay: String, fileDelay: String) {
-        viewModelScope.launch {
-            when (engine) {
-                TranslationEngine.GOOGLE -> {
-                    repository.saveGoogleDelays(chunkDelay, fileDelay)
-                    _uiState.update { s ->
-                        s.copy(googleTranslationState = s.googleTranslationState.copy(
-                            chunkDelay = chunkDelay,
-                            fileDelay = fileDelay
-                        ))
-                    }
-                }
-                TranslationEngine.DEEPL -> {
-                    repository.saveDeeplDelays(chunkDelay, fileDelay)
-                    _uiState.update { s ->
-                        s.copy(deeplTranslationState = s.deeplTranslationState.copy(
-                            chunkDelay = chunkDelay,
-                            fileDelay = fileDelay
-                        ))
-                    }
-                }
-            }
-        }
+        translationManager.updateDelays(engine, chunkDelay, fileDelay)
     }
 
     fun startTranslation(engine: TranslationEngine) {
-        val engineState = when (engine) {
-            TranslationEngine.GOOGLE -> _uiState.value.googleTranslationState
-            TranslationEngine.DEEPL -> _uiState.value.deeplTranslationState
-        }
-
-        val folders = engineState.selectedFolders
-        if (folders.isEmpty() && engineState.folderUri == null) {
-            Toast.makeText(getApplication(), "翻訳対象のフォルダを選択してください", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        if (engineState.isTranslating) return
-
-        // 複数フォルダキューの先頭から開始
-        startNextFolderInQueue(engine, 0)
-    }
-
-    /**
-     * 複数フォルダ連続翻訳キューの実行制御。
-     * 現在のフォルダの全話が完了したら自動的に次のフォルダへ進む。
-     */
-    private fun startNextFolderInQueue(engine: TranslationEngine, folderIndex: Int) {
-        val state = _uiState.value
-        val engineState = when (engine) {
-            TranslationEngine.GOOGLE -> state.googleTranslationState
-            TranslationEngine.DEEPL -> state.deeplTranslationState
-        }
-
-        val folders = engineState.selectedFolders.ifEmpty {
-            if (engineState.folderUri != null) {
-                listOf(FolderItem(path = engineState.folderUri.path ?: "", name = engineState.folderName, uri = engineState.folderUri))
-            } else emptyList()
-        }
-
-        if (folders.isEmpty() || folderIndex >= folders.size) {
-            // 全フォルダの連続翻訳が完了
-            _uiState.update { s ->
-                when (engine) {
-                    TranslationEngine.GOOGLE -> s.copy(
-                        googleTranslationState = s.googleTranslationState.copy(
-                            isTranslating = false,
-                            statusText = "全 ${folders.size} フォルダの翻訳が完了しました"
-                        )
-                    )
-                    TranslationEngine.DEEPL -> s.copy(
-                        deeplTranslationState = s.deeplTranslationState.copy(
-                            isTranslating = false,
-                            statusText = "全 ${folders.size} フォルダの翻訳が完了しました"
-                        )
-                    )
-                }
-            }
-            val engineName = if (engine == TranslationEngine.GOOGLE) "Google" else "DeepL"
-            Toast.makeText(getApplication(), "[$engineName 翻訳] 全 ${folders.size} フォルダの翻訳が完了しました", Toast.LENGTH_LONG).show()
-            syncServiceStatus()
-            return
-        }
-
-        val currentItem = folders[folderIndex]
-        val targetUri = currentItem.uri ?: Uri.fromFile(File(currentItem.path))
-        val folderProgressPrefix = if (folders.size > 1) "[フォルダ ${folderIndex + 1}/${folders.size}] " else ""
-
-        _uiState.update { s ->
-            when (engine) {
-                TranslationEngine.GOOGLE -> s.copy(
-                    googleTranslationState = s.googleTranslationState.copy(
-                        currentFolderIndex = folderIndex,
-                        folderUri = targetUri,
-                        folderName = if (folders.size == 1) currentItem.name else "${currentItem.name} (${folderIndex + 1}/${folders.size})",
-                        isTranslating = true,
-                        statusText = "${folderProgressPrefix}${currentItem.name} を開始中...",
-                        progress = Pair(0, 0),
-                        chunkProgress = Pair(0, 0)
-                    )
-                )
-                TranslationEngine.DEEPL -> s.copy(
-                    deeplTranslationState = s.deeplTranslationState.copy(
-                        currentFolderIndex = folderIndex,
-                        folderUri = targetUri,
-                        folderName = if (folders.size == 1) currentItem.name else "${currentItem.name} (${folderIndex + 1}/${folders.size})",
-                        isTranslating = true,
-                        statusText = "${folderProgressPrefix}${currentItem.name} を開始中...",
-                        progress = Pair(0, 0),
-                        chunkProgress = Pair(0, 0)
-                    )
-                )
-            }
-        }
-        syncServiceStatus()
-
-        when (engine) {
-            TranslationEngine.GOOGLE -> {
-                val task = TranslationTask(
-                    context = getApplication(),
-                    folderUri = targetUri,
-                    sourceLang = engineState.sourceLang,
-                    targetLang = engineState.targetLang,
-                    chunkDelay = engineState.chunkDelay,
-                    fileDelay = engineState.fileDelay,
-                    listener = object : TranslationTask.TranslationListener {
-                        override fun onProgress(
-                            completedFiles: Int,
-                            totalFiles: Int,
-                            currentFileName: String,
-                            currentChunk: Int,
-                            totalChunks: Int,
-                            statusText: String
-                        ) {
-                            _uiState.update { s ->
-                                s.copy(
-                                    googleTranslationState = s.googleTranslationState.copy(
-                                        progress = Pair(completedFiles, totalFiles),
-                                        currentFileName = currentFileName,
-                                        chunkProgress = Pair(currentChunk, totalChunks),
-                                        statusText = "${folderProgressPrefix}$statusText"
-                                    )
-                                )
-                            }
-                            syncServiceStatus()
-                        }
-
-                        override fun onFileTranslated(fileName: String, success: Boolean) {}
-
-                        override fun onTaskFinished(success: Boolean, message: String) {
-                            googleTranslationTask = null
-                            if (success && _uiState.value.googleTranslationState.isTranslating && folderIndex + 1 < folders.size) {
-                                // 次のフォルダへ自動遷移
-                                startNextFolderInQueue(engine, folderIndex + 1)
-                            } else {
-                                _uiState.update { s ->
-                                    s.copy(
-                                        googleTranslationState = s.googleTranslationState.copy(
-                                            isTranslating = false,
-                                            statusText = "${folderProgressPrefix}$message"
-                                        )
-                                    )
-                                }
-                                Toast.makeText(getApplication(), "[Google翻訳] $message", Toast.LENGTH_LONG).show()
-                                syncServiceStatus()
-                            }
-                        }
-                    }
-                )
-                googleTranslationTask = task
-                task.start()
-            }
-            TranslationEngine.DEEPL -> {
-                val task = DeeplTranslationTask(
-                    context = getApplication(),
-                    folderUri = targetUri,
-                    sourceLang = engineState.sourceLang,
-                    targetLang = engineState.targetLang,
-                    chunkDelay = engineState.chunkDelay,
-                    fileDelay = engineState.fileDelay,
-                    listener = object : TranslationTask.TranslationListener {
-                        override fun onProgress(
-                            completedFiles: Int,
-                            totalFiles: Int,
-                            currentFileName: String,
-                            currentChunk: Int,
-                            totalChunks: Int,
-                            statusText: String
-                        ) {
-                            _uiState.update { s ->
-                                s.copy(
-                                    deeplTranslationState = s.deeplTranslationState.copy(
-                                        progress = Pair(completedFiles, totalFiles),
-                                        currentFileName = currentFileName,
-                                        chunkProgress = Pair(currentChunk, totalChunks),
-                                        statusText = "${folderProgressPrefix}$statusText"
-                                    )
-                                )
-                            }
-                            syncServiceStatus()
-                        }
-
-                        override fun onFileTranslated(fileName: String, success: Boolean) {}
-
-                        override fun onTaskFinished(success: Boolean, message: String) {
-                            deeplTranslationTask = null
-                            if (success && _uiState.value.deeplTranslationState.isTranslating && folderIndex + 1 < folders.size) {
-                                // 次のフォルダへ自動遷移
-                                startNextFolderInQueue(engine, folderIndex + 1)
-                            } else {
-                                _uiState.update { s ->
-                                    s.copy(
-                                        deeplTranslationState = s.deeplTranslationState.copy(
-                                            isTranslating = false,
-                                            statusText = "${folderProgressPrefix}$message"
-                                        )
-                                    )
-                                }
-                                Toast.makeText(getApplication(), "[DeepL翻訳] $message", Toast.LENGTH_LONG).show()
-                                syncServiceStatus()
-                            }
-                        }
-                    }
-                )
-                deeplTranslationTask = task
-                task.start()
-            }
-        }
+        translationManager.start(engine)
     }
 
     fun stopTranslation(engine: TranslationEngine) {
-        when (engine) {
-            TranslationEngine.GOOGLE -> {
-                googleTranslationTask?.stop()
-                googleTranslationTask = null
-                _uiState.update {
-                    it.copy(
-                        googleTranslationState = it.googleTranslationState.copy(
-                            isTranslating = false,
-                            statusText = "Google翻訳を停止しました"
-                        )
-                    )
-                }
-            }
-            TranslationEngine.DEEPL -> {
-                deeplTranslationTask?.stop()
-                deeplTranslationTask = null
-                _uiState.update {
-                    it.copy(
-                        deeplTranslationState = it.deeplTranslationState.copy(
-                            isTranslating = false,
-                            statusText = "DeepL翻訳を停止しました"
-                        )
-                    )
-                }
-            }
-        }
-        syncServiceStatus()
+        translationManager.stop(engine)
     }
 
     /**
      * スクレイピングタスク・Google翻訳・DeepL翻訳の状態を一元管理し、
-     * タスク変更時のみ的確にService通知を更新する。
+     * ServiceController を通じて的確にService通知を更新する。
      */
     private fun syncServiceStatus() {
         val scrapingCount = taskList.size
-        val googleState = _uiState.value.googleTranslationState
-        val deeplState = _uiState.value.deeplTranslationState
+        // Manager のフローを直接読む（collect経由のuiState合成には伝播遅延があるため）
+        val googleState = translationManager.googleState.value
+        val deeplState = translationManager.deeplState.value
         val isTranslating = googleState.isTranslating || deeplState.isTranslating
 
         if (scrapingCount > 0 || isTranslating) {
             val statusParts = mutableListOf<String>()
             if (scrapingCount > 0) {
-                statusParts.add("スクレイプト: ${scrapingCount}件")
+                statusParts.add("スクレイプト: 件")
             }
             if (googleState.isTranslating) {
-                val gPrefix = if (googleState.selectedFolders.size > 1) "[${googleState.currentFolderIndex + 1}/${googleState.selectedFolders.size}] " else ""
-                statusParts.add("Google: ${gPrefix}${googleState.progress.first}/${googleState.progress.second}件")
+                val gPrefix = if (googleState.selectedFolders.size > 1) "[/] " else ""
+                statusParts.add("Google: /件")
             }
             if (deeplState.isTranslating) {
-                val dPrefix = if (deeplState.selectedFolders.size > 1) "[${deeplState.currentFolderIndex + 1}/${deeplState.selectedFolders.size}] " else ""
-                statusParts.add("DeepL: ${dPrefix}${deeplState.progress.first}/${deeplState.progress.second}件")
+                val dPrefix = if (deeplState.selectedFolders.size > 1) "[/] " else ""
+                statusParts.add("DeepL: /件")
             }
             val msg = if (statusParts.isNotEmpty()) {
                 statusParts.joinToString(" / ")
             } else {
                 "処理中..."
             }
-            updateServiceNotification(msg)
+            serviceController.updateNotification(msg)
         } else {
-            try {
-                val stopIntent = Intent(getApplication(), ScraperService::class.java)
-                getApplication<Application>().stopService(stopIntent)
-            } catch (_: Exception) {}
-        }
-    }
-
-    private fun updateServiceNotification(msg: String) {
-        try {
-            val intent = Intent(getApplication(), ScraperService::class.java).apply {
-                action = ScraperService.ACTION_UPDATE_STATUS
-                putExtra(ScraperService.EXTRA_MSG, msg)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                getApplication<Application>().startForegroundService(intent)
-            } else {
-                getApplication<Application>().startService(intent)
-            }
-        } catch (_: Exception) {
-            // Service更新時の例外防止
+            serviceController.stopService()
         }
     }
 
@@ -737,7 +378,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             val msg = if (result.isSuccess) {
                 "プリセットをエクスポートしました"
             } else {
-                "エクスポートに失敗しました: ${result.exceptionOrNull()?.message}"
+                "エクスポートに失敗しました: "
             }
             Toast.makeText(getApplication(), msg, Toast.LENGTH_LONG).show()
         }
@@ -747,7 +388,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             val result = repository.importPresets(uri)
             val msg = if (result.isSuccess) {
-                "${result.getOrNull()} 件のプリセットをインポートしました"
+                " 件のプリセットをインポートしました"
             } else {
                 val ex = result.exceptionOrNull()
                 val errorDetails = when (ex) {
@@ -755,7 +396,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                     is IllegalArgumentException -> ex.message ?: "無効なデータです"
                     else -> ex?.message ?: "不明なエラー"
                 }
-                "インポートに失敗しました: $errorDetails"
+                "インポートに失敗しました: "
             }
             Toast.makeText(getApplication(), msg, Toast.LENGTH_LONG).show()
         }
@@ -765,9 +406,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         super.onCleared()
         taskList.forEach { it.stop() }
         taskList.clear()
-        googleTranslationTask?.stop()
-        googleTranslationTask = null
-        deeplTranslationTask?.stop()
-        deeplTranslationTask = null
+        translationManager.shutdown()
     }
 }

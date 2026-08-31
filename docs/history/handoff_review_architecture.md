@@ -1,7 +1,24 @@
 # 全体レビュー報告 - 堅牢性・パッチワーク・アーキテクチャ (作成日: 2026-08-25)
 
 > 対象: graphify更新後 (558ノード/746エッジ/51コミュニティ) のコードベース実査に基づく。
-> **進捗: P1-1〜P1-5 + A-2 + A-3 実装完了（2026-08-25、コミット 0eabdcd/2adc008 以降）。** 検証: compileDebugKotlin/testDebugUnitTest SUCCESS。実機確認済み(〜A-2)。
+> **進捗: P1-1〜P1-5 + A-2 + A-3 + A-1(翻訳キュー) + デッドコード一括削除 完了（2026-08-25）。** 全テストパス(34件)。A-3/A-1/削除分は実機確認待ち。
+
+### デッドコード一括削除（2026-08-25 / 再検証済み・約65行）
+| 対象 | 根拠 |
+|---|---|
+| `ScrapingScriptBuilder.buildHighlightScript()` | v4候補方式で代替済み・呼び出しゼロ |
+| `DialogHelper.showInspectResultDialog()` / `showTestResultDialog()` | 未使用。後者はTestResultPanelが完全代替 |
+| VM `setTranslationFolder()` | addTranslationFolderへの未使用エイリアス |
+| VM/Manager `setTranslationLanguages()` チェーン | UI未接続（言語は既定値auto/ja固定で動作） |
+| `onFileTranslated` コールバック契約全体 | タスク側11箇所発火するがリスナー全員空実装＝未消費 |
+| 削除検証 | 全ソースgrep残存ゼロ → compileDebugKotlin/testDebugUnitTest SUCCESS（ChapterNumber6/Example1/Codec9/Preset3/TextChunker5/Url10） |
+
+### 実装詳細（A-1: TranslationQueueManager 分離）
+| 項目 | 内容 |
+|---|---|
+| 新規 | `TranslationQueueManager.kt`: エンジン別 StateFlow 保持・フォルダキュー操作・連続翻訳制御・遅延設定の永続化/購読・完了/失敗Toast を担当 |
+| VM側 | 翻訳系public APIは全委譲でシグネチャ不変（MainScreen等の呼び出し元無変更）。Manager の StateFlow を init で collect し MainUiState へ合成。`onActivityChanged` コールバックで Service同期(syncServiceStatus)に接続。syncServiceStatus は Manager フローを直接読み伝播遅延を回避。onCleared は `shutdown()` に一本化 |
+| 効果 | ScrapingViewModel 773行 → **358行**（翻訳キュー約400行を分離）。旧タスク参照の残骸ゼロをgrep確認 |
 
 ### 実装詳細（A-3: オーバーレイ状態のsealed化）
 | 項目 | 内容 |

@@ -1,4 +1,4 @@
-package com.example.novelscraper
+﻿package com.example.novelscraper
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -60,6 +60,25 @@ class TextChunkerTest {
             assertTrue(chunk.length <= 100)
         }
         assertEquals(text, chunks.joinToString(""))
+    }
+
+    @Test
+    fun testSurrogatePairBoundaryHandling() {
+        // サロゲートペア（2つのCharで1文字）が境界に並ぶ文字列
+        val emojiString = "あいうえお𩸽かきくけこ🦄さしすせそ✨たちつてと𠮷"
+        // 奇数・偶数の様々な上限サイズで分割テスト
+        for (maxSize in 5..15) {
+            val chunks = TextChunker.splitIntoChunks(emojiString, maxSize)
+            for (chunk in chunks) {
+                assertTrue("Chunk exceeds maxSize: ${chunk.length} > $maxSize", chunk.length <= maxSize)
+                // 各チャンクの先頭や末尾に不正な孤立サロゲート文字が存在しないことを検証
+                if (chunk.isNotEmpty()) {
+                    assertTrue("Broken surrogate at start", !chunk.first().isLowSurrogate())
+                    assertTrue("Broken surrogate at end", !chunk.last().isHighSurrogate())
+                }
+            }
+            assertEquals(emojiString, chunks.joinToString(""))
+        }
     }
 
     @Test

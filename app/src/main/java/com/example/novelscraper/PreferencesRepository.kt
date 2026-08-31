@@ -10,6 +10,7 @@ import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -51,9 +52,11 @@ class PreferencesRepository(private val context: Context) {
         coerceInputValues = true
     }
 
-    val webViewDarkModeFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
-        preferences[PreferencesKeys.WEBVIEW_DARK_MODE]?.toBoolean() ?: true
-    }.flowOn(Dispatchers.IO)
+    val webViewDarkModeFlow: Flow<Boolean> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.WEBVIEW_DARK_MODE] }
+        .map { preferences ->
+            preferences[PreferencesKeys.WEBVIEW_DARK_MODE]?.toBoolean() ?: true
+        }.flowOn(Dispatchers.IO)
 
     suspend fun saveWebViewDarkMode(enabled: Boolean) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
@@ -62,13 +65,17 @@ class PreferencesRepository(private val context: Context) {
     }
 
     // Google翻訳 待機時間 (例: "1-3", "30-80", "2.0")
-    val googleChunkDelayFlow: Flow<String> = context.dataStore.data.map { preferences ->
-        preferences[PreferencesKeys.GOOGLE_CHUNK_DELAY]?.ifEmpty { null } ?: "1-3"
-    }.flowOn(Dispatchers.IO)
+    val googleChunkDelayFlow: Flow<String> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.GOOGLE_CHUNK_DELAY] }
+        .map { preferences ->
+            preferences[PreferencesKeys.GOOGLE_CHUNK_DELAY]?.ifEmpty { null } ?: "1-3"
+        }.flowOn(Dispatchers.IO)
 
-    val googleFileDelayFlow: Flow<String> = context.dataStore.data.map { preferences ->
-        preferences[PreferencesKeys.GOOGLE_FILE_DELAY]?.ifEmpty { null } ?: "1-2"
-    }.flowOn(Dispatchers.IO)
+    val googleFileDelayFlow: Flow<String> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.GOOGLE_FILE_DELAY] }
+        .map { preferences ->
+            preferences[PreferencesKeys.GOOGLE_FILE_DELAY]?.ifEmpty { null } ?: "1-2"
+        }.flowOn(Dispatchers.IO)
 
     suspend fun saveGoogleDelays(chunkDelay: String, fileDelay: String) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
@@ -78,13 +85,17 @@ class PreferencesRepository(private val context: Context) {
     }
 
     // DeepL翻訳 待機時間 (例: "3-8", "30-80", "2.5")
-    val deeplChunkDelayFlow: Flow<String> = context.dataStore.data.map { preferences ->
-        preferences[PreferencesKeys.DEEPL_CHUNK_DELAY]?.ifEmpty { null } ?: "3-8"
-    }.flowOn(Dispatchers.IO)
+    val deeplChunkDelayFlow: Flow<String> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.DEEPL_CHUNK_DELAY] }
+        .map { preferences ->
+            preferences[PreferencesKeys.DEEPL_CHUNK_DELAY]?.ifEmpty { null } ?: "3-8"
+        }.flowOn(Dispatchers.IO)
 
-    val deeplFileDelayFlow: Flow<String> = context.dataStore.data.map { preferences ->
-        preferences[PreferencesKeys.DEEPL_FILE_DELAY]?.ifEmpty { null } ?: "2-5"
-    }.flowOn(Dispatchers.IO)
+    val deeplFileDelayFlow: Flow<String> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.DEEPL_FILE_DELAY] }
+        .map { preferences ->
+            preferences[PreferencesKeys.DEEPL_FILE_DELAY]?.ifEmpty { null } ?: "2-5"
+        }.flowOn(Dispatchers.IO)
 
     suspend fun saveDeeplDelays(chunkDelay: String, fileDelay: String) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
@@ -93,20 +104,26 @@ class PreferencesRepository(private val context: Context) {
         }
     }
 
-    val presetsFlow: Flow<Map<String, ScraperConfig>> = context.dataStore.data.map { preferences ->
-        val jsonStr = preferences[PreferencesKeys.PRESETS] ?: "{}"
-        try { json.decodeFromString<Map<String, ScraperConfig>>(jsonStr) } catch (e: Exception) { emptyMap() }
-    }.flowOn(Dispatchers.IO)
+    val presetsFlow: Flow<Map<String, ScraperConfig>> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.PRESETS] }
+        .map { preferences ->
+            val jsonStr = preferences[PreferencesKeys.PRESETS] ?: "{}"
+            try { json.decodeFromString<Map<String, ScraperConfig>>(jsonStr) } catch (e: Exception) { emptyMap() }
+        }.flowOn(Dispatchers.IO)
 
-    val favoritesFlow: Flow<Map<String, String>> = context.dataStore.data.map { preferences ->
-        val jsonStr = preferences[PreferencesKeys.FAVORITES] ?: "{}"
-        try { json.decodeFromString<Map<String, String>>(jsonStr) } catch (e: Exception) { emptyMap() }
-    }.flowOn(Dispatchers.IO)
+    val favoritesFlow: Flow<Map<String, String>> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.FAVORITES] }
+        .map { preferences ->
+            val jsonStr = preferences[PreferencesKeys.FAVORITES] ?: "{}"
+            try { json.decodeFromString<Map<String, String>>(jsonStr) } catch (e: Exception) { emptyMap() }
+        }.flowOn(Dispatchers.IO)
 
-    val historyFlow: Flow<Map<String, HistoryItem>> = context.dataStore.data.map { preferences ->
-        val jsonStr = preferences[PreferencesKeys.HISTORY] ?: "{}"
-        try { json.decodeFromString<Map<String, HistoryItem>>(jsonStr) } catch (e: Exception) { emptyMap() }
-    }.flowOn(Dispatchers.IO)
+    val historyFlow: Flow<Map<String, HistoryItem>> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.HISTORY] }
+        .map { preferences ->
+            val jsonStr = preferences[PreferencesKeys.HISTORY] ?: "{}"
+            try { json.decodeFromString<Map<String, HistoryItem>>(jsonStr) } catch (e: Exception) { emptyMap() }
+        }.flowOn(Dispatchers.IO)
 
     suspend fun savePresets(presets: Map<String, ScraperConfig>) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences -> preferences[PreferencesKeys.PRESETS] = json.encodeToString(presets) }
@@ -178,7 +195,11 @@ class PreferencesRepository(private val context: Context) {
         }
     }
 
-    val setupDoneFlow: Flow<Boolean> = context.dataStore.data.map { it[PreferencesKeys.SETUP_DONE]?.toBoolean() ?: false }.flowOn(Dispatchers.IO)
+    val setupDoneFlow: Flow<Boolean> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.SETUP_DONE] }
+        .map { it[PreferencesKeys.SETUP_DONE]?.toBoolean() ?: false }
+        .flowOn(Dispatchers.IO)
+
     suspend fun saveSetupDone(done: Boolean) = withContext(Dispatchers.IO) { context.dataStore.edit { it[PreferencesKeys.SETUP_DONE] = done.toString() } }
 
     suspend fun exportPresets(uri: Uri): Result<Unit> = withContext(Dispatchers.IO) {

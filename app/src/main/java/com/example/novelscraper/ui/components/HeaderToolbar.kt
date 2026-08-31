@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper.ui.components
+package com.example.novelscraper.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -51,7 +51,6 @@ fun HeaderToolbar(
     onInspectToolClick: () -> Unit,
     onToggleDesktopModeClick: () -> Unit = {},
     onToggleDarkModeClick: () -> Unit = {},
-    onToggleWebTranslateClick: () -> Unit = {},
     onStartScrapingClick: () -> Unit = {},
     onTestRunClick: () -> Unit = {}
 ) {
@@ -139,7 +138,6 @@ fun HeaderToolbar(
                 ToolButton(Icons.Filled.CheckCircle, onTestRunClick, false, AppColors.surfaceLight)
                 ToolButton(Icons.Filled.Search, onInspectModeToggle, uiState.isInspectMode, if (uiState.isInspectMode) AppColors.inspectActive else AppColors.surfaceMedium)
                 ToolButton(Icons.Filled.PlayArrow, onStartScrapingClick, false, AppColors.accentOrange)
-                ToolButton(null, onToggleWebTranslateClick, uiState.isWebPageTranslated, AppColors.accentTeal, text = "🌐")
 
                 // その他メニュー [︙]
                 Box {

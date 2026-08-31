@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper
+package com.example.novelscraper
 
 import android.app.Application
 import android.net.Uri
@@ -205,7 +205,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     fun setInputUrl(url: String) { _uiState.update { it.copy(inputUrl = url) } }
 
     fun setCurrentUrl(url: String) {
-        _uiState.update { it.copy(currentUrl = url, inputUrl = url, isWebPageTranslated = false) }
+        _uiState.update { it.copy(currentUrl = url, inputUrl = url) }
         viewModelScope.launch {
             val presetsMap = _presets.value
             for ((name, config) in presetsMap) {
@@ -225,14 +225,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
     fun toggleWebViewDarkMode() {
         setWebViewDarkMode(!_uiState.value.isWebViewDarkMode)
-    }
-
-    fun setWebPageTranslated(translated: Boolean) {
-        _uiState.update { it.copy(isWebPageTranslated = translated) }
-    }
-
-    fun toggleWebPageTranslation() {
-        _uiState.update { it.copy(isWebPageTranslated = !it.isWebPageTranslated) }
     }
 
     fun togglePanel(panel: PanelType) {

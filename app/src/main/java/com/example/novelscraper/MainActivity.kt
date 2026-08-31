@@ -31,8 +31,7 @@ import kotlinx.serialization.json.Json
 class NovelScraperBridge(
     private val onInspect: (String) -> Unit,
     private val onApply: (String, String) -> Unit,
-    private val onRemove: (String) -> Unit,
-    private val onExtractTexts: (String) -> Unit = {}
+    private val onRemove: (String) -> Unit
 ) {
     @JavascriptInterface
     fun onInspectResult(selector: String) {
@@ -47,11 +46,6 @@ class NovelScraperBridge(
     @JavascriptInterface
     fun onRemoveExclude(selector: String) {
         onRemove(selector)
-    }
-
-    @JavascriptInterface
-    fun onExtractTexts(json: String) {
-        onExtractTexts.invoke(json)
     }
 }
 
@@ -211,15 +205,6 @@ class MainActivity : ComponentActivity() {
                 mainHandler.post {
                     if (!isFinishing && !isDestroyed) {
                         viewModel.removeExcludeSelector(selector)
-                    }
-                }
-            },
-            onExtractTexts = { json ->
-                mainHandler.post {
-                    if (!isFinishing && !isDestroyed) {
-                        mainWebView?.let { wv ->
-                            NativeWebTranslator.translateAndApply(lifecycleScope, wv, json)
-                        }
                     }
                 }
             }

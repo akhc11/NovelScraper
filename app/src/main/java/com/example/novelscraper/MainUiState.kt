@@ -71,6 +71,10 @@ data class MainUiState(
     val blockImages: Boolean = false,
     val isDesktopMode: Boolean = false,
     val isWebViewDarkMode: Boolean = true,
+
+    // Webサイト即時翻訳 (インプレースDOM翻訳) 状態
+    val isLiveTranslating: Boolean = false,
+    val isLiveTranslated: Boolean = false,
     
     // 翻訳関連の状態（エンジンごとに独立管理）
     val activeTranslationEngine: TranslationEngine = TranslationEngine.GOOGLE,

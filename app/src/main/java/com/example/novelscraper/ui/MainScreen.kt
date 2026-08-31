@@ -5,7 +5,11 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -47,7 +51,8 @@ data class MainScreenCallbacks(
     val onRemoveInspector: (WebView?) -> Unit,
     val onNavigate: (String, WebView) -> Unit,
     val onTestRun: (WebView) -> Unit,
-    val onRequestExclude: (String) -> Unit
+    val onRequestExclude: (String) -> Unit,
+    val onToggleLiveTranslate: (WebView?) -> Unit
 )
 
 @Composable
@@ -175,6 +180,9 @@ fun MainScreen(
                 onToggleDarkModeClick = {
                     viewModel.toggleWebViewDarkMode()
                 },
+                onToggleLiveTranslateClick = {
+                    callbacks.onToggleLiveTranslate(webViewRef)
+                },
                 onStartScrapingClick = {
                     val url = uiState.currentUrl
                     if (url.isNotEmpty()) {
@@ -204,13 +212,20 @@ fun MainScreen(
                                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
                             )
-                            webChromeClient = android.webkit.WebChromeClient()
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                                    consoleMessage?.let {
+                                        Log.d("NovelScraperJS", "[${it.messageLevel()}] ${it.message()} -- From line ${it.lineNumber()} of ${it.sourceId()}")
+                                    }
+                                    return super.onConsoleMessage(consoleMessage)
+                                }
+                            }
                             WebViewHelper.applyStandardSettings(this, isDesktop = uiState.isDesktopMode)
                             WebViewHelper.applyDarkMode(this, uiState.isWebViewDarkMode)
                             tag = uiState.isWebViewDarkMode
                             callbacks.onSetupWebView(this)
                             
-                            webViewClient = object : android.webkit.WebViewClient() {
+                            webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     super.onPageFinished(view, url)
                                     url?.let {

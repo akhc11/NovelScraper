@@ -51,6 +51,7 @@ fun HeaderToolbar(
     onInspectToolClick: () -> Unit,
     onToggleDesktopModeClick: () -> Unit = {},
     onToggleDarkModeClick: () -> Unit = {},
+    onToggleLiveTranslateClick: () -> Unit = {},
     onStartScrapingClick: () -> Unit = {},
     onTestRunClick: () -> Unit = {}
 ) {
@@ -129,7 +130,7 @@ fun HeaderToolbar(
                 ToolButton(null, { onPanelToggle(PanelType.TRANSLATION) }, uiState.activePanelType == PanelType.TRANSLATION, text = "翻")
             }
 
-            // 主要操作系 (右): 設定, テスト, 虫眼鏡, 再生, 🌐, ︙
+            // 主要操作系 (右): 設定, テスト, 虫眼鏡, 即時翻訳(🌐), 再生, ︙
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -137,6 +138,16 @@ fun HeaderToolbar(
                 ToolButton(Icons.Filled.Settings, { onPanelToggle(PanelType.SETTINGS) }, uiState.activePanelType == PanelType.SETTINGS)
                 ToolButton(Icons.Filled.CheckCircle, onTestRunClick, false, AppColors.surfaceLight)
                 ToolButton(Icons.Filled.Search, onInspectModeToggle, uiState.isInspectMode, if (uiState.isInspectMode) AppColors.inspectActive else AppColors.surfaceMedium)
+                
+                // 即時翻訳ボタン (🌐): Kiwi / TWP スタイルのインプレースDOM翻訳
+                ToolButton(
+                    icon = null,
+                    onClick = onToggleLiveTranslateClick,
+                    isSelected = uiState.isLiveTranslated,
+                    activeColor = AppColors.accentTeal,
+                    text = if (uiState.isLiveTranslating) "…" else "🌐"
+                )
+
                 ToolButton(Icons.Filled.PlayArrow, onStartScrapingClick, false, AppColors.accentOrange)
 
                 // その他メニュー [︙]
@@ -148,6 +159,23 @@ fun HeaderToolbar(
                         onDismissRequest = { menuExpanded = false },
                         modifier = Modifier.background(AppColors.surfaceDark)
                     ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (uiState.isLiveTranslated) "即時翻訳: ON (原文に戻す)" else "即時翻訳: OFF (日本語化)",
+                                    color = if (uiState.isLiveTranslated) AppColors.accentTeal else AppColors.textPrimary,
+                                    fontSize = 13.sp
+                                )
+                            },
+                            onClick = {
+                                onToggleLiveTranslateClick()
+                                menuExpanded = false
+                            },
+                            leadingIcon = {
+                                Text("🌐", fontSize = 14.sp)
+                            }
+                        )
+
                         DropdownMenuItem(
                             text = {
                                 Text(

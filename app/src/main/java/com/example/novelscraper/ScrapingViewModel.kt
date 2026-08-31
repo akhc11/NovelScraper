@@ -101,7 +101,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     private fun refreshStatus() {
         _activeTasks.value = taskList.toList()
-        _currentStatusText.value = taskList.lastOrNull()?.status ?: if (taskList.isNotEmpty()) "実行中: 件" else "待機中"
+        _currentStatusText.value = taskList.lastOrNull()?.status ?: if (taskList.isNotEmpty()) "実行中: ${taskList.size}件" else "待機中"
         syncServiceStatus()
     }
 
@@ -205,7 +205,14 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     fun setInputUrl(url: String) { _uiState.update { it.copy(inputUrl = url) } }
 
     fun setCurrentUrl(url: String) {
-        _uiState.update { it.copy(currentUrl = url, inputUrl = url) }
+        _uiState.update { 
+            it.copy(
+                currentUrl = url, 
+                inputUrl = url,
+                isLiveTranslating = false,
+                isLiveTranslated = false
+            ) 
+        }
         viewModelScope.launch {
             val presetsMap = _presets.value
             for ((name, config) in presetsMap) {
@@ -225,6 +232,27 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
     fun toggleWebViewDarkMode() {
         setWebViewDarkMode(!_uiState.value.isWebViewDarkMode)
+    }
+
+    // ---- ライブ翻訳（Webページ即時翻訳）の状態ハンドリング ----
+    fun handleLiveTranslateStatus(status: String) {
+        when {
+            status == "START" -> {
+                _uiState.update { it.copy(isLiveTranslating = true) }
+            }
+            status == "SUCCESS" -> {
+                _uiState.update { it.copy(isLiveTranslating = false, isLiveTranslated = true) }
+            }
+            status == "RESTORED" -> {
+                _uiState.update { it.copy(isLiveTranslating = false, isLiveTranslated = false) }
+            }
+            status.startsWith("ERROR") -> {
+                _uiState.update { it.copy(isLiveTranslating = false) }
+            }
+            else -> {
+                _uiState.update { it.copy(isLiveTranslating = false) }
+            }
+        }
     }
 
     fun togglePanel(panel: PanelType) {
@@ -314,15 +342,15 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         if (scrapingCount > 0 || isTranslating) {
             val statusParts = mutableListOf<String>()
             if (scrapingCount > 0) {
-                statusParts.add("スクレイプト: 件")
+                statusParts.add("スクレイプト: ${scrapingCount}件")
             }
             if (googleState.isTranslating) {
-                val gPrefix = if (googleState.selectedFolders.size > 1) "[/] " else ""
-                statusParts.add("Google: /件")
+                val gPrefix = if (googleState.selectedFolders.size > 1) "[${googleState.currentFolderIndex + 1}/${googleState.selectedFolders.size}] " else ""
+                statusParts.add("Google: ${gPrefix}${googleState.progress.first}/${googleState.progress.second}件")
             }
             if (deeplState.isTranslating) {
-                val dPrefix = if (deeplState.selectedFolders.size > 1) "[/] " else ""
-                statusParts.add("DeepL: /件")
+                val dPrefix = if (deeplState.selectedFolders.size > 1) "[${deeplState.currentFolderIndex + 1}/${deeplState.selectedFolders.size}] " else ""
+                statusParts.add("DeepL: ${dPrefix}${deeplState.progress.first}/${deeplState.progress.second}件")
             }
             val msg = if (statusParts.isNotEmpty()) {
                 statusParts.joinToString(" / ")
@@ -370,7 +398,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             val msg = if (result.isSuccess) {
                 "プリセットをエクスポートしました"
             } else {
-                "エクスポートに失敗しました: "
+                "エクスポートに失敗しました: ${result.exceptionOrNull()?.message ?: "不明なエラー"}"
             }
             Toast.makeText(getApplication(), msg, Toast.LENGTH_LONG).show()
         }
@@ -380,7 +408,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             val result = repository.importPresets(uri)
             val msg = if (result.isSuccess) {
-                " 件のプリセットをインポートしました"
+                "${result.getOrNull()} 件のプリセットをインポートしました"
             } else {
                 val ex = result.exceptionOrNull()
                 val errorDetails = when (ex) {
@@ -388,7 +416,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                     is IllegalArgumentException -> ex.message ?: "無効なデータです"
                     else -> ex?.message ?: "不明なエラー"
                 }
-                "インポートに失敗しました: "
+                "インポートに失敗しました: $errorDetails"
             }
             Toast.makeText(getApplication(), msg, Toast.LENGTH_LONG).show()
         }

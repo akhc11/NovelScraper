@@ -32,18 +32,8 @@ import com.example.novelscraper.PanelType
 import com.example.novelscraper.ScrapingViewModel
 import com.example.novelscraper.TranslationEngine
 import com.example.novelscraper.WebViewHelper
-import com.example.novelscraper.NativeWebTranslator
 import com.example.novelscraper.ui.components.*
 import com.example.novelscraper.ui.theme.AppColors
-
-/**
- * 原文復帰リロード後に自動実行する保留アクション。
- */
-private enum class PendingPostReloadAction {
-    NONE,
-    TEST_RUN,
-    INSPECT_MODE
-}
 
 /**
  * MainScreen と Activity の境界コールバック集約。
@@ -74,7 +64,6 @@ fun MainScreen(
     val context = LocalContext.current
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var pendingPostReloadAction by remember { mutableStateOf(PendingPostReloadAction.NONE) }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -168,11 +157,6 @@ fun MainScreen(
                 onUrlChange = { viewModel.setInputUrl(it) },
                 onPanelToggle = { panel -> viewModel.togglePanel(panel) },
                 onInspectModeToggle = {
-                    // 安全ガード: 翻訳ONの時は即座に原文復帰（リロードなし）してからインスペクター起動
-                    if (uiState.isWebPageTranslated) {
-                        viewModel.setWebPageTranslated(false)
-                        webViewRef?.evaluateJavascript(NativeWebTranslator.buildRestoreScript(), null)
-                    }
                     viewModel.setInspectMode(!uiState.isInspectMode)
                 },
                 onInspectToolClick = {
@@ -182,11 +166,6 @@ fun MainScreen(
                     if (uiState.overlay is Overlay.TestResult) {
                         viewModel.setTestResult(null)
                     } else {
-                        // 安全ガード: 翻訳ONの時は即座に原文復帰（リロードなし）してからテスト解析を実行
-                        if (uiState.isWebPageTranslated) {
-                            viewModel.setWebPageTranslated(false)
-                            webViewRef?.evaluateJavascript(NativeWebTranslator.buildRestoreScript(), null)
-                        }
                         webViewRef?.let { callbacks.onTestRun(it) }
                     }
                 },
@@ -196,27 +175,9 @@ fun MainScreen(
                 onToggleDarkModeClick = {
                     viewModel.toggleWebViewDarkMode()
                 },
-                onToggleWebTranslateClick = {
-                    val isCurrentlyTranslated = uiState.isWebPageTranslated
-                    val nextState = !isCurrentlyTranslated
-                    viewModel.setWebPageTranslated(nextState)
-                    webViewRef?.let { view ->
-                        val jsCode = if (nextState) {
-                            NativeWebTranslator.buildExtractScript()
-                        } else {
-                            NativeWebTranslator.buildRestoreScript()
-                        }
-                        view.evaluateJavascript(jsCode, null)
-                    }
-                },
                 onStartScrapingClick = {
                     val url = uiState.currentUrl
                     if (url.isNotEmpty()) {
-                        // 安全ガード: 翻訳状態をOFFにし、原文テキストに復帰（リロードなし）
-                        if (uiState.isWebPageTranslated) {
-                            viewModel.setWebPageTranslated(false)
-                            webViewRef?.evaluateJavascript(NativeWebTranslator.buildRestoreScript(), null)
-                        }
                         val currentTask = activeTasks.firstOrNull { it.currentUrl == url }
                         if (currentTask != null) {
                             currentTask.stop()
@@ -257,22 +218,8 @@ fun MainScreen(
                                             viewModel.setCurrentUrl(it)
                                         }
                                     }
-
-                                    // 保留アクション（テスト実行 / インスペクター）の自動実行（二度手間解消）
-                                    when (pendingPostReloadAction) {
-                                        PendingPostReloadAction.TEST_RUN -> {
-                                            pendingPostReloadAction = PendingPostReloadAction.NONE
-                                            view?.let { callbacks.onTestRun(it) }
-                                        }
-                                        PendingPostReloadAction.INSPECT_MODE -> {
-                                            pendingPostReloadAction = PendingPostReloadAction.NONE
-                                            viewModel.setInspectMode(true)
-                                        }
-                                        PendingPostReloadAction.NONE -> {
-                                            if (uiState.isInspectMode) {
-                                                callbacks.onInjectInspector(view)
-                                            }
-                                        }
+                                    if (uiState.isInspectMode) {
+                                        callbacks.onInjectInspector(view)
                                     }
                                 }
                             }

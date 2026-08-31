@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper
+package com.example.novelscraper
 
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.widget.Toast
@@ -31,7 +32,8 @@ import kotlinx.serialization.json.Json
 class NovelScraperBridge(
     private val onInspect: (String) -> Unit,
     private val onApply: (String, String) -> Unit,
-    private val onRemove: (String) -> Unit
+    private val onRemove: (String) -> Unit,
+    private val onStatusUpdate: (String) -> Unit
 ) {
     @JavascriptInterface
     fun onInspectResult(selector: String) {
@@ -47,13 +49,23 @@ class NovelScraperBridge(
     fun onRemoveExclude(selector: String) {
         onRemove(selector)
     }
+
+    @JavascriptInterface
+    fun onLiveTranslateStatus(status: String) {
+        onStatusUpdate(status)
+    }
 }
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        private const val TAG = "MainActivity"
+    }
+
     private lateinit var viewModel: ScrapingViewModel
     private val mainHandler = Handler(Looper.getMainLooper())
     private var mainWebView: WebView? = null
+    private var lastToggleLiveTranslateTime = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,7 +87,8 @@ class MainActivity : ComponentActivity() {
                         onRemoveInspector = { view -> removeInspector(view) },
                         onNavigate = { url, view -> performNavigation(url, view) },
                         onRequestExclude = { selector -> handleExcludeRequest(selector) },
-                        onTestRun = { view -> performTestRun(view) }
+                        onTestRun = { view -> performTestRun(view) },
+                        onToggleLiveTranslate = { view -> toggleLiveTranslation(view) }
                     )
                 )
             }
@@ -207,9 +220,45 @@ class MainActivity : ComponentActivity() {
                         viewModel.removeExcludeSelector(selector)
                     }
                 }
+            },
+            onStatusUpdate = { status ->
+                mainHandler.post {
+                    if (!isFinishing && !isDestroyed) {
+                        Log.d(TAG, "onLiveTranslateStatus: $status")
+                        viewModel.handleLiveTranslateStatus(status)
+                        if (status == "SUCCESS") {
+                            Toast.makeText(this@MainActivity, "ページを翻訳しました", Toast.LENGTH_SHORT).show()
+                        } else if (status == "RESTORED") {
+                            Toast.makeText(this@MainActivity, "原文に復元しました", Toast.LENGTH_SHORT).show()
+                        } else if (status.startsWith("ERROR")) {
+                            Toast.makeText(this@MainActivity, "翻訳エラー: $status", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
             }
         )
         view.addJavascriptInterface(bridge, "AndroidBridge")
+    }
+
+    private fun toggleLiveTranslation(view: WebView?) {
+        val now = System.currentTimeMillis()
+        if (now - lastToggleLiveTranslateTime < 500L) {
+            Log.d(TAG, "toggleLiveTranslation: Debounced rapid toggle click")
+            return
+        }
+        lastToggleLiveTranslateTime = now
+
+        val v = view ?: mainWebView
+        if (v == null) {
+            Log.e(TAG, "toggleLiveTranslation: WebView is null")
+            Toast.makeText(this, "WebViewの初期化待ちです", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Log.d(TAG, "toggleLiveTranslation: Evaluating script on WebView url=${v.url}")
+        val js = LiveTranslateScriptBuilder.buildToggleLiveTranslateScript()
+        v.evaluateJavascript(js) { res ->
+            Log.d(TAG, "toggleLiveTranslation evaluateJavascript result: $res")
+        }
     }
 
     private fun injectInspector(view: WebView?) {

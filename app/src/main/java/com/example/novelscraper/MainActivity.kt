@@ -32,7 +32,7 @@ class NovelScraperBridge(
     private val onInspect: (String) -> Unit,
     private val onApply: (String, String) -> Unit,
     private val onRemove: (String) -> Unit,
-    private val onTranslateError: (String) -> Unit = {}
+    private val onExtractTexts: (String) -> Unit = {}
 ) {
     @JavascriptInterface
     fun onInspectResult(selector: String) {
@@ -50,8 +50,8 @@ class NovelScraperBridge(
     }
 
     @JavascriptInterface
-    fun onTranslateError(reason: String) {
-        onTranslateError.invoke(reason)
+    fun onExtractTexts(json: String) {
+        onExtractTexts.invoke(json)
     }
 }
 
@@ -114,8 +114,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun setupSystemUI() {
-        // API 35で非推奨のstatusBarColorの代替。エッジ・トゥ・エッジで描画し、
-        // ステータスバー領域はScaffoldの黒背景が見えるため外見は従来どおり黒。
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = false
     }
@@ -128,7 +126,6 @@ class MainActivity : ComponentActivity() {
     private fun performNavigation(input: String, view: WebView) {
         if (input.isEmpty()) return
 
-        // 異常に長い入力に対する保護
         if (input.length > 2000) {
             Toast.makeText(this, "URLまたは検索クエリが長すぎます。無効なデータです。", Toast.LENGTH_LONG).show()
             return
@@ -217,14 +214,11 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             },
-            onTranslateError = { reason ->
+            onExtractTexts = { json ->
                 mainHandler.post {
                     if (!isFinishing && !isDestroyed) {
-                        viewModel.setWebPageTranslated(false)
-                        if (reason == "CSP_BLOCKED") {
-                            Toast.makeText(this@MainActivity, "このサイトではセキュリティポリシー(CSP)によりページ翻訳がブロックされました", Toast.LENGTH_LONG).show()
-                        } else {
-                            Toast.makeText(this@MainActivity, "ページ翻訳エラー: $reason", Toast.LENGTH_LONG).show()
+                        mainWebView?.let { wv ->
+                            NativeWebTranslator.translateAndApply(lifecycleScope, wv, json)
                         }
                     }
                 }

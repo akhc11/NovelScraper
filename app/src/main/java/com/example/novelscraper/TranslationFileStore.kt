@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper
+package com.example.novelscraper
 
 import android.content.Context
 import android.net.Uri
@@ -23,7 +23,6 @@ class TranslationFileStore(
     companion object {
         const val GOOGLE_OUTPUT_FOLDER = "翻訳完了_GOOGLE"
         const val DEEPL_OUTPUT_FOLDER = "翻訳完了_DEEPL"
-        const val OUTPUT_FOLDER_NAME = GOOGLE_OUTPUT_FOLDER // 互換性維持用
         private const val TAG = "TranslationFileStore"
     }
 

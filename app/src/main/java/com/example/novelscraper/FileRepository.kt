@@ -9,6 +9,7 @@ import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 
 /**
  * スクレイプ結果のファイル保存を担当するリポジトリ。
@@ -51,13 +52,21 @@ class FileRepository(private val context: Context) {
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-        uri?.let {
-            context.contentResolver.openOutputStream(it).use { os ->
-                os?.write(content.toByteArray(Charsets.UTF_8))
-            }
+            ?: throw IOException("MediaStore insert returned null for $fileName")
+
+        try {
+            context.contentResolver.openOutputStream(uri)?.use { os ->
+                os.write(content.toByteArray(Charsets.UTF_8))
+                os.flush()
+            } ?: throw IOException("Failed to open output stream for MediaStore URI: $uri")
+
             values.clear()
             values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-            context.contentResolver.update(it, values, null, null)
+            context.contentResolver.update(uri, values, null, null)
+        } catch (e: Exception) {
+            // 書き込み失敗時は pending の孤立エントリを削除
+            try { context.contentResolver.delete(uri, null, null) } catch (_: Exception) {}
+            throw e
         }
     }
 
@@ -66,7 +75,9 @@ class FileRepository(private val context: Context) {
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
             "$ROOT_FOLDER_NAME/$folderName"
         )
-        if (!dir.exists()) dir.mkdirs()
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw IOException("Failed to create directory: ${dir.absolutePath}")
+        }
         File(dir, fileName).writeText(content, Charsets.UTF_8)
     }
 

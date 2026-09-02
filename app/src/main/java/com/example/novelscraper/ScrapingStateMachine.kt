@@ -30,9 +30,7 @@ class ScrapingStateMachine(
         data class UpdateStatus(val message: String) : Action()
         data class WaitAndLoad(val url: String, val delayMs: Long) : Action()
         data class WaitForCF(val delayMs: Long) : Action()
-        data class Retry(val reason: String) : Action()
         data class Finish(val reason: String) : Action()
-        data class Error(val message: String) : Action()
     }
 
     enum class JsPurpose { CHECK_FOLDER_LINK, FETCH_FOLDER_NAME, SCRAPE_PAGE }

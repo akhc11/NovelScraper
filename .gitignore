@@ -17,4 +17,5 @@ local.properties
 # Graphify output
 graphify-out/
 
-graphify-out/
+# Local test data
+test_data/

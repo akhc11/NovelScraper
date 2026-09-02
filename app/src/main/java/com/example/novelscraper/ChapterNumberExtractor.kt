@@ -40,8 +40,7 @@ object ChapterNumberExtractor {
             } catch (e: Exception) {
                 ""
             }
-            val matches = NUMBER_REGEX.findAll(path).map { it.value }.toList()
-            if (matches.isNotEmpty()) chapter = matches.last()
+            chapter = NUMBER_REGEX.findAll(path).lastOrNull()?.value ?: ""
         }
 
         // 数字のみ抽出して0埋め（数字が全く含まれない場合は空文字にして "0000" を防ぐ）
@@ -83,14 +82,13 @@ object ChapterNumberExtractor {
             } catch (e: Exception) {
                 ""
             }
-            val matches = NUMBER_REGEX.findAll(path).map { it.value }.toList()
-            if (matches.isNotEmpty()) {
-                val lastNum = matches.last().filter { it.isDigit() }
-                if (lastNum.isNotEmpty()) {
-                    return lastNum.padStart(PAD_LENGTH, '0') + " (推測)"
-                }
+            val lastMatch = NUMBER_REGEX.findAll(path).lastOrNull()?.value ?: ""
+            val lastNum = lastMatch.filter { it.isDigit() }
+            return if (lastNum.isNotEmpty()) {
+                lastNum.padStart(PAD_LENGTH, '0') + " (推測)"
+            } else {
+                ""
             }
-            return ""
         }
 
         // 通常（数字が全く含まれない場合は空文字にして "0000" を防ぐ）

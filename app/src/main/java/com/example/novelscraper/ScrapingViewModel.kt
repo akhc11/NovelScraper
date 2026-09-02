@@ -1,20 +1,16 @@
-package com.example.novelscraper
+﻿package com.example.novelscraper
 
 import android.app.Application
 import android.net.Uri
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.concurrent.CopyOnWriteArrayList
+import java.util.*
 
 class ScrapingViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -22,12 +18,8 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     private val fileRepository = FileRepository(application)
     private val serviceController = ScraperServiceController(application)
 
-    private val taskList = CopyOnWriteArrayList<ScrapingTask>()
-    private val _activeTasks = MutableStateFlow<List<ScrapingTask>>(emptyList())
-    val activeTasks: StateFlow<List<ScrapingTask>> = _activeTasks.asStateFlow()
-
-    private val _currentStatusText = MutableStateFlow("待機中")
-    val currentStatusText: StateFlow<String> = _currentStatusText.asStateFlow()
+    private val _uiState = MutableStateFlow(MainUiState())
+    val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
     private val _presets = MutableStateFlow<Map<String, ScraperConfig>>(emptyMap())
     val presets: StateFlow<Map<String, ScraperConfig>> = _presets.asStateFlow()
@@ -38,37 +30,38 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     private val _history = MutableStateFlow<Map<String, HistoryItem>>(emptyMap())
     val history: StateFlow<Map<String, HistoryItem>> = _history.asStateFlow()
 
-    private val _uiState = MutableStateFlow(MainUiState())
-    val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
+    private val taskList = mutableListOf<ScrapingTask>()
+    private val _activeTasks = MutableStateFlow<List<ScrapingTask>>(emptyList())
+    val activeTasks: StateFlow<List<ScrapingTask>> = _activeTasks.asStateFlow()
 
-    // 翻訳キュー管理（Google/DeepLの実行ロジックは専任クラスへ分離。状態はcollectで合成）
-    private val translationManager = TranslationQueueManager(
-        appContext = application,
-        scope = viewModelScope,
-        repository = repository
-    )
+    private val _currentStatusText = MutableStateFlow("待機中")
+    val currentStatusText: StateFlow<String> = _currentStatusText.asStateFlow()
+
+    // 翻訳キューマネージャー
+    val translationManager = TranslationQueueManager(application, viewModelScope, repository)
 
     init {
-        // 過去のバグで保存されてしまった不正な履歴を起動時にクリーンアップ
         viewModelScope.launch {
-            repository.updateHistory { historyMap ->
-                val invalidKeys = historyMap.filter { (_, item) ->
-                    item.url.startsWith("javascript:") || item.url.startsWith("data:") || item.url.length > 2000
-                }.keys
-                invalidKeys.forEach { historyMap.remove(it) }
-            }
+            repository.presetsFlow.collect { _presets.value = it }
         }
-
-        viewModelScope.launch { repository.presetsFlow.collect { _presets.value = it } }
-        viewModelScope.launch { repository.favoritesFlow.collect { _favorites.value = it } }
-        viewModelScope.launch { repository.historyFlow.collect { _history.value = it } }
+        viewModelScope.launch {
+            repository.favoritesFlow.collect { _favorites.value = it }
+        }
+        viewModelScope.launch {
+            repository.historyFlow.collect { _history.value = it }
+        }
         viewModelScope.launch {
             repository.webViewDarkModeFlow.collect { isDark ->
                 _uiState.update { it.copy(isWebViewDarkMode = isDark) }
             }
         }
+        viewModelScope.launch {
+            repository.llmConfigFlow.collect { llmConfig ->
+                translationManager.llmEngine.updateConfig(llmConfig)
+            }
+        }
 
-        // 翻訳キュー状態の合成（Manager の StateFlow → MainUiState）
+        // 翻訳状態の購読とUIStateへの反映
         viewModelScope.launch {
             translationManager.googleState.collect { gs ->
                 _uiState.update { it.copy(googleTranslationState = gs) }
@@ -77,6 +70,17 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             translationManager.deeplState.collect { ds ->
                 _uiState.update { it.copy(deeplTranslationState = ds) }
+            }
+        }
+        viewModelScope.launch {
+            translationManager.llmState.collect { ls ->
+                _uiState.update { it.copy(llmTranslationState = ls) }
+            }
+        }
+        viewModelScope.launch {
+            translationManager.llmEngine.engineState.collect { live ->
+                _uiState.update { it.copy(llmEngineLiveState = live) }
+                syncServiceStatus()
             }
         }
         translationManager.onActivityChanged = { syncServiceStatus() }
@@ -119,20 +123,44 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { it.copy(activeDialog = ActiveDialog.InspectElement(selector)) }
     }
 
+    fun showLlmSettingsDialog() {
+        _uiState.update { it.copy(activeDialog = ActiveDialog.LlmSettings) }
+    }
+
     fun dismissDialog() {
         _uiState.update { it.copy(activeDialog = ActiveDialog.None) }
     }
 
-    fun setTestResult(result: ScrapingResult?) {
+    // ---- パネル管理 ----
+
+    fun togglePanel(panel: PanelType) {
         _uiState.update {
-            when {
-                // 結果を開く場合は他のオーバーレイを閉じて TestResult へ
-                result != null -> it.copy(overlay = Overlay.TestResult(result))
-                // nullは「閉じる」: テスト結果表示中のみ閉じる（他オーバーレイは保持）
-                it.overlay is Overlay.TestResult -> it.copy(overlay = Overlay.None)
-                else -> it
-            }
+            val current = (it.overlay as? Overlay.Panel)?.type
+            val newOverlay = if (current == panel) Overlay.None else Overlay.Panel(panel)
+            it.copy(overlay = newOverlay)
         }
+    }
+
+    fun closePanels() {
+        _uiState.update { it.copy(overlay = Overlay.None) }
+    }
+
+    // ---- オーバーレイ管理 ----
+
+    fun showTestResultOverlay(data: ScrapingResult) {
+        _uiState.update { it.copy(overlay = Overlay.TestResult(data)) }
+    }
+
+    fun setTestResult(data: ScrapingResult?) {
+        _uiState.update { it.copy(overlay = if (data != null) Overlay.TestResult(data) else Overlay.None) }
+    }
+
+    fun setInspectMode(active: Boolean) {
+        _uiState.update { it.copy(overlay = if (active) Overlay.InspectMode else Overlay.None) }
+    }
+
+    fun closeOverlay() {
+        _uiState.update { it.copy(overlay = Overlay.None) }
     }
 
     fun setExcludeCandidates(state: ExcludeCandidatesState?) {
@@ -150,6 +178,20 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     fun removeExcludeSelector(selector: String) {
         if (selector.isEmpty()) return
         updateCurrentConfig { old -> old.copy(exclude = ExcludeSelectorCodec.remove(old.exclude, selector)) }
+    }
+
+    fun applySelectorToConfig(field: SelectorField, selector: String) {
+        updateCurrentConfig { old ->
+            when (field) {
+                SelectorField.TITLE -> old.copy(title = selector)
+                SelectorField.BODY -> old.copy(body = selector)
+                SelectorField.NEXT -> old.copy(next = selector)
+                SelectorField.CHAPTER -> old.copy(chapter = selector)
+                SelectorField.FOLDER -> old.copy(folder = selector)
+                SelectorField.FOLDER_LINK -> old.copy(folderLink = selector)
+                SelectorField.EXCLUDE -> old.copy(exclude = ExcludeSelectorCodec.merge(old.exclude, selector))
+            }
+        }
     }
 
     fun addTask(task: ScrapingTask) { taskList.add(task); refreshStatus() }
@@ -234,6 +276,14 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         setWebViewDarkMode(!_uiState.value.isWebViewDarkMode)
     }
 
+    fun setActiveHistoryTab(tab: Int) {
+        _uiState.update { it.copy(activeHistoryTab = tab) }
+    }
+
+    fun setActiveTranslationEngine(engine: TranslationEngine) {
+        _uiState.update { it.copy(activeTranslationEngine = engine) }
+    }
+
     // ---- ライブ翻訳（Webページ即時翻訳）の状態ハンドリング ----
     fun handleLiveTranslateStatus(status: String) {
         when {
@@ -246,72 +296,86 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             status == "RESTORED" -> {
                 _uiState.update { it.copy(isLiveTranslating = false, isLiveTranslated = false) }
             }
-            status.startsWith("ERROR") -> {
+            status.startsWith("ERROR:") -> {
+                val errorMsg = status.removePrefix("ERROR:").trim()
                 _uiState.update { it.copy(isLiveTranslating = false) }
-            }
-            else -> {
-                _uiState.update { it.copy(isLiveTranslating = false) }
+                Toast.makeText(getApplication(), "ライブ翻訳エラー: $errorMsg", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    fun togglePanel(panel: PanelType) {
+    fun applyPreset(name: String) {
+        val config = _presets.value[name] ?: return
+        _uiState.update { it.copy(currentPresetName = name, currentConfig = config) }
+    }
+
+    fun applyPresetState(name: String, config: ScraperConfig) {
+        _uiState.update { it.copy(currentPresetName = name, currentConfig = config) }
+    }
+
+    fun clearPreset() {
+        _uiState.update { it.copy(currentPresetName = "", currentConfig = ScraperConfig()) }
+    }
+
+    fun updateCurrentConfig(transform: (ScraperConfig) -> ScraperConfig) {
         _uiState.update {
-            val current = it.overlay as? Overlay.Panel
-            it.copy(overlay = if (current?.type == panel) Overlay.None else Overlay.Panel(panel))
+            val newConfig = transform(it.currentConfig)
+            val updatedPresetName = if (it.currentPresetName.isNotEmpty()) {
+                val origConfig = _presets.value[it.currentPresetName]
+                if (origConfig != null && origConfig != newConfig) "" else it.currentPresetName
+            } else ""
+            it.copy(currentConfig = newConfig, currentPresetName = updatedPresetName)
         }
     }
 
-    fun closePanels() {
-        _uiState.update { it.copy(overlay = Overlay.None) }
-    }
-
-    fun setInspectMode(active: Boolean) {
+    fun selectPresetFromList(name: String, config: ScraperConfig) {
         _uiState.update {
-            when {
-                active -> it.copy(overlay = Overlay.InspectMode)
-                it.overlay is Overlay.InspectMode -> it.copy(overlay = Overlay.None)
-                else -> it
-            }
+            it.copy(
+                currentPresetName = name,
+                currentConfig = config,
+                overlay = Overlay.None
+            )
         }
     }
 
-    fun applySelectorToConfig(field: SelectorField, selector: String) {
-        _uiState.update { state ->
-            val updated = when (field) {
-                SelectorField.BODY -> state.currentConfig.copy(body = selector)
-                SelectorField.TITLE -> state.currentConfig.copy(title = selector)
-                SelectorField.NEXT -> state.currentConfig.copy(next = selector)
-                SelectorField.CHAPTER -> state.currentConfig.copy(chapter = selector)
-                SelectorField.FOLDER -> state.currentConfig.copy(folder = selector)
-                SelectorField.FOLDER_LINK -> state.currentConfig.copy(folderLink = selector)
-                SelectorField.EXCLUDE -> state.currentConfig.copy(exclude = ExcludeSelectorCodec.merge(state.currentConfig.exclude, selector))
-            }
-            state.copy(currentConfig = updated)
+    fun selectFavorite(title: String, url: String) {
+        _uiState.update {
+            it.copy(
+                inputUrl = url,
+                currentUrl = url,
+                overlay = Overlay.None
+            )
         }
     }
 
-    fun setActiveHistoryTab(tab: Int) { _uiState.update { it.copy(activeHistoryTab = tab) } }
-    fun applyPresetState(name: String, config: ScraperConfig) { _uiState.update { it.copy(currentPresetName = name, currentConfig = config) } }
-    fun updateCurrentConfig(updater: (ScraperConfig) -> ScraperConfig) { _uiState.update { it.copy(currentConfig = updater(it.currentConfig)) } }
-
-    // ---- 翻訳関連のメソッド ----
-
-    fun setActiveTranslationEngine(engine: TranslationEngine) {
-        _uiState.update { it.copy(activeTranslationEngine = engine) }
+    fun selectHistory(item: HistoryItem) {
+        val targetUrl = item.nextUrl.ifEmpty { item.url }
+        _uiState.update {
+            it.copy(
+                inputUrl = targetUrl,
+                currentUrl = targetUrl,
+                currentPresetName = item.presetName,
+                currentConfig = item.config,
+                overlay = Overlay.None
+            )
+        }
     }
 
-    /** OSピッカーで選択されたフォルダをキューに追加（重複防止） */
+    fun selectHistoryFolder(folderName: String) {
+        val item = _history.value[folderName] ?: return
+        selectHistory(item)
+    }
+
+    // ---- フォルダ翻訳機能 ----
+
     fun addTranslationFolder(engine: TranslationEngine, uri: Uri, folderName: String) {
         translationManager.addFolder(engine, uri, folderName)
     }
 
-    /** 選択中フォルダをキューから1件削除 */
     fun removeTranslationFolder(engine: TranslationEngine, index: Int) {
         translationManager.removeFolder(engine, index)
     }
 
-    /** 選択中フォルダのキューを全解除 */
     fun clearTranslationFolders(engine: TranslationEngine) {
         translationManager.clearFolders(engine)
     }
@@ -328,16 +392,22 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         translationManager.stop(engine)
     }
 
-    /**
-     * スクレイピングタスク・Google翻訳・DeepL翻訳の状態を一元管理し、
-     * ServiceController を通じて的確にService通知を更新する。
-     */
+    fun getLlmConfig(): LlmTranslationConfig = translationManager.llmEngine.config
+
+    fun updateLlmConfig(config: LlmTranslationConfig) {
+        translationManager.llmEngine.updateConfig(config)
+        viewModelScope.launch {
+            repository.saveLlmConfig(config)
+        }
+        dismissDialog()
+    }
+
     private fun syncServiceStatus() {
         val scrapingCount = taskList.size
-        // Manager のフローを直接読む（collect経由のuiState合成には伝播遅延があるため）
         val googleState = translationManager.googleState.value
         val deeplState = translationManager.deeplState.value
-        val isTranslating = googleState.isTranslating || deeplState.isTranslating
+        val llmState = translationManager.llmEngine.engineState.value
+        val isTranslating = googleState.isTranslating || deeplState.isTranslating || llmState.isTranslating
 
         if (scrapingCount > 0 || isTranslating) {
             val statusParts = mutableListOf<String>()
@@ -352,6 +422,9 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 val dPrefix = if (deeplState.selectedFolders.size > 1) "[${deeplState.currentFolderIndex + 1}/${deeplState.selectedFolders.size}] " else ""
                 statusParts.add("DeepL: ${dPrefix}${deeplState.progress.first}/${deeplState.progress.second}件")
             }
+            if (llmState.isTranslating) {
+                statusParts.add("LLM: ${llmState.progress.first}/${llmState.progress.second}件")
+            }
             val msg = if (statusParts.isNotEmpty()) {
                 statusParts.joinToString(" / ")
             } else {
@@ -364,6 +437,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun startScraping(targetUrl: String, initialFolderName: String = "(取得中...)") {
+        WebViewHelper.clearGoogleTranslateCookies(targetUrl)
         val config = uiState.value.currentConfig
         val newTask = ScrapingTask(
             getApplication(), targetUrl, config,
@@ -375,11 +449,15 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                     updateStatus()
                 }
                 override fun onTaskFinished(task: ScrapingTask) {
+                    task.stop()
                     removeTask(task)
                 }
                 override fun onSaveResult(folderName: String, title: String, content: String, chapterNum: String) {
                     viewModelScope.launch(Dispatchers.IO) {
-                        fileRepository.saveChapter(folderName, title, content, chapterNum)
+                        val success = fileRepository.saveChapter(folderName, title, content, chapterNum)
+                        if (!success) {
+                            Toast.makeText(getApplication(), "ファイル保存に失敗しました: $title ($chapterNum)", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
                 override fun onUpdateHistory(folderName: String, title: String, chapter: String, url: String, nextUrl: String, config: ScraperConfig) {

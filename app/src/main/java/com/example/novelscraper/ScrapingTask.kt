@@ -46,7 +46,12 @@ class ScrapingTask(
 
     init {
         WebViewHelper.applyStandardSettings(webView, !useImages, isDesktop)
-        WebViewHelper.applyVirtualSize(webView) // ヘッドレス（0x0）判定の完全解除
+        // PCモード時は横長デスクトップ解像度(1920x1080)、通常時は縦長(1080x1920)を仮想配置
+        if (isDesktop) {
+            WebViewHelper.applyVirtualSize(webView, width = 1920, height = 1080)
+        } else {
+            WebViewHelper.applyVirtualSize(webView, width = 1080, height = 1920)
+        }
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -55,9 +60,9 @@ class ScrapingTask(
                 if (loadedUrl.startsWith("javascript:") || loadedUrl.startsWith("data:")) return
                 if (isPageError) return // エラー時はonPageFinishedを処理しない
 
-                // CF対策(生体タップ + スクロール模倣)を集約実行
+                // CF対策(生体タップ + スクロール模倣) + PCモード時のViewport除去を単一IPCで集約実行
                 val shouldScroll = stateMachine.state == ScrapingStateMachine.State.SCRAPING
-                view?.evaluateJavascript(CloudflareDetector.buildPageLoadInitJs(shouldScroll), null)
+                view?.evaluateJavascript(CloudflareDetector.buildPageLoadInitJs(shouldScroll, isDesktop), null)
 
                 navigationJob?.cancel()
                 navigationJob = scope.launch {
@@ -145,16 +150,9 @@ class ScrapingTask(
                         }
                     }
                 }
-                is ScrapingStateMachine.Action.Retry -> {
-                    // リトライはStateMachineがWaitAndLoadに変換するため通常到達しない
-                }
                 is ScrapingStateMachine.Action.Finish -> {
                     updateStatus(action.reason)
-                    isRunning = false
                     taskListener.onTaskFinished(this)
-                }
-                is ScrapingStateMachine.Action.Error -> {
-                    updateStatus(action.message)
                 }
             }
         }
@@ -162,7 +160,7 @@ class ScrapingTask(
 
     private fun updateStatus(newStatus: String) {
         status = newStatus
-        taskListener.onStatusUpdate(this, status)
+        taskListener.onStatusUpdate(this, newStatus)
     }
 
     companion object {

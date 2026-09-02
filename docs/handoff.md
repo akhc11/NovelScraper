@@ -1,15 +1,16 @@
-# 引き継ぎ状況 - 最終更新: 2026-08-25 (プロジェクト整理・レビュー完了)
+# 引き継ぎ状況 - 最終更新: 2026-09-02 (機能別敵対的レビュー & 不要コード・デッドコード完全削除完了)
 
 ## 現在の状態
-- **プロジェクト整理**: ルートディレクトリの不要なログやスクリプトを削除し、過去の `handoff` ファイルを `docs/history/` へ整理しました。
-- **アーキテクチャレビュー**: MVVM パターンの整合性と `AGENTS.md` への準拠を確認済み。
-- **Graphify**: ナレッジグラフを最新の状態に更新済み。
-- **機能状況**: 
-    - ダークモード: 実装済み・安定。
-    - 翻訳機能: Google翻訳（手動操作再現）および DeepL 連携実装済み。
-    - URL共有: 受信・抽出機能実装済み。
-    - インスペクター v2: マルチ操作ツールバー、複数除外セレクタ、インタラクティブ・プレビュー実装完了。
+- **不要コード・デッドコード削除完了**:
+  - `InspectElementDialog`（旧 Compose ダイアログ・104行）および関連メソッド（`onInspectResult`, `showInspectElementDialog`, `ActiveDialog.InspectElement`）を完全削除。
+  - 未使用ラッパークラス `TranslationTask.kt`, `DeeplTranslationTask.kt` を完全削除。
+  - 未使用フィールド `FolderItem`（`totalTextFiles`, `untranslatedGoogleCount`, `untranslatedDeeplCount`）、未使用定数 `TranslationFileStore.OUTPUT_FOLDER_NAME` を削除。
+  - 未使用アクション `ScrapingStateMachine.Action.Retry`, `Action.Error` および到達不能分岐を削除。
+- **翻訳後ホバー強調の完全抹殺**:
+  - `LiveTranslateScriptBuilder.kt` において、Google翻訳のテキストホバーによる強調（ハイライト）および原文バルーンツールチップ（`#goog-gt-tt`, `.goog-te-balloon-frame`）を完全非表示・無効化。
+- **品質・テスト検証**:
+  - ユニットテスト（`.\gradlew testDebugUnitTest`）全件合格（BUILD SUCCESSFUL）。
+  - ビルド（`.\gradlew assembleDebug`）正常完了（BUILD SUCCESSFUL）。
 
 ## 次のステップ
-- 特になし（ユーザーの指示待ち）。
-- 今後の新機能実装時は、この `handoff.md` を更新するか、新しい `handoff_<機能名>.md` を作成して記録を継続してください。
+- ユーザー指示待ち。

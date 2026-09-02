@@ -1,8 +1,10 @@
-﻿package com.example.novelscraper
+package com.example.novelscraper
 
 import android.content.Context
 import android.net.Uri
-import android.widget.Toast
+import com.example.novelscraper.translation.llm.engine.LlmEngineState
+import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
+import com.example.novelscraper.translation.llm.engine.LlmTranslationEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,16 +14,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Google/DeepL 翻訳キューの実行管理（ScrapingViewModel から分離）。
- *
- * 責務:
- * - エンジン別の状態保持（[EngineTranslationState]）とフォルダキュー操作
- * - 複数フォルダ連続翻訳の実行制御（完了で自動遷移）
- * - 待機時間設定の永続化・購読
- * - レースコンディション対策（世代IDによる停止済みコールバックの破棄）
- *
- * UI状態 (MainUiState) への合成は ViewModel 側が本クラスの StateFlow を collect して行う。
- * Service 通知の判断（スクレイピング件数との合算）は ViewModel 側 [onActivityChanged] 経由。
+ * Google/DeepL/LLM(AI) 翻訳キューの実行管理（ScrapingViewModel から分離）。
  */
 class TranslationQueueManager(
     private val appContext: Context,
@@ -32,15 +25,20 @@ class TranslationQueueManager(
     /** 翻訳アクティビティに変化があったことを通知する（ViewModel → Service同期） */
     var onActivityChanged: (() -> Unit)? = null
 
+    /** UI通知メッセージの発行コールバック（message, isLong） */
+    var onShowMessage: ((String, Boolean) -> Unit)? = null
+
     private val taskLock = Any()
     @Volatile
-    private var googleTask: TranslationTask? = null
+    private var googleTask: BaseWebTranslationTask? = null
     @Volatile
-    private var deeplTask: DeeplTranslationTask? = null
+    private var deeplTask: BaseWebTranslationTask? = null
     @Volatile
     private var googleSessionId: Long = 0L
     @Volatile
     private var deeplSessionId: Long = 0L
+
+    val llmEngine: LlmTranslationEngine = LlmTranslationEngine(appContext, scope)
 
     private val _googleState = MutableStateFlow(EngineTranslationState())
     val googleState: StateFlow<EngineTranslationState> = _googleState.asStateFlow()
@@ -49,6 +47,11 @@ class TranslationQueueManager(
         EngineTranslationState(chunkDelay = "3-8", fileDelay = "2-5")
     )
     val deeplState: StateFlow<EngineTranslationState> = _deeplState.asStateFlow()
+
+    private val _llmState = MutableStateFlow(
+        EngineTranslationState(chunkDelay = "2", fileDelay = "2")
+    )
+    val llmState: StateFlow<EngineTranslationState> = _llmState.asStateFlow()
 
     init {
         // 待機時間設定の購読（DataStore の保存値を常に反映）
@@ -64,6 +67,22 @@ class TranslationQueueManager(
         scope.launch {
             repository.deeplFileDelayFlow.collect { d -> _deeplState.update { it.copy(fileDelay = d) } }
         }
+
+        // LLMエンジンの内部ライブ状態を購読して同期
+        scope.launch {
+            llmEngine.engineState.collect { live ->
+                _llmState.update { st ->
+                    st.copy(
+                        isTranslating = live.isTranslating,
+                        statusText = live.statusText,
+                        progress = live.progress,
+                        currentFileName = live.currentFileName,
+                        chunkProgress = live.chunkProgress
+                    )
+                }
+                notifyChanged()
+            }
+        }
     }
 
     // ---- キュー操作 ----
@@ -73,6 +92,7 @@ class TranslationQueueManager(
             when (engine) {
                 TranslationEngine.GOOGLE -> repository.saveGoogleDelays(chunkDelay, fileDelay)
                 TranslationEngine.DEEPL -> repository.saveDeeplDelays(chunkDelay, fileDelay)
+                TranslationEngine.LLM_API -> {}
             }
             mutate(engine) { it.copy(chunkDelay = chunkDelay, fileDelay = fileDelay) }
         }
@@ -121,7 +141,18 @@ class TranslationQueueManager(
         val engineState = stateFor(engine)
 
         if (engineState.selectedFolders.isEmpty() && engineState.folderUri == null) {
-            Toast.makeText(appContext, "翻訳対象のフォルダを選択してください", Toast.LENGTH_SHORT).show()
+            onShowMessage?.invoke("翻訳対象のフォルダを選択してください", false)
+            return
+        }
+
+        if (engine == TranslationEngine.LLM_API) {
+            val uris = engineState.selectedFolders.mapNotNull { it.uri }.ifEmpty {
+                engineState.folderUri?.let { listOf(it) } ?: emptyList()
+            }
+            llmEngine.startTranslation(uris) {
+                onShowMessage?.invoke("[AI/LLM 翻訳] 全フォルダの処理が完了しました", true)
+                notifyChanged()
+            }
             return
         }
 
@@ -135,14 +166,9 @@ class TranslationQueueManager(
             }
         }
 
-        // 複数フォルダキューの先頭から開始
         startNextFolderInQueue(engine, 0, currentSessionId)
     }
 
-    /**
-     * 複数フォルダ連続翻訳キューの実行制御。
-     * 現在のフォルダの全話が完了したら自動的に次のフォルダへ進む。
-     */
     private fun startNextFolderInQueue(engine: TranslationEngine, folderIndex: Int, sessionId: Long) {
         synchronized(taskLock) {
             val activeSessionId = if (engine == TranslationEngine.GOOGLE) googleSessionId else deeplSessionId
@@ -158,12 +184,11 @@ class TranslationQueueManager(
         }
 
         if (folders.isEmpty() || folderIndex >= folders.size) {
-            // 全フォルダの連続翻訳が完了
             mutate(engine) {
                 it.copy(isTranslating = false, statusText = "全 ${folders.size} フォルダの翻訳が完了しました")
             }
             val engineName = if (engine == TranslationEngine.GOOGLE) "Google" else "DeepL"
-            Toast.makeText(appContext, "[$engineName 翻訳] 全 ${folders.size} フォルダの翻訳が完了しました", Toast.LENGTH_LONG).show()
+            onShowMessage?.invoke("[$engineName 翻訳] 全 ${folders.size} フォルダの翻訳が完了しました", true)
             notifyChanged()
             return
         }
@@ -185,130 +210,89 @@ class TranslationQueueManager(
         }
         notifyChanged()
 
-        when (engine) {
-            TranslationEngine.GOOGLE -> {
-                val task = TranslationTask(
-                    context = appContext,
-                    folderUri = targetUri,
-                    sourceLang = engineState.sourceLang,
-                    targetLang = engineState.targetLang,
-                    chunkDelay = engineState.chunkDelay,
-                    fileDelay = engineState.fileDelay,
-                    listener = object : TranslationTask.TranslationListener {
-                        override fun onProgress(
-                            completedFiles: Int,
-                            totalFiles: Int,
-                            currentFileName: String,
-                            currentChunk: Int,
-                            totalChunks: Int,
-                            statusText: String
-                        ) {
-                            synchronized(taskLock) {
-                                if (sessionId != googleSessionId) return
-                            }
-                            _googleState.update {
-                                it.copy(
-                                    progress = Pair(completedFiles, totalFiles),
-                                    currentFileName = currentFileName,
-                                    chunkProgress = Pair(currentChunk, totalChunks),
-                                    statusText = "${folderProgressPrefix}$statusText"
-                                )
-                            }
-                            notifyChanged()
-                        }
-
-                        override fun onTaskFinished(success: Boolean, message: String) {
-                            val shouldProceed = synchronized(taskLock) {
-                                if (sessionId == googleSessionId) {
-                                    googleTask = null
-                                    success && _googleState.value.isTranslating
-                                } else {
-                                    false
-                                }
-                            }
-                            if (shouldProceed && folderIndex + 1 < folders.size) {
-                                // 次のフォルダへ自動遷移
-                                startNextFolderInQueue(engine, folderIndex + 1, sessionId)
-                            } else if (shouldProceed) {
-                                _googleState.update {
-                                    it.copy(isTranslating = false, statusText = "${folderProgressPrefix}$message")
-                                }
-                                Toast.makeText(appContext, "[Google翻訳] $message", Toast.LENGTH_LONG).show()
-                                notifyChanged()
-                            }
-                        }
-                    }
-                )
+        val listener = object : BaseWebTranslationTask.TranslationListener {
+            override fun onProgress(
+                completedFiles: Int,
+                totalFiles: Int,
+                currentFileName: String,
+                currentChunk: Int,
+                totalChunks: Int,
+                statusText: String
+            ) {
                 synchronized(taskLock) {
-                    if (sessionId != googleSessionId) return
-                    googleTask?.stop()
-                    googleTask = task
+                    val activeSessionId = if (engine == TranslationEngine.GOOGLE) googleSessionId else deeplSessionId
+                    if (sessionId != activeSessionId) return
                 }
-                task.start()
+                mutate(engine) {
+                    it.copy(
+                        progress = Pair(completedFiles, totalFiles),
+                        currentFileName = currentFileName,
+                        chunkProgress = Pair(currentChunk, totalChunks),
+                        statusText = "${folderProgressPrefix}$statusText"
+                    )
+                }
+                notifyChanged()
             }
-            TranslationEngine.DEEPL -> {
-                val task = DeeplTranslationTask(
-                    context = appContext,
-                    folderUri = targetUri,
-                    sourceLang = engineState.sourceLang,
-                    targetLang = engineState.targetLang,
-                    chunkDelay = engineState.chunkDelay,
-                    fileDelay = engineState.fileDelay,
-                    listener = object : TranslationTask.TranslationListener {
-                        override fun onProgress(
-                            completedFiles: Int,
-                            totalFiles: Int,
-                            currentFileName: String,
-                            currentChunk: Int,
-                            totalChunks: Int,
-                            statusText: String
-                        ) {
-                            synchronized(taskLock) {
-                                if (sessionId != deeplSessionId) return
-                            }
-                            _deeplState.update {
-                                it.copy(
-                                    progress = Pair(completedFiles, totalFiles),
-                                    currentFileName = currentFileName,
-                                    chunkProgress = Pair(currentChunk, totalChunks),
-                                    statusText = "${folderProgressPrefix}$statusText"
-                                )
-                            }
-                            notifyChanged()
-                        }
 
-                        override fun onTaskFinished(success: Boolean, message: String) {
-                            val shouldProceed = synchronized(taskLock) {
-                                if (sessionId == deeplSessionId) {
-                                    deeplTask = null
-                                    success && _deeplState.value.isTranslating
-                                } else {
-                                    false
-                                }
-                            }
-                            if (shouldProceed && folderIndex + 1 < folders.size) {
-                                startNextFolderInQueue(engine, folderIndex + 1, sessionId)
-                            } else if (shouldProceed) {
-                                _deeplState.update {
-                                    it.copy(isTranslating = false, statusText = "${folderProgressPrefix}$message")
-                                }
-                                Toast.makeText(appContext, "[DeepL翻訳] $message", Toast.LENGTH_LONG).show()
-                                notifyChanged()
-                            }
-                        }
+            override fun onTaskFinished(success: Boolean, message: String) {
+                val shouldProceed = synchronized(taskLock) {
+                    val activeSessionId = if (engine == TranslationEngine.GOOGLE) googleSessionId else deeplSessionId
+                    if (sessionId == activeSessionId) {
+                        if (engine == TranslationEngine.GOOGLE) googleTask = null else deeplTask = null
+                        success && stateFor(engine).isTranslating
+                    } else {
+                        false
                     }
-                )
-                synchronized(taskLock) {
-                    if (sessionId != deeplSessionId) return
-                    deeplTask?.stop()
-                    deeplTask = task
                 }
-                task.start()
+                if (shouldProceed && folderIndex + 1 < folders.size) {
+                    startNextFolderInQueue(engine, folderIndex + 1, sessionId)
+                } else if (shouldProceed) {
+                    mutate(engine) {
+                        it.copy(isTranslating = false, statusText = "${folderProgressPrefix}$message")
+                    }
+                    val engineName = if (engine == TranslationEngine.GOOGLE) "Google" else "DeepL"
+                    onShowMessage?.invoke("[$engineName 翻訳] $message", true)
+                    notifyChanged()
+                }
             }
         }
+
+        val strategy: WebTranslationStrategy = when (engine) {
+            TranslationEngine.GOOGLE -> GoogleTranslationStrategy()
+            TranslationEngine.DEEPL -> DeeplTranslationStrategy()
+            TranslationEngine.LLM_API -> GoogleTranslationStrategy() // WebTask用フォールバック
+        }
+
+        val task = BaseWebTranslationTask(
+            context = appContext,
+            folderUri = targetUri,
+            strategy = strategy,
+            sourceLang = engineState.sourceLang,
+            targetLang = engineState.targetLang,
+            chunkDelay = engineState.chunkDelay,
+            fileDelay = engineState.fileDelay,
+            listener = listener
+        )
+
+        synchronized(taskLock) {
+            val activeSessionId = if (engine == TranslationEngine.GOOGLE) googleSessionId else deeplSessionId
+            if (sessionId != activeSessionId) return
+            if (engine == TranslationEngine.GOOGLE) {
+                googleTask?.stop()
+                googleTask = task
+            } else {
+                deeplTask?.stop()
+                deeplTask = task
+            }
+        }
+        task.start()
     }
 
     fun stop(engine: TranslationEngine) {
+        if (engine == TranslationEngine.LLM_API) {
+            llmEngine.stopTranslation()
+            return
+        }
         synchronized(taskLock) {
             when (engine) {
                 TranslationEngine.GOOGLE -> {
@@ -329,13 +313,14 @@ class TranslationQueueManager(
                         it.copy(isTranslating = false, statusText = "DeepL翻訳を停止しました")
                     }
                 }
+                TranslationEngine.LLM_API -> {}
             }
         }
         notifyChanged()
     }
 
-    /** ViewModel 破棄時の後始末（状態文言は更新しない） */
     fun shutdown() {
+        llmEngine.stopTranslation()
         synchronized(taskLock) {
             googleSessionId++
             deeplSessionId++
@@ -353,12 +338,17 @@ class TranslationQueueManager(
     // ---- 内部ユーティリティ ----
 
     private fun stateFor(engine: TranslationEngine): EngineTranslationState =
-        if (engine == TranslationEngine.GOOGLE) _googleState.value else _deeplState.value
+        when (engine) {
+            TranslationEngine.GOOGLE -> _googleState.value
+            TranslationEngine.DEEPL -> _deeplState.value
+            TranslationEngine.LLM_API -> _llmState.value
+        }
 
     private fun mutate(engine: TranslationEngine, f: (EngineTranslationState) -> EngineTranslationState) {
         when (engine) {
             TranslationEngine.GOOGLE -> _googleState.update(f)
             TranslationEngine.DEEPL -> _deeplState.update(f)
+            TranslationEngine.LLM_API -> _llmState.update(f)
         }
     }
 

@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.util.Log
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
@@ -16,10 +15,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -28,19 +25,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.documentfile.provider.DocumentFile
-import com.example.novelscraper.ActiveDialog
-import com.example.novelscraper.EngineTranslationState
-import com.example.novelscraper.MainUiState
-import com.example.novelscraper.Overlay
-import com.example.novelscraper.PanelType
-import com.example.novelscraper.ScrapingViewModel
-import com.example.novelscraper.TranslationEngine
-import com.example.novelscraper.WebViewHelper
+import com.example.novelscraper.*
+import com.example.novelscraper.translation.llm.engine.LlmEngineState
+import com.example.novelscraper.translation.llm.ui.LlmSettingsDialog
 import com.example.novelscraper.ui.components.*
 import com.example.novelscraper.ui.theme.AppColors
 
 /**
- * MainScreen と Activity の境界コールバック集約。
+ * MainScreen から Activity への通知用コールバック群。
  */
 data class MainScreenCallbacks(
     val onStartScraping: (String) -> Unit,
@@ -50,11 +42,12 @@ data class MainScreenCallbacks(
     val onInjectInspector: (WebView?) -> Unit,
     val onRemoveInspector: (WebView?) -> Unit,
     val onNavigate: (String, WebView) -> Unit,
-    val onTestRun: (WebView) -> Unit,
     val onRequestExclude: (String) -> Unit,
+    val onTestRun: (WebView) -> Unit,
     val onToggleLiveTranslate: (WebView?) -> Unit
 )
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     viewModel: ScrapingViewModel,
@@ -143,12 +136,20 @@ fun MainScreen(
         topBar = {
             HeaderToolbar(
                 uiState = uiState,
-                onBackClick = { webViewRef?.let { if (it.canGoBack()) it.goBack() } },
-                onForwardClick = { webViewRef?.let { if (it.canGoForward()) it.goForward() } },
+                onBackClick = {
+                    webViewRef?.let { view ->
+                        if (view.canGoBack()) view.goBack()
+                    }
+                },
+                onForwardClick = {
+                    webViewRef?.let { view ->
+                        if (view.canGoForward()) view.goForward()
+                    }
+                },
                 onStarClick = {
-                    val url = webViewRef?.url ?: uiState.currentUrl
-                    val title = webViewRef?.title ?: "No Title"
+                    val url = uiState.currentUrl
                     if (url.isNotEmpty()) {
+                        val title = webViewRef?.title?.ifEmpty { url } ?: url
                         viewModel.showAddFavoriteDialog(title, url)
                     }
                 },
@@ -156,26 +157,27 @@ fun MainScreen(
                     viewModel.togglePanel(PanelType.FAVORITES)
                 },
                 onUrlSubmit = { url ->
-                    viewModel.setInputUrl(url)
-                    webViewRef?.let { view -> callbacks.onNavigate(url, view) }
+                    viewModel.setCurrentUrl(url)
+                    webViewRef?.let { callbacks.onNavigate(url, it) }
                 },
                 onUrlChange = { viewModel.setInputUrl(it) },
-                onPanelToggle = { panel -> viewModel.togglePanel(panel) },
+                onPanelToggle = { panel ->
+                    viewModel.togglePanel(panel)
+                },
                 onInspectModeToggle = {
                     viewModel.setInspectMode(!uiState.isInspectMode)
                 },
                 onInspectToolClick = {
                     webViewRef?.let { callbacks.onLaunchAnalysisTool(it) }
                 },
-                onTestRunClick = {
-                    if (uiState.overlay is Overlay.TestResult) {
-                        viewModel.setTestResult(null)
-                    } else {
-                        webViewRef?.let { callbacks.onTestRun(it) }
-                    }
-                },
                 onToggleDesktopModeClick = {
-                    viewModel.setDesktopMode(!uiState.isDesktopMode)
+                    val nextDesktop = !uiState.isDesktopMode
+                    viewModel.setDesktopMode(nextDesktop)
+                    webViewRef?.let { view ->
+                        WebViewHelper.applyStandardSettings(view, isDesktop = nextDesktop)
+                        view.evaluateJavascript(WebViewHelper.buildDesktopViewportJs(nextDesktop), null)
+                        view.reload()
+                    }
                 },
                 onToggleDarkModeClick = {
                     viewModel.toggleWebViewDarkMode()
@@ -193,6 +195,9 @@ fun MainScreen(
                             callbacks.onStartScraping(url)
                         }
                     }
+                },
+                onTestRunClick = {
+                    webViewRef?.let { callbacks.onTestRun(it) }
                 }
             )
         },
@@ -231,8 +236,10 @@ fun MainScreen(
                                     url?.let {
                                         if (it.isNotEmpty() && !it.startsWith("javascript:")) {
                                             viewModel.setCurrentUrl(it)
+                                            WebViewHelper.clearGoogleTranslateCookies(it)
                                         }
                                     }
+                                    view?.evaluateJavascript(WebViewHelper.buildDesktopViewportJs(uiState.isDesktopMode), null)
                                     if (uiState.isInspectMode) {
                                         callbacks.onInjectInspector(view)
                                     }
@@ -242,8 +249,6 @@ fun MainScreen(
                         }
                     },
                     update = { view ->
-                        // UIスレッドを同期ブロックする view.visibility 切り替えを廃止し、
-                        // タッチ入力と graphicsLayer アルファのみで安全・瞬時に制御
                         view.isEnabled = uiState.overlay == Overlay.None || uiState.overlay is Overlay.InspectMode
                         if (view.settings.blockNetworkImage != uiState.blockImages) {
                             view.settings.blockNetworkImage = uiState.blockImages
@@ -264,7 +269,7 @@ fun MainScreen(
                         .weight(1f)
                         .graphicsLayer {
                             clip = true
-                            alpha = if (uiState.overlay == Overlay.None) 1f else 0f
+                            alpha = if (uiState.overlay == Overlay.None || uiState.overlay is Overlay.InspectMode) 1f else 0f
                         }
                 )
 
@@ -273,6 +278,7 @@ fun MainScreen(
                     isAnyTranslating = uiState.isAnyTranslating,
                     googleState = uiState.googleTranslationState,
                     deeplState = uiState.deeplTranslationState,
+                    llmState = uiState.llmEngineLiveState,
                     currentStatusText = currentStatusText
                 )
             }
@@ -342,17 +348,20 @@ fun MainScreen(
                     PanelType.TRANSLATION -> {
                         TranslationPanel(
                             uiState = uiState,
+                            llmConfig = viewModel.getLlmConfig(),
                             onSelectEngineTab = { engine -> viewModel.setActiveTranslationEngine(engine) },
                             onSelectFolderClick = { folderLauncher.launch(null) },
                             onRemoveFolderClick = { engine, index -> viewModel.removeTranslationFolder(engine, index) },
                             onClearFoldersClick = { engine -> viewModel.clearTranslationFolders(engine) },
                             onUpdateDelays = { engine, chunkDelay, fileDelay -> viewModel.updateTranslationDelays(engine, chunkDelay, fileDelay) },
+                            onOpenLlmSettingsClick = { viewModel.showLlmSettingsDialog() },
                             onStartTranslationClick = { engine -> viewModel.startTranslation(engine) },
                             onStopTranslationClick = { engine -> viewModel.stopTranslation(engine) },
                             onOpenWebTranslateClick = { engine ->
                                 val targetUrl = when (engine) {
                                     TranslationEngine.GOOGLE -> "https://translate.google.com/?sl=auto&tl=ja&op=translate"
                                     TranslationEngine.DEEPL -> "https://www.deepl.com/ja/translator#auto/ja/"
+                                    TranslationEngine.LLM_API -> "https://aistudio.google.com/"
                                 }
                                 webViewRef?.let { callbacks.onNavigate(targetUrl, it) }
                                 viewModel.setCurrentUrl(targetUrl)
@@ -427,6 +436,16 @@ fun MainScreen(
                         onDismiss = { viewModel.dismissDialog() }
                     )
                 }
+                is ActiveDialog.LlmSettings -> {
+                    LlmSettingsDialog(
+                        currentConfig = viewModel.getLlmConfig(),
+                        onSaveConfig = { newConfig ->
+                            viewModel.updateLlmConfig(newConfig)
+                            Toast.makeText(context, "AI翻訳設定を保存しました", Toast.LENGTH_SHORT).show()
+                        },
+                        onDismiss = { viewModel.dismissDialog() }
+                    )
+                }
                 ActiveDialog.None -> {}
             }
         }
@@ -441,9 +460,12 @@ private fun AppStatusBar(
     isAnyTranslating: Boolean,
     googleState: EngineTranslationState,
     deeplState: EngineTranslationState,
+    llmState: LlmEngineState,
     currentStatusText: String
 ) {
     val translationStatus = when {
+        llmState.isTranslating ->
+            "LLM翻訳: ${llmState.statusText}"
         googleState.isTranslating && deeplState.isTranslating ->
             "Google: ${googleState.progress.first}/${googleState.progress.second}件 | DeepL: ${deeplState.progress.first}/${deeplState.progress.second}件"
         googleState.isTranslating ->

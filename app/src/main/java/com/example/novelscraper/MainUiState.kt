@@ -1,6 +1,7 @@
 package com.example.novelscraper
 
 import android.net.Uri
+import com.example.novelscraper.translation.llm.engine.LlmEngineState
 import kotlinx.serialization.Serializable
 
 enum class PanelType { SETTINGS, HISTORY, FAVORITES, TRANSLATION }
@@ -27,9 +28,18 @@ sealed interface ActiveDialog {
     data class AddFavorite(val title: String, val url: String) : ActiveDialog
     data class SavePreset(val defaultName: String, val currentUrl: String) : ActiveDialog
     data class InspectElement(val selector: String) : ActiveDialog
+    data object LlmSettings : ActiveDialog
 }
 
-enum class TranslationEngine { GOOGLE, DEEPL }
+/**
+ * One-shot UI イベント（Toast 表示など、画面のライフサイクルと同期した一時的通知）。
+ */
+sealed interface UiEvent {
+    data class ShowToast(val message: String, val isLong: Boolean = false) : UiEvent
+    data class NavigateToUrl(val url: String) : UiEvent
+}
+
+enum class TranslationEngine { GOOGLE, DEEPL, LLM_API }
 
 @Serializable
 data class ExcludeCandidate(
@@ -60,6 +70,9 @@ data class EngineTranslationState(
     val fileDelay: String = "1-2"
 )
 
+/**
+ * アプリ全体の完全一元化 UI 状態 (Single Source of Truth)。
+ */
 data class MainUiState(
     val currentUrl: String = "",
     val inputUrl: String = "",
@@ -72,6 +85,13 @@ data class MainUiState(
     val isDesktopMode: Boolean = false,
     val isWebViewDarkMode: Boolean = true,
 
+    // 一元化されたプリセット・お気に入り・履歴・タスクリスト
+    val presets: Map<String, ScraperConfig> = emptyMap(),
+    val favorites: Map<String, String> = emptyMap(),
+    val history: Map<String, HistoryItem> = emptyMap(),
+    val activeTasks: List<ScrapingTask> = emptyList(),
+    val currentStatusText: String = "待機中",
+
     // Webサイト即時翻訳 (インプレースDOM翻訳) 状態
     val isLiveTranslating: Boolean = false,
     val isLiveTranslated: Boolean = false,
@@ -79,24 +99,23 @@ data class MainUiState(
     // 翻訳関連の状態（エンジンごとに独立管理）
     val activeTranslationEngine: TranslationEngine = TranslationEngine.GOOGLE,
     val googleTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "1-3", fileDelay = "1-2"),
-    val deeplTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "3-8", fileDelay = "2-5")
+    val deeplTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "3-8", fileDelay = "2-5"),
+    val llmTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "2", fileDelay = "2"),
+    val llmEngineLiveState: LlmEngineState = LlmEngineState()
 ) {
-    /** インスペクター有効か（既存参照互換の派生プロパティ） */
     val isInspectMode: Boolean
         get() = overlay is Overlay.InspectMode
 
-    /** 現在開いているパネル（なければnull・既存参照互換の派生プロパティ） */
     val activePanelType: PanelType?
         get() = (overlay as? Overlay.Panel)?.type
 
-    /** 現在選択中のタブの翻訳エンジン状態 */
     val currentEngineState: EngineTranslationState
         get() = when (activeTranslationEngine) {
             TranslationEngine.GOOGLE -> googleTranslationState
             TranslationEngine.DEEPL -> deeplTranslationState
+            TranslationEngine.LLM_API -> llmTranslationState
         }
 
-    /** いずれかのエンジンが翻訳中かどうか */
     val isAnyTranslating: Boolean
-        get() = googleTranslationState.isTranslating || deeplTranslationState.isTranslating
+        get() = googleTranslationState.isTranslating || deeplTranslationState.isTranslating || llmEngineLiveState.isTranslating
 }

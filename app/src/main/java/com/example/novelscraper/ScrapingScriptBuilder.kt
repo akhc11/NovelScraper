@@ -303,12 +303,21 @@ object ScrapingScriptBuilder {
                     { key: 'exclude', label: '除外' }
                 ];
 
+                // 翻訳 Cookie のパージ（インスペクター起動時の安全確保）
+                try {
+                    document.cookie = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+                    document.cookie = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC;";
+                    document.cookie = "googtrans=/auto/null; path=/;";
+                } catch(e){}
+
                 var style = document.createElement('style');
-                style.innerHTML = '.__novel_mark_title { outline: 3px solid #2196F3 !important; } .__novel_mark_body { outline: 3px solid #4CAF50 !important; } .__novel_mark_next { outline: 3px solid #FF9800 !important; }';
+                style.innerHTML = '.__novel_notranslate, .notranslate, .skiptranslate { -webkit-user-select: auto; } .__novel_mark_title { outline: 3px solid #2196F3 !important; } .__novel_mark_body { outline: 3px solid #4CAF50 !important; } .__novel_mark_next { outline: 3px solid #FF9800 !important; }';
                 document.head.appendChild(style);
 
                 var hint = document.createElement('div');
                 hint.id = '__novel_hint';
+                hint.className = '__novel_notranslate notranslate skiptranslate';
+                hint.setAttribute('translate', 'no');
                 hint.innerText = '要素をタップして候補から設定';
                 hint.style = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.85);color:#fff;padding:6px 14px;border-radius:16px;z-index:2147483647;font-size:12px;';
                 document.body.appendChild(hint);
@@ -416,6 +425,8 @@ object ScrapingScriptBuilder {
 
                     popup = document.createElement('div');
                     popup.id = '__novel_popup';
+                    popup.className = '__novel_notranslate notranslate skiptranslate';
+                    popup.setAttribute('translate', 'no');
                     popup.style = 'position:fixed;background:#222;color:#fff;z-index:2147483646;font-size:12px;border-radius:6px;box-shadow:0 3px 10px rgba(0,0,0,0.6);max-width:360px;width:min(92vw,360px);max-height:70vh;display:flex;flex-direction:column;overflow:hidden;';
 
                     var header = document.createElement('div');

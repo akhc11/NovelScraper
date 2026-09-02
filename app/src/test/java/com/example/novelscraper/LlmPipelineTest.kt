@@ -210,6 +210,46 @@ class LlmPipelineTest {
     }
 
     @Test
+    fun testEffectiveSplitThreshold_AutoAndManual() {
+        val config = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig(
+            enableAutoLanguageSize = true,
+            langSplitKoreanKb = 25,
+            langSplitChineseKb = 20,
+            langSplitEnglishKb = 15
+        )
+        val profile = com.example.novelscraper.translation.llm.engine.ModelProfile(modelName = "gemini-3.5-flash", splitThresholdBytes = 13000)
+
+        // 自動サイズ有効時
+        assertEquals(25000, config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, profile))
+        assertEquals(20000, config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, profile))
+        assertEquals(15000, config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, profile))
+
+        // 自動サイズ無効時 (手動固定)
+        val manualConfig = config.copy(enableAutoLanguageSize = false)
+        assertEquals(13000, manualConfig.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, profile))
+        assertEquals(13000, manualConfig.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, profile))
+        assertEquals(13000, manualConfig.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, profile))
+    }
+
+    @Test
+    fun testEffectivePromptOrder_AutoAndManual() {
+        // 成人向け (4, 7) を手動設定したプロファイル
+        val nsfwProfile = com.example.novelscraper.translation.llm.engine.ModelProfile(modelName = "gemini-3.5-flash", promptOrder = listOf(4, 7))
+
+        // 1. 自動選択OFF (デフォルト): 手動設定 (4, 7) が100%最優先されること
+        val defaultManualConfig = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig(enableAutoPromptOrder = false)
+        assertEquals(listOf(4, 7), defaultManualConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, nsfwProfile))
+        assertEquals(listOf(4, 7), defaultManualConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, nsfwProfile))
+        assertEquals(listOf(4, 7), defaultManualConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, nsfwProfile))
+
+        // 2. 自動選択ON: 言語に応じた最適プロンプトに自動切替されること
+        val autoConfig = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig(enableAutoPromptOrder = true)
+        assertEquals(listOf(3, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, nsfwProfile))
+        assertEquals(listOf(1, 1), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, nsfwProfile))
+        assertEquals(listOf(2, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, nsfwProfile))
+    }
+
+    @Test
     fun testTextCharsetDetector_BOMAndFallback() {
         val utf8Bytes = "こんにちは世界".toByteArray(Charsets.UTF_8)
         val decodedUtf8 = TextCharsetDetector.decodeBytes(utf8Bytes)

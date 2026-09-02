@@ -191,6 +191,16 @@ class LlmTranslationEngine(
             detected
         }
 
+        val primaryProfile = config.modelProfiles.firstOrNull() ?: ModelProfile(modelName = "gemini-3.5-flash")
+        val splitThreshold = config.getEffectiveSplitThreshold(sourceLang, primaryProfile)
+        val sizeLog = if (config.enableAutoLanguageSize) " (言語別サイズ自動: ${splitThreshold / 1000}KB)" else " (固定サイズ: ${splitThreshold / 1000}KB)"
+        val promptOrderLog = if (config.enableAutoPromptOrder) {
+            " (プロンプト自動選択: ${config.getEffectivePromptOrder(sourceLang, primaryProfile)})"
+        } else {
+            " (手動プロンプト: ${primaryProfile.promptOrder})"
+        }
+        addLog("⚙️ 翻訳パラメータ: ${sourceLang.displayName}$sizeLog$promptOrderLog")
+
         // 人名辞書生成 (有効時: 動的プロバイダー & 並列バッチ)
         var novelDict: NovelDictionary? = null
         if (config.enableDictGen) {
@@ -387,10 +397,11 @@ class LlmTranslationEngine(
             } else null
 
             val workDir = outputDir.findFile(".parts_${fileName}")
+            val effectiveSplitThreshold = config.getEffectiveSplitThreshold(sourceLang, primaryProfile)
 
-            if (workDir != null || fsize > primaryProfile.splitThresholdBytes) {
+            if (workDir != null || fsize > effectiveSplitThreshold) {
                 // 大ファイル: 分割翻訳 (レジューム対応)
-                addLog("[W#$workerId] $fileName (大ファイル: ${fsize}B / 専有キー[${rotationManager.getCurrentKeyIndex() + 1}])")
+                addLog("[W#$workerId] $fileName (大ファイル: ${fsize}B [閾値:${effectiveSplitThreshold}B] / 専有キー[${rotationManager.getCurrentKeyIndex() + 1}])")
                 val success = LargeFileTranslator.translateLargeFile(
                     context = context,
                     fileName = fileName,
@@ -462,7 +473,7 @@ class LlmTranslationEngine(
                 addLog("[W#$workerId] 🔄 $fileName: ${prev.modelName} 全失敗 → ${profile.modelName} (${profile.provider.name}) へフォールバック")
             }
 
-            val promptList = profile.promptOrder.ifEmpty { listOf(1, 1) }
+            val promptList = config.getEffectivePromptOrder(sourceLang, profile).ifEmpty { listOf(1, 1) }
 
             // --- 2. プロンプトループ ---
             for (promptNum in promptList) {

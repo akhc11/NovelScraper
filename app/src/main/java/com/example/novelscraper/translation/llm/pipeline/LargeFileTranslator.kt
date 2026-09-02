@@ -37,7 +37,7 @@ object LargeFileTranslator {
     ): Boolean {
         val profiles = config.modelProfiles.ifEmpty { listOf(ModelProfile(modelName = "gemini-3.5-flash")) }
         val primaryProfile = profiles.first()
-        val chunkSize = primaryProfile.chunkSizeBytes
+        val chunkSize = config.getEffectiveChunkSize(sourceLang, primaryProfile)
 
         // 作業ディレクトリ .parts_${filename}
         val workDirName = ".parts_${fileName}"
@@ -123,7 +123,7 @@ object LargeFileTranslator {
                     onLog("  🔄 $chunkName: ${prevProf.modelName} 全失敗 → ${profile.modelName} (${profile.provider.name}) へフォールバック")
                 }
 
-                val promptList = profile.promptOrder.ifEmpty { listOf(1, 1) }
+                val promptList = config.getEffectivePromptOrder(sourceLang, profile).ifEmpty { listOf(1, 1) }
 
                 // --- 2. プロンプトループ ---
                 for (promptNum in promptList) {

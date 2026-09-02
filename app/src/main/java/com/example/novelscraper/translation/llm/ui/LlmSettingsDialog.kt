@@ -89,6 +89,13 @@ fun LlmSettingsDialog(
     var dictRequestDelaySecText by remember { mutableStateOf(currentConfig.dictRequestDelaySec.toString()) }
     var dict429CooldownSecText by remember { mutableStateOf(currentConfig.dict429CooldownSec.toString()) }
 
+    var enableAutoLanguageSize by remember { mutableStateOf(currentConfig.enableAutoLanguageSize) }
+    var langSplitKoreanKbText by remember { mutableStateOf(currentConfig.langSplitKoreanKb.toString()) }
+    var langSplitChineseKbText by remember { mutableStateOf(currentConfig.langSplitChineseKb.toString()) }
+    var langSplitEnglishKbText by remember { mutableStateOf(currentConfig.langSplitEnglishKb.toString()) }
+
+    var enableAutoPromptOrder by remember { mutableStateOf(currentConfig.enableAutoPromptOrder) }
+
     var enablePrevSrcContext by remember { mutableStateOf(currentConfig.enablePrevSrcContext) }
     var outputSubDir by remember { mutableStateOf(currentConfig.outputSubDir) }
 
@@ -521,6 +528,40 @@ fun LlmSettingsDialog(
                             Spacer(modifier = Modifier.height(6.dp))
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = enableAutoLanguageSize, onCheckedChange = { enableAutoLanguageSize = it })
+                                Text("言語別の分割サイズ自動調整 (推奨)", color = AppColors.textPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (enableAutoLanguageSize) {
+                                Text("言語別の分割閾値 (KB):", color = AppColors.textSecondary, fontSize = 10.sp)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("韓国語 (KB):", color = AppColors.textSecondary, fontSize = 9.sp)
+                                        BasicInputArea(value = langSplitKoreanKbText, onValueChange = { langSplitKoreanKbText = it })
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("中国語 (KB):", color = AppColors.textSecondary, fontSize = 9.sp)
+                                        BasicInputArea(value = langSplitChineseKbText, onValueChange = { langSplitChineseKbText = it })
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("英語 (KB):", color = AppColors.textSecondary, fontSize = 9.sp)
+                                        BasicInputArea(value = langSplitEnglishKbText, onValueChange = { langSplitEnglishKbText = it })
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = enableAutoPromptOrder, onCheckedChange = { enableAutoPromptOrder = it })
+                                Column {
+                                    Text("言語連動 プロンプト自動選択 (韓:3,7 / 中:1,1 / 英:2,7)", color = AppColors.textPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Text("※OFF時は各モデルの手動プロンプト順序（成人向け等）を最優先", color = AppColors.textSecondary, fontSize = 9.sp)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(checked = enableCompletionMarker, onCheckedChange = { enableCompletionMarker = it })
                                 Text("[SRC_END] 完了マーカー (途絶自動検出)", color = AppColors.textPrimary, fontSize = 11.sp)
                             }
@@ -651,7 +692,12 @@ fun LlmSettingsDialog(
                                 dict429CooldownSec = dict429CooldownSecText.toIntOrNull()?.coerceIn(5, 300) ?: 60,
                                 parallelWorkers = parallelWorkers,
                                 enablePrevSrcContext = enablePrevSrcContext,
-                                requestDelaySec = requestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 2
+                                requestDelaySec = requestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 2,
+                                enableAutoLanguageSize = enableAutoLanguageSize,
+                                langSplitKoreanKb = langSplitKoreanKbText.toIntOrNull()?.coerceIn(5, 100) ?: 25,
+                                langSplitChineseKb = langSplitChineseKbText.toIntOrNull()?.coerceIn(5, 100) ?: 20,
+                                langSplitEnglishKb = langSplitEnglishKbText.toIntOrNull()?.coerceIn(5, 100) ?: 15,
+                                enableAutoPromptOrder = enableAutoPromptOrder
                             )
                             onSaveConfig(newConfig)
                         },

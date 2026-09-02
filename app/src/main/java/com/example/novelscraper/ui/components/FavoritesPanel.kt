@@ -26,7 +26,7 @@ fun FavoritesPanel(
     modifier: Modifier = Modifier
 ) {
     val sortedFavorites = remember(favorites) {
-        favorites.keys.toList().sorted()
+        favorites.keys.sorted()
     }
 
     Column(

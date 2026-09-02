@@ -8,19 +8,23 @@ import android.util.Log
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.*
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-
 import kotlin.random.Random
 
-class TranslationTask(
+/**
+ * Webバックグラウンド翻訳タスクの共通基底クラス。
+ * Google 翻訳・DeepL 翻訳などの共通ワークフロー（DOM制御、ファイル処理、チャンク分割、リトライ、ディレイ計算）を集約し、
+ * DRY (Don't Repeat Yourself) を達成する。
+ */
+open class BaseWebTranslationTask(
     private val context: Context,
     private val folderUri: Uri,
+    private val strategy: WebTranslationStrategy,
     private val sourceLang: String = "auto",
     private val targetLang: String = "ja",
-    private val chunkDelay: String = "1-3",
-    private val fileDelay: String = "1-2",
+    private val chunkDelay: String = "",
+    private val fileDelay: String = "",
     private val listener: TranslationListener
 ) {
 
@@ -36,16 +40,9 @@ class TranslationTask(
         fun onTaskFinished(success: Boolean, message: String)
     }
 
-    @Serializable
-    private data class DomResult(
-        val status: String = "",
-        val text: String = "",
-        val message: String = ""
-    )
-
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val fileStore = TranslationFileStore(context, TranslationFileStore.GOOGLE_OUTPUT_FOLDER)
+    private val fileStore = TranslationFileStore(context, strategy.outputFolderName)
 
     // バックグラウンド専用の独立したWebView（画面のCompose/Activityライフサイクルから完全に分離）
     private val webView = WebView(context.applicationContext)
@@ -56,61 +53,8 @@ class TranslationTask(
     @Volatile
     private var isRunning = false
 
-    companion object {
-        private const val TAG = "TranslationTask"
-        private const val MAX_CHUNK_SIZE = 3500
-        private const val MAX_CHUNK_RETRIES = 2
-
-        // ---- 事前構築済みJSスクリプト（GC負荷削減） ----
-
-        /** textareaの存在確認 */
-        private const val JS_CHECK_DOM_READY = """(function(){var ta=document.querySelector('textarea[aria-label]')||document.querySelector('textarea');return ta?"READY":"WAIT"})()"""
-
-        /** クリアボタンクリック + textarea直接クリアの二重保証 */
-        private const val JS_CLEAR = """(function(){try{var b=document.querySelector('button[aria-label*="Clear"],button[aria-label*="消去"],button[aria-label*="クリア"],button[jsname="RPbQ0e"]');if(b)b.click();var ta=document.querySelector('textarea[aria-label]')||document.querySelector('textarea');if(ta){ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));ta.dispatchEvent(new Event('change',{bubbles:true}))}return"OK"}catch(e){return"ERROR: "+e.message}})()"""
-
-        /** 結果エリアが空か確認 */
-        private const val JS_CHECK_EMPTY = """(function(){var s=document.querySelectorAll('span[jsname="W297wb"],span[jsname="jqKxS"],div[data-result-index] span,span[data-language-to-translate-into]');if(!s||s.length===0)return"EMPTY";var t="";for(var i=0;i<s.length;i++)t+=(s[i].innerText||s[i].textContent||'');return t.trim().length===0?"EMPTY":"NOT_EMPTY"})()"""
-
-        /** 1. 入力枠のフォーカス & 全選択（手動クリック操作を模倣） */
-        private const val JS_FOCUS_AND_SELECT = """(function(){try{var ta=document.querySelector('textarea[aria-label]')||document.querySelector('textarea');if(!ta)return"NO_TEXTAREA";ta.focus();ta.select();return"OK"}catch(e){return"ERROR: "+e.message}})()"""
-
-        /**
-         * 2. テキスト貼り付け & 確定スクリプトテンプレート（Ctrl+V 手動貼り付けの完全再現）。
-         * %s を JSONエンコード済みテキストで置換して使用する。
-         * ClipboardEvent paste → InputEvent insertFromPaste → change の順で発火（ルール7死守）。
-         */
-        private const val JS_PASTE_AND_INPUT = """(function(){try{var ta=document.querySelector('textarea[aria-label]')||document.querySelector('textarea');if(!ta)return"NO_TEXTAREA";var dt=new DataTransfer();dt.setData('text/plain',%s);var pe=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt});ta.dispatchEvent(pe);if(!ta.value||ta.value.trim().length===0)ta.value=%s;ta.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertFromPaste',data:%s}));ta.dispatchEvent(new Event('change',{bubbles:true}));return"OK"}catch(e){return"ERROR: "+e.message}})()"""
-
-        /** 翻訳結果取得（プログレスバーチェック + 難読化変更に耐えうる多層フォールバックセレクタ） */
-        private const val JS_GET_RESULT = """(function(){try{var pb=document.querySelectorAll('div[role="progressbar"],div[aria-valuemin]');for(var i=0;i<pb.length;i++){var s=window.getComputedStyle(pb[i]);if(s.display!=='none'&&s.visibility!=='hidden'&&pb[i].offsetParent!==null)return JSON.stringify({status:"TRANSLATING",text:""})}var sp=document.querySelectorAll('span[jsname="W297wb"],span[jsname="jqKxS"]');if(!sp||sp.length===0){sp=document.querySelectorAll('div[data-result-index] span,span[data-language-to-translate-into],div[role="region"] span,div[aria-live="polite"] span')}if(sp&&sp.length>0){var tp=[];for(var i=0;i<sp.length;i++){var t=sp[i].innerText||sp[i].textContent||'';if(t&&t.indexOf("翻訳結果を利用できます")===-1&&t.indexOf("Translation result")===-1&&t.indexOf("翻訳中")===-1)tp.push(t)}var c=tp.join('');if(c.trim().length>0)return JSON.stringify({status:"OK",text:c})}return JSON.stringify({status:"WAITING",text:""})}catch(e){return JSON.stringify({status:"ERROR",message:e.message})}})()"""
-
-        /**
-         * 範囲指定（"30-80" や "1-3"）または単一指定からランダムな待機時間（ミリ秒）を計算する。
-         */
-        fun calculateDelayMs(delayStr: String, defaultSec: Double = 2.0): Long {
-            return try {
-                if (delayStr.contains("-")) {
-                    val parts = delayStr.split("-")
-                    val min = parts[0].trim().toDoubleOrNull() ?: defaultSec
-                    val max = parts.getOrNull(1)?.trim()?.toDoubleOrNull() ?: min
-                    val actualMin = min.coerceAtLeast(0.1)
-                    val actualMax = max.coerceAtLeast(actualMin)
-                    val randomSec = if (actualMin >= actualMax) actualMin else Random.nextDouble(actualMin, actualMax)
-                    (randomSec * 1000).toLong()
-                } else {
-                    val sec = delayStr.toDoubleOrNull() ?: defaultSec
-                    val jitter = Random.nextDouble(-0.3, 0.3)
-                    ((sec + jitter).coerceAtLeast(0.1) * 1000).toLong()
-                }
-            } catch (_: Exception) {
-                (defaultSec * 1000).toLong()
-            }
-        }
-    }
-
     init {
-        WebViewHelper.applyStandardSettings(webView, blockImages = false, isDesktop = false)
+        WebViewHelper.applyStandardSettings(webView, blockImages = false, isDesktop = strategy.isDesktop)
         WebViewHelper.applyVirtualSize(webView) // ヘッドレス（0x0）判定を解除
     }
 
@@ -134,12 +78,12 @@ class TranslationTask(
                 }
 
                 val totalFiles = pendingFiles.size
-                listener.onProgress(0, totalFiles, "", 0, 0, "Google翻訳を初期化中...")
+                listener.onProgress(0, totalFiles, "", 0, 0, "${strategy.engineName}翻訳を初期化中...")
 
-                val targetUrl = "https://translate.google.com/?sl=$sourceLang&tl=$targetLang&op=translate"
+                val targetUrl = strategy.buildTargetUrl(sourceLang, targetLang)
 
-                // 独立した裏WebViewでGoogle翻訳を初期化
-                if (webView.url?.contains("translate.google.com") != true) {
+                // 独立した裏WebViewで翻訳ページを初期化
+                if (!strategy.isTargetPageUrl(webView.url)) {
                     val pageLoaded = CompletableDeferred<Boolean>()
 
                     webView.webViewClient = object : WebViewClient() {
@@ -152,12 +96,12 @@ class TranslationTask(
 
                     webView.loadUrl(targetUrl)
 
-                    val isLoaded = withTimeoutOrNull(25000L) {
+                    val isLoaded = withTimeoutOrNull(strategy.pageLoadTimeoutMs) {
                         pageLoaded.await()
                     } ?: false
 
                     if (!isLoaded || !isRunning) {
-                        throw IllegalStateException("Google翻訳のページ読み込みに失敗しました")
+                        throw IllegalStateException("${strategy.engineName}翻訳のページ読み込みに失敗しました")
                     }
                 }
 
@@ -192,7 +136,7 @@ class TranslationTask(
                         continue
                     }
 
-                    val chunks = TextChunker.splitIntoChunks(originalContent, MAX_CHUNK_SIZE)
+                    val chunks = TextChunker.splitIntoChunks(originalContent, strategy.maxChunkSize)
                     val totalChunks = chunks.size
                     val translatedChunks = mutableListOf<String>()
                     var fileSuccess = true
@@ -206,7 +150,7 @@ class TranslationTask(
                         val currentChunkNum = chunkIndex + 1
                         listener.onProgress(
                             completedCount, totalFiles, fileInfo.name, currentChunkNum, totalChunks,
-                            "翻訳中 ($currentFileNum/$totalFiles, チャンク $currentChunkNum/$totalChunks)"
+                            "${strategy.engineName}翻訳中 ($currentFileNum/$totalFiles, チャンク $currentChunkNum/$totalChunks)"
                         )
 
                         // チャンク翻訳（リトライ対応 & 前世代重複防止）
@@ -238,7 +182,7 @@ class TranslationTask(
                         lastChunkResultText = chunkResult
 
                         // チャンク間待機（範囲ランダム指定）
-                        val actualChunkDelay = calculateDelayMs(chunkDelay, 1.5)
+                        val actualChunkDelay = calculateDelayMs(chunkDelay, strategy.defaultChunkDelaySec)
                         delay(actualChunkDelay)
                     }
 
@@ -267,20 +211,20 @@ class TranslationTask(
                     }
 
                     // ファイル間待機（範囲ランダム指定）
-                    val actualFileDelay = calculateDelayMs(fileDelay, 1.0)
+                    val actualFileDelay = calculateDelayMs(fileDelay, strategy.defaultFileDelaySec)
                     delay(actualFileDelay)
                 }
 
                 if (isRunning) {
-                    val finishMessage = "全 $completedCount / $totalFiles 件の翻訳が完了しました"
+                    val finishMessage = "${strategy.engineName}: 全 $completedCount / $totalFiles 件の翻訳が完了しました"
                     listener.onProgress(completedCount, totalFiles, "", 0, 0, finishMessage)
                     listener.onTaskFinished(true, finishMessage)
                 }
 
             } catch (e: CancellationException) {
-                listener.onTaskFinished(false, "翻訳を中断しました")
+                listener.onTaskFinished(false, "${strategy.engineName}翻訳を中断しました")
             } catch (e: Exception) {
-                Log.e(TAG, "TranslationTask error", e)
+                Log.e(TAG, "BaseWebTranslationTask error", e)
                 listener.onTaskFinished(false, "エラー: ${e.message}")
             } finally {
                 stop()
@@ -289,37 +233,27 @@ class TranslationTask(
     }
 
     private suspend fun waitForDomReady(view: WebView) {
-        withTimeout(20000L) {
+        withTimeout(strategy.domReadyTimeoutMs) {
             while (isRunning) {
-                if (unquoteJs(evalJs(view, JS_CHECK_DOM_READY)) == "READY") return@withTimeout
+                if (unquoteJs(evalJs(view, strategy.checkDomReadyJs)) == "READY") return@withTimeout
                 delay(500L)
             }
         }
     }
 
     /**
-     * 単一チャンクの翻訳処理。ユーザーの手動操作フローを忠実に模倣する。
-     *
-     * 1. クリアボタンクリック ＋ textarea直接クリア
-     * 2. 結果エリアが空になるまで待機
-     * 3. 人間的ディレイ（350〜600ms）
-     * 4. 入力枠のフォーカス ＆ 全選択
-     * 5. 人間的ディレイ（200〜450ms、貼り付けキー入力までのタイムラグ）
-     * 6. ClipboardEvent paste → InputEvent insertFromPaste → change でユーザー貼り付けを完全再現
-     * 7. 翻訳開始待機（1800〜2400ms）
-     * 8. 翻訳完了（プログレスバー消滅 & 翻訳本文の安定）を待機（最大25秒に最適化）
-     * 9. 前チャンクの結果と同一ならスキップ（重複防止）
+     * 単一チャンクの翻訳処理。
      */
     private suspend fun translateChunk(view: WebView, text: String, lastResultText: String): String? {
         if (!isRunning) return null
 
         // 1. クリア
-        evalJs(view, JS_CLEAR)
+        evalJs(view, strategy.clearInputJs)
 
         // 2. 結果エリアが空になるまで待機（最大4秒）
         val clearStart = System.currentTimeMillis()
         while (isRunning && System.currentTimeMillis() - clearStart < 4000L) {
-            if (unquoteJs(evalJs(view, JS_CHECK_EMPTY)) == "EMPTY") break
+            if (unquoteJs(evalJs(view, strategy.checkResultEmptyJs)) == "EMPTY") break
             delay(200L)
         }
 
@@ -327,34 +261,40 @@ class TranslationTask(
         delay(Random.nextLong(350, 600))
 
         // 4. 入力枠へのフォーカス & 全選択
-        evalJs(view, JS_FOCUS_AND_SELECT)
+        evalJs(view, strategy.focusAndSelectJs)
 
         // 5. フォーカス後～Ctrl+V貼り付けまでの人間的タイムラグ
         delay(Random.nextLong(200, 450))
 
         // 6. ユーザーの手動貼り付けを完全再現するテキスト入力 & 確定
         val jsonText = json.encodeToString(text)
-        val inputScript = JS_PASTE_AND_INPUT.format(jsonText, jsonText, jsonText)
+        val inputScript = strategy.buildPasteAndInputJs(jsonText)
         val inputStatus = unquoteJs(evalJs(view, inputScript))
         if (inputStatus != "OK") {
             Log.e(TAG, "Input failed: $inputStatus")
             return null
         }
 
-        // 7. 入力直後、Google翻訳が翻訳を開始するまで待機
-        delay(Random.nextLong(1800, 2400))
+        // 7. 入力直後、翻訳が開始するまで待機
+        val delayRange = strategy.postInputDelayRange()
+        delay(Random.nextLong(delayRange.first, delayRange.last))
 
-        // 8. 翻訳結果の安定待機（タイムアウトを25秒に最適化）
+        // 8. 翻訳結果の安定待機
         var currentCandidate = ""
         var stableCount = 0
-        val maxWaitMs = 25000L
-        val intervalMs = 600L
+        val maxWaitMs = strategy.resultWaitTimeoutMs
+        val intervalMs = strategy.resultCheckIntervalMs
         val startTime = System.currentTimeMillis()
 
         while (isRunning && (System.currentTimeMillis() - startTime < maxWaitMs)) {
             delay(intervalMs)
 
-            val domResult = parseDomResult(evalJs(view, JS_GET_RESULT))
+            val domResult = parseDomResult(evalJs(view, strategy.getResultJs))
+
+            if (domResult.status == "LIMIT_ERROR") {
+                Log.e(TAG, "Limit error: ${domResult.message}")
+                return null
+            }
 
             if (domResult.status == "OK" && domResult.text.isNotBlank()) {
                 // 前回チャンクの結果と同一なら、まだ新しい翻訳が反映されていない
@@ -364,8 +304,7 @@ class TranslationTask(
                 }
                 if (domResult.text == currentCandidate) {
                     stableCount++
-                    // 3回連続（約1.8秒間）安定したら翻訳完了と確定
-                    if (stableCount >= 3) return domResult.text
+                    if (stableCount >= strategy.requiredStableCount) return domResult.text
                 } else {
                     currentCandidate = domResult.text
                     stableCount = 1
@@ -379,9 +318,6 @@ class TranslationTask(
         return if (currentCandidate.isNotBlank() && currentCandidate != lastResultText) currentCandidate else null
     }
 
-    // ---- ヘルパー ----
-
-    /** evaluateJavascriptの戻り値は常にJSON文字列でエスケープされるため、外側の引用符を剥がす */
     private fun unquoteJs(raw: String): String {
         if (raw.length >= 2 && raw.startsWith("\"") && raw.endsWith("\"")) {
             return try { json.decodeFromString<String>(raw) } catch (_: Exception) { raw }
@@ -389,13 +325,12 @@ class TranslationTask(
         return raw
     }
 
-    /** JSから取得したJSON文字列をDomResultにパースする。二重エスケープを自動解除。 */
-    private fun parseDomResult(rawRes: String): DomResult {
+    private fun parseDomResult(rawRes: String): DomTranslationResult {
         val cleanJson = unquoteJs(rawRes)
         return try {
-            json.decodeFromString<DomResult>(cleanJson)
+            json.decodeFromString<DomTranslationResult>(cleanJson)
         } catch (_: Exception) {
-            DomResult(status = "WAITING")
+            DomTranslationResult(status = "WAITING")
         }
     }
 
@@ -427,6 +362,34 @@ class TranslationTask(
                 webView.destroy()
             } catch (e: Exception) {
                 Log.w(TAG, "Error destroying webView", e)
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "BaseWebTranslationTask"
+        private const val MAX_CHUNK_RETRIES = 2
+
+        /**
+         * 範囲指定（"30-80" や "1-3"）または単一指定からランダムな待機時間（ミリ秒）を計算する。
+         */
+        fun calculateDelayMs(delayStr: String, defaultSec: Double = 2.0): Long {
+            return try {
+                if (delayStr.contains("-")) {
+                    val parts = delayStr.split("-")
+                    val min = parts[0].trim().toDoubleOrNull() ?: defaultSec
+                    val max = parts.getOrNull(1)?.trim()?.toDoubleOrNull() ?: min
+                    val actualMin = min.coerceAtLeast(0.1)
+                    val actualMax = max.coerceAtLeast(actualMin)
+                    val randomSec = if (actualMin >= actualMax) actualMin else Random.nextDouble(actualMin, actualMax)
+                    (randomSec * 1000).toLong()
+                } else {
+                    val sec = delayStr.toDoubleOrNull() ?: defaultSec
+                    val jitter = Random.nextDouble(-0.3, 0.3)
+                    ((sec + jitter).coerceAtLeast(0.1) * 1000).toLong()
+                }
+            } catch (_: Exception) {
+                (defaultSec * 1000).toLong()
             }
         }
     }

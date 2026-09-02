@@ -9,7 +9,6 @@ import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
 import androidx.webkit.WebSettingsCompat
-import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 
 object WebViewHelper {
@@ -18,16 +17,50 @@ object WebViewHelper {
 
     val DARK_BG_COLOR = Color.parseColor("#121212")
 
+    /** 本物の Windows PC 版 Google Chrome の User-Agent */
+    const val DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
     /**
-     * 端末の正規デフォルトUA（端末の実際のOS/WebViewバージョンと100%一致）を取得する。
-     * isDesktop = true の場合は、端末正規UAから "Mobile " を除去してPC版サイト用UAを生成する。
+     * User-Agent を取得する。
+     * - isDesktop = true: サーバーにPC専用HTMLを返させるため、完全な Windows PC 版 Chrome UA を返す。
+     * - isDesktop = false: 端末の正規デフォルトUA（端末のOS/WebViewバージョンと100%一致）を返す。
      */
     fun getUserAgent(context: Context, isDesktop: Boolean = false): String {
-        val defaultUA = WebSettings.getDefaultUserAgent(context)
         return if (isDesktop) {
-            defaultUA.replace("Mobile Safari", "Safari").replace("Mobile ", "")
+            DESKTOP_USER_AGENT
         } else {
-            defaultUA
+            WebSettings.getDefaultUserAgent(context)
+        }
+    }
+
+    /**
+     * PCモード時にモバイル用 Viewport メタタグを無力化・完全除去するスクリプト。
+     * PCブラウザには本来 viewport タグは存在しないため、タグを除去することで
+     * Chromium の CSS エンジンが標準の PC デスクトップ幅（980px〜1280px）でメディアクエリを展開し、
+     * 本物の PC 用レイアウト（ヘッダー・サイドバー・横長2カラム段組等）がレンダリングされる。
+     */
+    fun buildDesktopViewportJs(isDesktop: Boolean): String {
+        return if (isDesktop) {
+            """(function(){
+                try {
+                    var metas = document.querySelectorAll('meta[name="viewport"]');
+                    for (var i = 0; i < metas.length; i++) {
+                        metas[i].parentNode.removeChild(metas[i]);
+                    }
+                } catch(e) {}
+            })()"""
+        } else {
+            """(function(){
+                try {
+                    var meta = document.querySelector('meta[name="viewport"]');
+                    if (!meta) {
+                        meta = document.createElement('meta');
+                        meta.name = 'viewport';
+                        meta.content = 'width=device-width, initial-scale=1.0';
+                        document.head.appendChild(meta);
+                    }
+                } catch(e) {}
+            })()"""
         }
     }
 
@@ -38,28 +71,21 @@ object WebViewHelper {
             domStorageEnabled = true
             javaScriptCanOpenWindowsAutomatically = true
             
-            // PC版サイトモード時のみUAを切り替え、通常時は端末デフォルトUAをそのまま使用（偽装ゼロ）
-            if (isDesktop) {
-                userAgentString = getUserAgent(webView.context, isDesktop = true)
-            }
+            // PC版モード時は本物の Windows PC UA を適用
+            userAgentString = getUserAgent(webView.context, isDesktop = isDesktop)
             
             blockNetworkImage = blockImages
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             textZoom = 100
             
-            // Viewport & レンダリング設定（Chrome / Kiwi と同一の標準表示）
+            // PCレイアウトを画面全体に自動フィット（OverviewMode）
             loadWithOverviewMode = true
             useWideViewPort = true
 
-            if (isDesktop) {
-                setSupportZoom(true)
-                builtInZoomControls = true
-                displayZoomControls = false
-            } else {
-                setSupportZoom(false)
-                builtInZoomControls = false
-                displayZoomControls = false
-            }
+            // ピンチズーム（拡大縮小）を常時許可
+            setSupportZoom(true)
+            builtInZoomControls = true
+            displayZoomControls = false
             cacheMode = WebSettings.LOAD_DEFAULT
         }
 
@@ -92,6 +118,23 @@ object WebViewHelper {
             CookieManager.getInstance().flush()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to flush cookies", e)
+        }
+    }
+
+    /**
+     * Google 翻訳（LiveTranslate）の永続 Cookie (googtrans) を完全パージする。
+     */
+    fun clearGoogleTranslateCookies(url: String? = null) {
+        try {
+            val cookieManager = CookieManager.getInstance()
+            if (!url.isNullOrEmpty()) {
+                cookieManager.setCookie(url, "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;")
+                cookieManager.setCookie(url, "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC;")
+                cookieManager.setCookie(url, "googtrans=/auto/null; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;")
+            }
+            cookieManager.flush()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to clear Google Translate cookies", e)
         }
     }
 

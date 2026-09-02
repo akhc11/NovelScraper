@@ -9,6 +9,7 @@ object LiveTranslateScriptBuilder {
      * - 完全な原文復元 (Undo)
      * - SPA (Reddit等) のページ内遷移対応
      * - 多重実行・ゾンビ再翻訳の完全遮断
+     * - マウスホバー時のテキスト強調・バルーンツールチップの完全抹殺
      */
     fun buildToggleLiveTranslateScript(): String {
         return """
@@ -40,9 +41,20 @@ object LiveTranslateScriptBuilder {
                             }
 
                             // Cookie の完全無効化
-                            document.cookie = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-                            document.cookie = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; domain=" + document.domain + "; path=/;";
-                            document.cookie = "googtrans=/auto/null; path=/;";
+                            function clearGoogTrans() {
+                                var domains = ['', '.' + document.domain, document.domain, location.hostname, '.' + location.hostname];
+                                var paths = ['/', '', location.pathname];
+                                for (var d = 0; d < domains.length; d++) {
+                                    for (var p = 0; p < paths.length; p++) {
+                                        var cookieStr = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC;";
+                                        if (domains[d]) cookieStr += " domain=" + domains[d] + ";";
+                                        if (paths[p]) cookieStr += " path=" + paths[p] + ";";
+                                        document.cookie = cookieStr;
+                                    }
+                                }
+                                document.cookie = "googtrans=/auto/null; path=/;";
+                            }
+                            clearGoogTrans();
 
                             // Google Translate 要素・iframe・スタイルの完全クリーンアップ
                             var s = document.getElementById('__gt_script');
@@ -51,7 +63,7 @@ object LiveTranslateScriptBuilder {
                             if (gtElem) gtElem.remove();
                             var gtStyle = document.getElementById('__gt_custom_style');
                             if (gtStyle) gtStyle.remove();
-                            var frames = document.querySelectorAll('.goog-te-banner-frame, iframe[id*=":1."], .skiptranslate');
+                            var frames = document.querySelectorAll('.goog-te-banner-frame, iframe[id*=":1."], .skiptranslate, #goog-gt-tt, .goog-te-balloon-frame');
                             for (var i = 0; i < frames.length; i++) {
                                 try { frames[i].remove(); } catch(e) {}
                             }
@@ -94,7 +106,7 @@ object LiveTranslateScriptBuilder {
                     document.cookie = "googtrans=/auto/ja; domain=" + document.domain + "; path=/;";
                     window.__liveTranslateActive = true;
 
-                    // 余計な Google バナー・ハイライトを隠す CSS
+                    // 余計な Google バナー・ハイライト・ツールチップを隠す CSS & インスペクターUIの保護
                     if (!document.getElementById('__gt_custom_style')) {
                         var style = document.createElement('style');
                         style.id = '__gt_custom_style';
@@ -103,9 +115,9 @@ object LiveTranslateScriptBuilder {
                             body { top: 0px !important; position: static !important; }
                             .skiptranslate { display: none !important; }
                             #google_translate_element { display: none !important; }
-                            .goog-tooltip { display: none !important; }
-                            .goog-tooltip:hover { display: none !important; }
-                            .goog-text-highlight { background-color: transparent !important; border: none !important; box-shadow: none !important; }
+                            #goog-gt-tt, .goog-te-balloon-frame, .goog-tooltip, .goog-tooltip:hover { display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }
+                            .goog-text-highlight, font.goog-text-highlight, span.goog-text-highlight { background-color: transparent !important; background: none !important; border: none !important; box-shadow: none !important; text-decoration: none !important; }
+                            .__novel_notranslate, #__novel_popup, #__novel_hint, .__novel_exclude { -webkit-user-select: auto; }
                         `;
                         (document.head || document.documentElement).appendChild(style);
                     }
@@ -180,9 +192,20 @@ object LiveTranslateScriptBuilder {
                         clearTimeout(window.__gtTimer);
                         window.__gtTimer = null;
                     }
-                    document.cookie = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-                    document.cookie = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; domain=" + document.domain + "; path=/;";
-                    document.cookie = "googtrans=/auto/null; path=/;";
+                    function clearGoogTrans() {
+                        var domains = ['', '.' + document.domain, document.domain, location.hostname, '.' + location.hostname];
+                        var paths = ['/', '', location.pathname];
+                        for (var d = 0; d < domains.length; d++) {
+                            for (var p = 0; p < paths.length; p++) {
+                                var cookieStr = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC;";
+                                if (domains[d]) cookieStr += " domain=" + domains[d] + ";";
+                                if (paths[p]) cookieStr += " path=" + paths[p] + ";";
+                                document.cookie = cookieStr;
+                            }
+                        }
+                        document.cookie = "googtrans=/auto/null; path=/;";
+                    }
+                    clearGoogTrans();
                     window.__liveTranslateActive = false;
                     window.__liveTranslateInProgress = false;
 
@@ -192,7 +215,7 @@ object LiveTranslateScriptBuilder {
                     if (gtElem) gtElem.remove();
                     var gtStyle = document.getElementById('__gt_custom_style');
                     if (gtStyle) gtStyle.remove();
-                    var frames = document.querySelectorAll('.goog-te-banner-frame, iframe[id*=":1."], .skiptranslate');
+                    var frames = document.querySelectorAll('.goog-te-banner-frame, iframe[id*=":1."], .skiptranslate, #goog-gt-tt, .goog-te-balloon-frame');
                     for (var i = 0; i < frames.length; i++) {
                         try { frames[i].remove(); } catch(e) {}
                     }

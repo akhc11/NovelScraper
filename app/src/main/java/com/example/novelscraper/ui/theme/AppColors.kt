@@ -21,6 +21,7 @@ object AppColors {
 
     // アクセントカラー
     val accentTeal = Color(0xFF00897B)
+    val accentTealDark = Color(0xFF004D40)
     val accentTealLight = Color(0xFF03DAC5)
     val accentOrange = Color(0xFFFF5722)
     val accentYellow = Color(0xFFFFD600)

@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -29,6 +28,22 @@ private val CardCornerShape = RoundedCornerShape(8.dp)
 private val InputCornerShape = RoundedCornerShape(4.dp)
 private val InputBorderColor = Color(0xFF444444)
 private val InputTextStyle = TextStyle(color = AppColors.textPrimary, fontSize = 13.sp)
+private val InputLabelTextStyle = TextStyle(color = AppColors.textSecondary, fontSize = 11.sp)
+
+// Allocation Zero: 静的 Modifier キャッシュ（オブジェクト生成コストを完全排除）
+private val InputFieldColumnModifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+private val InputLabelModifier = Modifier.padding(bottom = 2.dp)
+private val InputBoxModifier = Modifier
+    .fillMaxWidth()
+    .height(38.dp)
+    .background(AppColors.surfaceMedium, InputCornerShape)
+    .border(1.dp, InputBorderColor, InputCornerShape)
+    .padding(horizontal = 10.dp)
+private val CardContainerModifier = Modifier
+    .fillMaxWidth()
+    .background(AppColors.backgroundMedium, CardCornerShape)
+    .padding(12.dp)
+private val CardTitleModifier = Modifier.padding(bottom = 8.dp)
 
 @Composable
 fun SettingsPanel(
@@ -49,10 +64,18 @@ fun SettingsPanel(
     var dropdownExpanded by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
 
-    // 現在の設定値をローカル保持し、単方向データフローで効率的に管理
-    var localConfig by remember(currentConfig) { mutableStateOf(currentConfig) }
+    val scrollState = rememberScrollState()
 
-    fun updateConfig(updater: (ScraperConfig) -> ScraperConfig) {
+    // 外部からの明示的更新（プリセット選択等）のみ同期し、編集中はローカルで高速に保持
+    var localConfig by remember { mutableStateOf(currentConfig) }
+
+    LaunchedEffect(currentConfig) {
+        if (localConfig != currentConfig) {
+            localConfig = currentConfig
+        }
+    }
+
+    fun updateField(updater: (ScraperConfig) -> ScraperConfig) {
         val updated = updater(localConfig)
         localConfig = updated
         onConfigChange(updated)
@@ -62,190 +85,177 @@ fun SettingsPanel(
         HelpDialog(onDismiss = { showHelpDialog = false })
     }
 
-    // LazyColumn による遅延仮想化レイアウト（画面外の要素を遅延生成し初期表示を爆速化）
-    LazyColumn(
+    // 1回のレイアウトパスでスムーズにスクロール可能な Column + verticalScroll
+    Column(
         modifier = modifier
             .fillMaxSize()
             .background(AppColors.backgroundDarkest)
+            .verticalScroll(scrollState)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
             .imePadding(),
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         // ヘッダー行
-        item(key = "header_row") {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "スクレイパー設定",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = AppColors.textPrimary,
+                modifier = Modifier.weight(1f)
+            )
+            Button(
+                onClick = { showHelpDialog = true },
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
+                shape = ButtonCornerShape,
+                modifier = Modifier.height(34.dp).padding(end = 6.dp)
             ) {
-                Text(
-                    text = "スクレイパー設定",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = AppColors.textPrimary,
-                    modifier = Modifier.weight(1f)
-                )
-                Button(
-                    onClick = { showHelpDialog = true },
-                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
-                    shape = ButtonCornerShape,
-                    modifier = Modifier.height(34.dp).padding(end = 6.dp)
-                ) {
-                    Text("説明書", fontSize = 12.sp)
-                }
-                Button(
-                    onClick = onCloseClick,
-                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceLight),
-                    shape = ButtonCornerShape,
-                    modifier = Modifier.height(34.dp)
-                ) {
-                    Text("閉じる", fontSize = 12.sp, color = AppColors.textPrimary)
-                }
+                Text("説明書", fontSize = 12.sp)
+            }
+            Button(
+                onClick = onCloseClick,
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceLight),
+                shape = ButtonCornerShape,
+                modifier = Modifier.height(34.dp)
+            ) {
+                Text("閉じる", fontSize = 12.sp, color = AppColors.textPrimary)
             }
         }
 
         // プリセット選択ドロップダウン
-        item(key = "preset_dropdown") {
-            Box(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(AppColors.surfaceMedium, ButtonCornerShape)
-                        .border(1.dp, Color.DarkGray, ButtonCornerShape)
-                        .clickable { dropdownExpanded = true }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = currentPresetName.ifEmpty { "プリセット選択..." },
-                        color = if (currentPresetName.isNotEmpty()) AppColors.textPrimary else AppColors.textTertiary,
-                        fontSize = 14.sp,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Icon(Icons.Filled.ArrowDropDown, contentDescription = null, tint = AppColors.textPrimary)
-                }
-                DropdownMenu(
-                    expanded = dropdownExpanded,
-                    onDismissRequest = { dropdownExpanded = false },
-                    modifier = Modifier.background(AppColors.surfaceLight)
-                ) {
-                    val sortedPresetNames = remember(presets) { presets.keys.sorted() }
-                    sortedPresetNames.forEach { name ->
-                        DropdownMenuItem(
-                            text = { Text(name, color = AppColors.textPrimary) },
-                            onClick = {
-                                presets[name]?.let { selectedConfig ->
-                                    localConfig = selectedConfig
-                                    onPresetSelected(name, selectedConfig)
-                                }
-                                dropdownExpanded = false
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(AppColors.surfaceMedium, ButtonCornerShape)
+                    .border(1.dp, Color.DarkGray, ButtonCornerShape)
+                    .clickable { dropdownExpanded = true }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = currentPresetName.ifEmpty { "プリセット選択..." },
+                    color = if (currentPresetName.isNotEmpty()) AppColors.textPrimary else AppColors.textTertiary,
+                    fontSize = 14.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                Icon(Icons.Filled.ArrowDropDown, contentDescription = null, tint = AppColors.textPrimary)
+            }
+            DropdownMenu(
+                expanded = dropdownExpanded,
+                onDismissRequest = { dropdownExpanded = false },
+                modifier = Modifier.background(AppColors.surfaceLight)
+            ) {
+                val sortedPresetNames = remember(presets) { presets.keys.sorted() }
+                sortedPresetNames.forEach { name ->
+                    DropdownMenuItem(
+                        text = { Text(name, color = AppColors.textPrimary) },
+                        onClick = {
+                            presets[name]?.let { selectedConfig ->
+                                localConfig = selectedConfig
+                                onPresetSelected(name, selectedConfig)
                             }
-                        )
-                    }
+                            dropdownExpanded = false
+                        }
+                    )
                 }
             }
         }
 
         // プリセット操作ボタン行
-        item(key = "preset_buttons") {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Button(
-                        onClick = onSavePresetClick,
-                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.neutralButton),
-                        shape = ButtonCornerShape,
-                        modifier = Modifier.weight(1f).padding(end = 4.dp).height(36.dp)
-                    ) { Text("保存", fontSize = 12.sp) }
-                    Button(
-                        onClick = onDeletePresetClick,
-                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.error),
-                        shape = ButtonCornerShape,
-                        modifier = Modifier.weight(1f).height(36.dp)
-                    ) { Text("削除", fontSize = 12.sp) }
-                }
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Button(
-                        onClick = onImportPresetsClick,
-                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
-                        shape = ButtonCornerShape,
-                        modifier = Modifier.weight(1f).padding(end = 4.dp).height(36.dp)
-                    ) { Text("インポート", fontSize = 12.sp) }
-                    Button(
-                        onClick = onExportPresetsClick,
-                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
-                        shape = ButtonCornerShape,
-                        modifier = Modifier.weight(1f).height(36.dp)
-                    ) { Text("エクスポート", fontSize = 12.sp) }
-                }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = onSavePresetClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.neutralButton),
+                    shape = ButtonCornerShape,
+                    modifier = Modifier.weight(1f).padding(end = 4.dp).height(36.dp)
+                ) { Text("保存", fontSize = 12.sp) }
+                Button(
+                    onClick = onDeletePresetClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.error),
+                    shape = ButtonCornerShape,
+                    modifier = Modifier.weight(1f).height(36.dp)
+                ) { Text("削除", fontSize = 12.sp) }
+            }
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = onImportPresetsClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
+                    shape = ButtonCornerShape,
+                    modifier = Modifier.weight(1f).padding(end = 4.dp).height(36.dp)
+                ) { Text("インポート", fontSize = 12.sp) }
+                Button(
+                    onClick = onExportPresetsClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
+                    shape = ButtonCornerShape,
+                    modifier = Modifier.weight(1f).height(36.dp)
+                ) { Text("エクスポート", fontSize = 12.sp) }
             }
         }
 
         // セクション1: 作品・章の識別設定
-        item(key = "section_identification") {
-            SettingsCard(title = "作品・章の識別設定") {
-                ConfigInputField("作品名 Selector", localConfig.folder) { updateConfig { c -> c.copy(folder = it) } }
-                ConfigInputField("作品名 Regex", localConfig.regex) { updateConfig { c -> c.copy(regex = it) } }
-                ConfigInputField("別URL取得 Selector", localConfig.folderLink) { updateConfig { c -> c.copy(folderLink = it) } }
-                ConfigInputField("タイトル Selector", localConfig.title) { updateConfig { c -> c.copy(title = it) } }
-                ConfigInputField("タイトル Regex", localConfig.fileRegex) { updateConfig { c -> c.copy(fileRegex = it) } }
-                ConfigInputField("チャプター番号 Selector", localConfig.chapter) { updateConfig { c -> c.copy(chapter = it) } }
-                ConfigInputField("チャプター番号 Regex", localConfig.chapterRegex) { updateConfig { c -> c.copy(chapterRegex = it) } }
-            }
+        SettingsCard(title = "作品・章の識別設定") {
+            ConfigInputField("作品名 Selector", localConfig.folder) { updateField { c -> c.copy(folder = it) } }
+            ConfigInputField("作品名 Regex", localConfig.regex) { updateField { c -> c.copy(regex = it) } }
+            ConfigInputField("別URL取得 Selector", localConfig.folderLink) { updateField { c -> c.copy(folderLink = it) } }
+            ConfigInputField("タイトル Selector", localConfig.title) { updateField { c -> c.copy(title = it) } }
+            ConfigInputField("タイトル Regex", localConfig.fileRegex) { updateField { c -> c.copy(fileRegex = it) } }
+            ConfigInputField("チャプター番号 Selector", localConfig.chapter) { updateField { c -> c.copy(chapter = it) } }
+            ConfigInputField("チャプター番号 Regex", localConfig.chapterRegex) { updateField { c -> c.copy(chapterRegex = it) } }
         }
 
         // セクション2: 本文・ページ巡回設定
-        item(key = "section_content_navigation") {
-            SettingsCard(title = "本文・ページ巡回設定") {
-                ConfigInputField("本文 Selector", localConfig.body) { updateConfig { c -> c.copy(body = it) } }
-                ConfigInputField("除外要素 (複数: , 区切り)", localConfig.exclude) { updateConfig { c -> c.copy(exclude = it) } }
-                ConfigInputField("次ページ Selector", localConfig.next) { updateConfig { c -> c.copy(next = it) } }
-                ConfigInputField("終了検知 Regex", localConfig.endCheck) { updateConfig { c -> c.copy(endCheck = it) } }
-            }
+        SettingsCard(title = "本文・ページ巡回設定") {
+            ConfigInputField("本文 Selector", localConfig.body) { updateField { c -> c.copy(body = it) } }
+            ConfigInputField("除外要素 (複数: , 区切り)", localConfig.exclude) { updateField { c -> c.copy(exclude = it) } }
+            ConfigInputField("次ページ Selector", localConfig.next) { updateField { c -> c.copy(next = it) } }
+            ConfigInputField("終了検知 Regex", localConfig.endCheck) { updateField { c -> c.copy(endCheck = it) } }
         }
 
         // セクション3: 表示・動作設定
-        item(key = "section_display_behavior") {
-            SettingsCard(title = "表示・動作設定") {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "WebView ダークモード",
-                            color = AppColors.textPrimary,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = "ウェブページを自動でダークテーマ表示",
-                            color = AppColors.textSecondary,
-                            fontSize = 11.sp
-                        )
-                    }
-                    Switch(
-                        checked = isWebViewDarkMode,
-                        onCheckedChange = { onToggleWebViewDarkModeClick() },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = AppColors.accentTealLight,
-                            checkedTrackColor = AppColors.accentTeal,
-                            uncheckedThumbColor = AppColors.surfaceLight,
-                            uncheckedTrackColor = AppColors.surfaceMedium
-                        )
+        SettingsCard(title = "表示・動作設定") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "WebView ダークモード",
+                        color = AppColors.textPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "ウェブページを自動でダークテーマ表示",
+                        color = AppColors.textSecondary,
+                        fontSize = 11.sp
                     )
                 }
-                Spacer(modifier = Modifier.height(6.dp))
-                ConfigInputField("待機時間(秒)", localConfig.delay) { updateConfig { c -> c.copy(delay = it) } }
-                ConfigInputField("自動適用URL (ドメイン)", localConfig.autoUrl) { updateConfig { c -> c.copy(autoUrl = it) } }
+                Switch(
+                    checked = isWebViewDarkMode,
+                    onCheckedChange = { onToggleWebViewDarkModeClick() },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = AppColors.accentTealLight,
+                        checkedTrackColor = AppColors.accentTeal,
+                        uncheckedThumbColor = AppColors.surfaceLight,
+                        uncheckedTrackColor = AppColors.surfaceMedium
+                    )
+                )
             }
+            Spacer(modifier = Modifier.height(6.dp))
+            ConfigInputField("待機時間(秒)", localConfig.delay) { updateField { c -> c.copy(delay = it) } }
+            ConfigInputField("自動適用URL (ドメイン)", localConfig.autoUrl) { updateField { c -> c.copy(autoUrl = it) } }
         }
 
         // 下部余白（スクロール時の余裕）
-        item(key = "bottom_spacer") {
-            Spacer(modifier = Modifier.height(40.dp))
-        }
+        Spacer(modifier = Modifier.height(40.dp))
     }
 }
 
@@ -254,18 +264,13 @@ private fun SettingsCard(
     title: String,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(AppColors.backgroundMedium, CardCornerShape)
-            .padding(12.dp)
-    ) {
+    Column(modifier = CardContainerModifier) {
         Text(
             text = title,
             color = AppColors.accentTeal,
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 8.dp)
+            modifier = CardTitleModifier
         )
         content()
     }
@@ -280,25 +285,25 @@ private fun ConfigInputField(
     value: String,
     onValueChange: (String) -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+    var text by remember(value) { mutableStateOf(value) }
+
+    Column(modifier = InputFieldColumnModifier) {
         Text(
             text = label,
             color = AppColors.textSecondary,
-            fontSize = 11.sp,
-            modifier = Modifier.padding(bottom = 2.dp)
+            style = InputLabelTextStyle,
+            modifier = InputLabelModifier
         )
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(38.dp)
-                .background(AppColors.surfaceMedium, InputCornerShape)
-                .border(1.dp, InputBorderColor, InputCornerShape)
-                .padding(horizontal = 10.dp),
+            modifier = InputBoxModifier,
             contentAlignment = Alignment.CenterStart
         ) {
             BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
+                value = text,
+                onValueChange = { newText ->
+                    text = newText
+                    onValueChange(newText)
+                },
                 modifier = Modifier.fillMaxWidth(),
                 textStyle = InputTextStyle,
                 cursorBrush = SolidColor(AppColors.accentTealLight),

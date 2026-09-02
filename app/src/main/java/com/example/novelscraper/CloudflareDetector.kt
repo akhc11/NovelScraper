@@ -88,14 +88,13 @@ object CloudflareDetector {
     """.trimIndent()
 
     /**
-     * ページロード完了時の初期化JS（生体タップ + 必要に応じた人間的スクロール模倣）
+     * ページロード完了時の初期化JS（生体タップ + 必要に応じた人間的スクロール模倣 + PC Viewport除去）
+     * 単一の evaluateJavascript 呼び出しに集約して IPC 通信コストを最小化する。
      */
-    fun buildPageLoadInitJs(shouldScroll: Boolean): String {
+    fun buildPageLoadInitJs(shouldScroll: Boolean, isDesktop: Boolean = false): String {
         val tapJs = buildTurnstileHumanTapJs()
-        return if (shouldScroll) {
-            "$tapJs\n${buildHumanScrollJs()}"
-        } else {
-            tapJs
-        }
+        val scrollJs = if (shouldScroll) "\n${buildHumanScrollJs()}" else ""
+        val desktopJs = if (isDesktop) "\n${WebViewHelper.buildDesktopViewportJs(true)}" else ""
+        return "$tapJs$scrollJs$desktopJs"
     }
 }

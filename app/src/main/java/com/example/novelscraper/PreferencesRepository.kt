@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import android.net.Uri
 import android.util.Log
+import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChangedBy
@@ -45,6 +46,7 @@ class PreferencesRepository(private val context: Context) {
         val GOOGLE_FILE_DELAY = stringPreferencesKey("google_file_delay")
         val DEEPL_CHUNK_DELAY = stringPreferencesKey("deepl_chunk_delay")
         val DEEPL_FILE_DELAY = stringPreferencesKey("deepl_file_delay")
+        val LLM_CONFIG = stringPreferencesKey("llm_translation_config_v2")
     }
 
     private val json = Json {
@@ -58,49 +60,67 @@ class PreferencesRepository(private val context: Context) {
             preferences[PreferencesKeys.WEBVIEW_DARK_MODE]?.toBoolean() ?: true
         }.flowOn(Dispatchers.IO)
 
-    suspend fun saveWebViewDarkMode(enabled: Boolean) = withContext(Dispatchers.IO) {
+    suspend fun saveWebViewDarkMode(isDark: Boolean) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
-            preferences[PreferencesKeys.WEBVIEW_DARK_MODE] = enabled.toString()
+            preferences[PreferencesKeys.WEBVIEW_DARK_MODE] = isDark.toString()
         }
     }
 
-    // Google翻訳 待機時間 (例: "1-3", "30-80", "2.0")
     val googleChunkDelayFlow: Flow<String> = context.dataStore.data
         .distinctUntilChangedBy { it[PreferencesKeys.GOOGLE_CHUNK_DELAY] }
-        .map { preferences ->
-            preferences[PreferencesKeys.GOOGLE_CHUNK_DELAY]?.ifEmpty { null } ?: "1-3"
-        }.flowOn(Dispatchers.IO)
+        .map { it[PreferencesKeys.GOOGLE_CHUNK_DELAY] ?: "1-3" }.flowOn(Dispatchers.IO)
 
     val googleFileDelayFlow: Flow<String> = context.dataStore.data
         .distinctUntilChangedBy { it[PreferencesKeys.GOOGLE_FILE_DELAY] }
-        .map { preferences ->
-            preferences[PreferencesKeys.GOOGLE_FILE_DELAY]?.ifEmpty { null } ?: "1-2"
-        }.flowOn(Dispatchers.IO)
+        .map { it[PreferencesKeys.GOOGLE_FILE_DELAY] ?: "1-2" }.flowOn(Dispatchers.IO)
 
-    suspend fun saveGoogleDelays(chunkDelay: String, fileDelay: String) = withContext(Dispatchers.IO) {
-        context.dataStore.edit { preferences ->
-            preferences[PreferencesKeys.GOOGLE_CHUNK_DELAY] = chunkDelay.trim()
-            preferences[PreferencesKeys.GOOGLE_FILE_DELAY] = fileDelay.trim()
-        }
-    }
-
-    // DeepL翻訳 待機時間 (例: "3-8", "30-80", "2.5")
     val deeplChunkDelayFlow: Flow<String> = context.dataStore.data
         .distinctUntilChangedBy { it[PreferencesKeys.DEEPL_CHUNK_DELAY] }
-        .map { preferences ->
-            preferences[PreferencesKeys.DEEPL_CHUNK_DELAY]?.ifEmpty { null } ?: "3-8"
-        }.flowOn(Dispatchers.IO)
+        .map { it[PreferencesKeys.DEEPL_CHUNK_DELAY] ?: "3-8" }.flowOn(Dispatchers.IO)
 
     val deeplFileDelayFlow: Flow<String> = context.dataStore.data
         .distinctUntilChangedBy { it[PreferencesKeys.DEEPL_FILE_DELAY] }
-        .map { preferences ->
-            preferences[PreferencesKeys.DEEPL_FILE_DELAY]?.ifEmpty { null } ?: "2-5"
-        }.flowOn(Dispatchers.IO)
+        .map { it[PreferencesKeys.DEEPL_FILE_DELAY] ?: "2-5" }.flowOn(Dispatchers.IO)
+
+    suspend fun saveGoogleDelays(chunkDelay: String, fileDelay: String) = withContext(Dispatchers.IO) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.GOOGLE_CHUNK_DELAY] = chunkDelay
+            preferences[PreferencesKeys.GOOGLE_FILE_DELAY] = fileDelay
+        }
+    }
 
     suspend fun saveDeeplDelays(chunkDelay: String, fileDelay: String) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
-            preferences[PreferencesKeys.DEEPL_CHUNK_DELAY] = chunkDelay.trim()
-            preferences[PreferencesKeys.DEEPL_FILE_DELAY] = fileDelay.trim()
+            preferences[PreferencesKeys.DEEPL_CHUNK_DELAY] = chunkDelay
+            preferences[PreferencesKeys.DEEPL_FILE_DELAY] = fileDelay
+        }
+    }
+
+    // ---- LLM 翻訳設定の永続化 ----
+
+    val llmConfigFlow: Flow<LlmTranslationConfig> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.LLM_CONFIG] }
+        .map { preferences ->
+            val jsonStr = preferences[PreferencesKeys.LLM_CONFIG]
+            if (!jsonStr.isNullOrBlank()) {
+                try {
+                    json.decodeFromString<LlmTranslationConfig>(jsonStr)
+                } catch (e: Exception) {
+                    Log.e("PreferencesRepository", "Failed to decode LLM config, fallback to default", e)
+                    LlmTranslationConfig()
+                }
+            } else {
+                LlmTranslationConfig()
+            }
+        }.flowOn(Dispatchers.IO)
+
+    suspend fun saveLlmConfig(config: LlmTranslationConfig) = withContext(Dispatchers.IO) {
+        context.dataStore.edit { preferences ->
+            try {
+                preferences[PreferencesKeys.LLM_CONFIG] = json.encodeToString(config)
+            } catch (e: Exception) {
+                Log.e("PreferencesRepository", "Failed to encode LLM config", e)
+            }
         }
     }
 
@@ -108,75 +128,74 @@ class PreferencesRepository(private val context: Context) {
         .distinctUntilChangedBy { it[PreferencesKeys.PRESETS] }
         .map { preferences ->
             val jsonStr = preferences[PreferencesKeys.PRESETS] ?: "{}"
-            try { json.decodeFromString<Map<String, ScraperConfig>>(jsonStr) } catch (e: Exception) { emptyMap() }
+            try {
+                json.decodeFromString<Map<String, ScraperConfig>>(jsonStr)
+            } catch (e: Exception) {
+                emptyMap()
+            }
         }.flowOn(Dispatchers.IO)
-
-    val favoritesFlow: Flow<Map<String, String>> = context.dataStore.data
-        .distinctUntilChangedBy { it[PreferencesKeys.FAVORITES] }
-        .map { preferences ->
-            val jsonStr = preferences[PreferencesKeys.FAVORITES] ?: "{}"
-            try { json.decodeFromString<Map<String, String>>(jsonStr) } catch (e: Exception) { emptyMap() }
-        }.flowOn(Dispatchers.IO)
-
-    val historyFlow: Flow<Map<String, HistoryItem>> = context.dataStore.data
-        .distinctUntilChangedBy { it[PreferencesKeys.HISTORY] }
-        .map { preferences ->
-            val jsonStr = preferences[PreferencesKeys.HISTORY] ?: "{}"
-            try { json.decodeFromString<Map<String, HistoryItem>>(jsonStr) } catch (e: Exception) { emptyMap() }
-        }.flowOn(Dispatchers.IO)
-
-    suspend fun savePresets(presets: Map<String, ScraperConfig>) = withContext(Dispatchers.IO) {
-        context.dataStore.edit { preferences -> preferences[PreferencesKeys.PRESETS] = json.encodeToString(presets) }
-    }
 
     suspend fun updatePresets(transform: (MutableMap<String, ScraperConfig>) -> Unit) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
-            val rawJson = preferences[PreferencesKeys.PRESETS]
-            val current = if (rawJson.isNullOrEmpty()) {
+            val jsonStr = preferences[PreferencesKeys.PRESETS] ?: "{}"
+            val current = try {
+                json.decodeFromString<Map<String, ScraperConfig>>(jsonStr).toMutableMap()
+            } catch (e: Exception) {
                 mutableMapOf()
-            } else {
-                try {
-                    json.decodeFromString<Map<String, ScraperConfig>>(rawJson).toMutableMap()
-                } catch (e: Exception) {
-                    Log.e("PreferencesRepository", "Failed to decode presets JSON, aborting write", e)
-                    return@edit
-                }
             }
             transform(current)
             preferences[PreferencesKeys.PRESETS] = json.encodeToString(current)
         }
     }
 
+    suspend fun savePresets(presets: Map<String, ScraperConfig>) = withContext(Dispatchers.IO) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.PRESETS] = json.encodeToString(presets)
+        }
+    }
+
+    val favoritesFlow: Flow<Map<String, String>> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.FAVORITES] }
+        .map { preferences ->
+            val jsonStr = preferences[PreferencesKeys.FAVORITES] ?: "{}"
+            try {
+                json.decodeFromString<Map<String, String>>(jsonStr)
+            } catch (e: Exception) {
+                emptyMap()
+            }
+        }.flowOn(Dispatchers.IO)
+
     suspend fun updateFavorites(transform: (MutableMap<String, String>) -> Unit) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
-            val rawJson = preferences[PreferencesKeys.FAVORITES]
-            val current = if (rawJson.isNullOrEmpty()) {
+            val jsonStr = preferences[PreferencesKeys.FAVORITES] ?: "{}"
+            val current = try {
+                json.decodeFromString<Map<String, String>>(jsonStr).toMutableMap()
+            } catch (e: Exception) {
                 mutableMapOf()
-            } else {
-                try {
-                    json.decodeFromString<Map<String, String>>(rawJson).toMutableMap()
-                } catch (e: Exception) {
-                    Log.e("PreferencesRepository", "Failed to decode favorites JSON, aborting write", e)
-                    return@edit
-                }
             }
             transform(current)
             preferences[PreferencesKeys.FAVORITES] = json.encodeToString(current)
         }
     }
 
+    val historyFlow: Flow<Map<String, HistoryItem>> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.HISTORY] }
+        .map { preferences ->
+            val jsonStr = preferences[PreferencesKeys.HISTORY] ?: "{}"
+            try {
+                json.decodeFromString<Map<String, HistoryItem>>(jsonStr)
+            } catch (e: Exception) {
+                emptyMap()
+            }
+        }.flowOn(Dispatchers.IO)
+
     suspend fun updateHistory(transform: (MutableMap<String, HistoryItem>) -> Unit) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
-            val rawJson = preferences[PreferencesKeys.HISTORY]
-            val current = if (rawJson.isNullOrEmpty()) {
+            val jsonStr = preferences[PreferencesKeys.HISTORY] ?: "{}"
+            val current = try {
+                json.decodeFromString<Map<String, HistoryItem>>(jsonStr).toMutableMap()
+            } catch (e: Exception) {
                 mutableMapOf()
-            } else {
-                try {
-                    json.decodeFromString<Map<String, HistoryItem>>(rawJson).toMutableMap()
-                } catch (e: Exception) {
-                    Log.e("PreferencesRepository", "Failed to decode history JSON, aborting write", e)
-                    return@edit
-                }
             }
             transform(current)
             pruneHistoryMap(current)

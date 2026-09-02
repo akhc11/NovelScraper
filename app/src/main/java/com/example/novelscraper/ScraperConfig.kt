@@ -23,9 +23,11 @@ data class ScraperConfig(
     fun toJson(): String = Json.encodeToString(this)
 
     companion object {
+        private val jsonParser = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+
         fun fromJson(json: String): ScraperConfig {
             return try {
-                Json.decodeFromString(json)
+                jsonParser.decodeFromString(json)
             } catch (e: Exception) {
                 ScraperConfig()
             }

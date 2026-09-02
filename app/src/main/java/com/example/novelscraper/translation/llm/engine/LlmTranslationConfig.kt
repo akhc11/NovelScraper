@@ -1,5 +1,6 @@
 package com.example.novelscraper.translation.llm.engine
 
+import com.example.novelscraper.translation.llm.pipeline.SourceLanguage
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -159,5 +160,50 @@ data class LlmTranslationConfig(
 
     val parallelWorkers: Int = 2, // 本文翻訳並列ワーカー数 (1〜6)
     val filesPerFolder: Int = 0,   // 0=無制限, >0=フォルダあたり上限
-    val requestDelaySec: Int = 2
-)
+    val requestDelaySec: Int = 2,
+
+    // 言語別自動サイズ調整
+    val enableAutoLanguageSize: Boolean = true, // 検出言語に応じた分割サイズの自動調整
+    val langSplitKoreanKb: Int = 25,            // 韓国語 分割閾値 (KB)
+    val langSplitChineseKb: Int = 20,           // 中国語 分割閾値 (KB)
+    val langSplitEnglishKb: Int = 15,           // 英語 分割閾値 (KB)
+
+    // 言語連動プロンプト自動選択 (成人向け等の手動選択を保護するためデフォルトOFF)
+    val enableAutoPromptOrder: Boolean = false
+) {
+    /**
+     * 検出言語とプロファイルに応じた実効分割閾値（バイト）を取得
+     */
+    fun getEffectiveSplitThreshold(sourceLang: SourceLanguage, profile: ModelProfile): Int {
+        if (!enableAutoLanguageSize) return profile.splitThresholdBytes
+        val kb = when (sourceLang) {
+            SourceLanguage.KO -> langSplitKoreanKb
+            SourceLanguage.ZH -> langSplitChineseKb
+            SourceLanguage.EN -> langSplitEnglishKb
+            SourceLanguage.JA -> langSplitKoreanKb
+        }
+        return (kb * 1000).coerceAtLeast(4000)
+    }
+
+    /**
+     * 検出言語とプロファイルに応じた実効チャンクサイズ（バイト）を取得
+     */
+    fun getEffectiveChunkSize(sourceLang: SourceLanguage, profile: ModelProfile): Int {
+        if (!enableAutoLanguageSize) return profile.chunkSizeBytes
+        val splitThreshold = getEffectiveSplitThreshold(sourceLang, profile)
+        return (splitThreshold * 0.85).toInt().coerceAtLeast(3000)
+    }
+
+    /**
+     * 検出言語とプロファイルに応じた実効プロンプト順序を取得 (OFF時は手動順序を100%優先)
+     */
+    fun getEffectivePromptOrder(sourceLang: SourceLanguage, profile: ModelProfile): List<Int> {
+        if (!enableAutoPromptOrder) return profile.promptOrder
+        return when (sourceLang) {
+            SourceLanguage.KO -> listOf(3, 7) // 3, 7 (韓)
+            SourceLanguage.ZH -> listOf(1, 1) // 1, 1 (中)
+            SourceLanguage.EN -> listOf(2, 7) // 2, 7 (英)
+            SourceLanguage.JA -> profile.promptOrder
+        }
+    }
+}

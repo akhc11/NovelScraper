@@ -61,6 +61,7 @@ fun LlmSettingsDialog(
     }
     var presetMenuExpanded by remember { mutableStateOf(false) }
     var showAddPresetDialog by remember { mutableStateOf(false) }
+    var presetOrderToSave by remember { mutableStateOf("1, 1") }
     var presetToDelete by remember { mutableStateOf<PromptOrderPreset?>(null) }
 
     // 共通・APIキー設定
@@ -257,7 +258,9 @@ fun LlmSettingsDialog(
                                                         val parsed = str.split(",").mapNotNull { it.trim().toIntOrNull() }
                                                         if (parsed.isNotEmpty()) {
                                                             for (i in modelProfiles.indices) {
-                                                                modelProfiles[i] = modelProfiles[i].copy(promptOrder = parsed)
+                                                                if (!modelProfiles[i].useCustomPromptOrder) {
+                                                                    modelProfiles[i] = modelProfiles[i].copy(promptOrder = parsed)
+                                                                }
                                                             }
                                                         }
                                                     },
@@ -320,7 +323,9 @@ fun LlmSettingsDialog(
                                                             },
                                                             onClick = {
                                                                 for (i in modelProfiles.indices) {
-                                                                    modelProfiles[i] = modelProfiles[i].copy(promptOrder = preset.order)
+                                                                    if (!modelProfiles[i].useCustomPromptOrder) {
+                                                                        modelProfiles[i] = modelProfiles[i].copy(promptOrder = preset.order)
+                                                                    }
                                                                 }
                                                                 batchPromptOrderText = preset.order.joinToString(", ")
                                                                 presetMenuExpanded = false
@@ -340,6 +345,7 @@ fun LlmSettingsDialog(
                                                         },
                                                         onClick = {
                                                             presetMenuExpanded = false
+                                                            presetOrderToSave = batchPromptOrderText
                                                             showAddPresetDialog = true
                                                         }
                                                     )
@@ -348,7 +354,7 @@ fun LlmSettingsDialog(
                                         }
 
                                         Spacer(modifier = Modifier.height(4.dp))
-                                        Text("※ 入力欄を変更すると全モデルに自動反映 /「▼」でプリセット選択・保存", color = AppColors.textSecondary, fontSize = 9.sp)
+                                        Text("※ 共通モデルに反映 (個別保護ONのモデルは保護されます) /「▼」でプリセット呼出・保存", color = AppColors.textSecondary, fontSize = 9.sp)
                                     }
                                 }
                             }
@@ -398,11 +404,16 @@ fun LlmSettingsDialog(
                                         totalCount = modelProfiles.size,
                                         profile = profile,
                                         isExpanded = isExpanded,
+                                        promptPresets = promptPresets,
                                         onToggleExpand = {
                                             expandedModelId = if (isExpanded) null else profile.id
                                         },
                                         onUpdate = { updated ->
                                             modelProfiles[index] = updated
+                                        },
+                                        onRequestSavePreset = { order ->
+                                            presetOrderToSave = order.joinToString(", ")
+                                            showAddPresetDialog = true
                                         },
                                         onMoveUp = {
                                             if (index > 0) {
@@ -755,7 +766,7 @@ fun LlmSettingsDialog(
     // プリセット追加ダイアログ
     if (showAddPresetDialog) {
         var newLabel by remember { mutableStateOf("") }
-        var newOrderText by remember { mutableStateOf(batchPromptOrderText) }
+        var newOrderText by remember(presetOrderToSave) { mutableStateOf(presetOrderToSave) }
 
         AlertDialog(
             onDismissRequest = { showAddPresetDialog = false },
@@ -840,11 +851,13 @@ private fun ModelProfileCard(
     totalCount: Int,
     profile: ModelProfile,
     isExpanded: Boolean,
+    promptPresets: List<PromptOrderPreset>,
     onToggleExpand: () -> Unit,
     onUpdate: (ModelProfile) -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onRequestSavePreset: (List<Int>) -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -985,24 +998,125 @@ private fun ModelProfileCard(
                         Spacer(modifier = Modifier.height(6.dp))
                     }
 
-                    // Temperature & プロンプト順序
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Temperature (未設定可):", color = AppColors.textSecondary, fontSize = 9.sp)
-                            BasicInputArea(
-                                value = profile.temperature?.toString() ?: "",
-                                onValueChange = { onUpdate(profile.copy(temperature = it.toDoubleOrNull())) }
-                            )
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("プロンプト順序 (例: 1, 1):", color = AppColors.textSecondary, fontSize = 9.sp)
-                            BasicInputArea(
-                                value = profile.promptOrder.joinToString(", "),
-                                onValueChange = { str ->
-                                    val list = str.split(Regex("[,\\s]+")).mapNotNull { it.toIntOrNull() }.filter { it in 1..7 }
-                                    onUpdate(profile.copy(promptOrder = list.ifEmpty { listOf(1, 1) }))
+                    // Temperature
+                    Text("Temperature (未設定可):", color = AppColors.textSecondary, fontSize = 9.sp)
+                    BasicInputArea(
+                        value = profile.temperature?.toString() ?: "",
+                        onValueChange = { onUpdate(profile.copy(temperature = it.toDoubleOrNull())) }
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // 個別プロンプト順序設定カード (保護モード & プリセット呼出/登録)
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = AppColors.backgroundDark),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(6.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = profile.useCustomPromptOrder,
+                                    onCheckedChange = { checked ->
+                                        onUpdate(profile.copy(useCustomPromptOrder = checked))
+                                    }
+                                )
+                                Column {
+                                    Text(
+                                        text = "このモデル固有のプロンプト順序を指定 (個別保護)",
+                                        color = if (profile.useCustomPromptOrder) AppColors.accentTealLight else AppColors.textPrimary,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = if (profile.useCustomPromptOrder) "※一括設定や言語自動選択に上書きされず、この順序を絶対優先します"
+                                               else "※OFF: 最上部の一括設定または言語自動選択に従います",
+                                        color = AppColors.textSecondary,
+                                        fontSize = 8.sp
+                                    )
                                 }
-                            )
+                            }
+
+                            if (profile.useCustomPromptOrder) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // 個別プロンプト順序入力欄
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(32.dp)
+                                            .background(AppColors.surfaceDark, RoundedCornerShape(4.dp))
+                                            .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
+                                            .padding(horizontal = 8.dp),
+                                        contentAlignment = Alignment.CenterStart
+                                    ) {
+                                        var textVal by remember(profile.promptOrder) { mutableStateOf(profile.promptOrder.joinToString(", ")) }
+                                        BasicTextField(
+                                            value = textVal,
+                                            onValueChange = { str ->
+                                                textVal = str
+                                                val list = str.split(Regex("[,\\s]+")).mapNotNull { it.toIntOrNull() }.filter { it in 1..7 }
+                                                if (list.isNotEmpty()) {
+                                                    onUpdate(profile.copy(promptOrder = list))
+                                                }
+                                            },
+                                            singleLine = true,
+                                            textStyle = TextStyle(color = AppColors.textPrimary, fontSize = 11.sp),
+                                            cursorBrush = SolidColor(AppColors.accentTealLight),
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
+
+                                    // プリセット呼出ボタン (▼)
+                                    var presetMenuOpen by remember { mutableStateOf(false) }
+                                    Box(
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .background(AppColors.accentTeal, RoundedCornerShape(4.dp))
+                                            .clickable { presetMenuOpen = true },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(Icons.Default.ArrowDropDown, contentDescription = "プリセット読込", tint = Color.White, modifier = Modifier.size(20.dp))
+                                        DropdownMenu(
+                                            expanded = presetMenuOpen,
+                                            onDismissRequest = { presetMenuOpen = false },
+                                            modifier = Modifier.background(AppColors.surfaceDark)
+                                        ) {
+                                            promptPresets.forEach { preset ->
+                                                val isCurrent = (profile.promptOrder == preset.order)
+                                                DropdownMenuItem(
+                                                    text = {
+                                                        Text(
+                                                            text = "${if (isCurrent) "✓ " else ""}${preset.label} [${preset.order.joinToString(",")}]",
+                                                            color = if (isCurrent) AppColors.accentTealLight else AppColors.textPrimary,
+                                                            fontSize = 11.sp
+                                                        )
+                                                    },
+                                                    onClick = {
+                                                        presetMenuOpen = false
+                                                        onUpdate(profile.copy(promptOrder = preset.order))
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    // プリセット登録ボタン (＋)
+                                    Box(
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .background(AppColors.accentTealDark, RoundedCornerShape(4.dp))
+                                            .clickable { onRequestSavePreset(profile.promptOrder) },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(Icons.Default.Add, contentDescription = "プリセット登録", tint = Color.White, modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            }
                         }
                     }
 

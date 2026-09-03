@@ -35,6 +35,7 @@ data class ModelProfile(
     val chunkSizeBytes: Int = 12000,
     val batchMaxBytes: Int = 12000,
     val promptOrder: List<Int> = listOf(1, 1),
+    val useCustomPromptOrder: Boolean = false, // trueなら一括設定や言語自動選択に上書きされず、このモデル固有のpromptOrderを絶対優先
     val reasoningEffort: String = "none", // OpenRouter用 (none, low, medium, high)
     val reasoningEnabled: Boolean? = null, // OpenRouter DeepSeek V3.2用 {"reasoning":{"enabled":false}}
     val providerOrder: List<String> = emptyList(), // OpenRouter用 (例: ["upstage", "baidu/fp8"])
@@ -198,9 +199,16 @@ data class LlmTranslationConfig(
     }
 
     /**
-     * 検出言語とプロファイルに応じた実効プロンプト順序を取得 (OFF時は手動順序を100%優先)
+     * 検出言語とプロファイルに応じた実効プロンプト順序を取得
+     * - profile.useCustomPromptOrder == true の場合は、言語自動選択よりもモデル固有設定を100%最優先 (保護)
+     * - それ以外で enableAutoPromptOrder == true の場合は、検出言語ごとのプロンプト順序を適用
+     * - それ以外は手動順序 (profile.promptOrder) を適用
      */
     fun getEffectivePromptOrder(sourceLang: SourceLanguage, profile: ModelProfile): List<Int> {
+        // モデル個別でカスタムプロンプト順序が有効な場合は絶対最優先
+        if (profile.useCustomPromptOrder) {
+            return profile.promptOrder
+        }
         if (!enableAutoPromptOrder) return profile.promptOrder
         return when (sourceLang) {
             SourceLanguage.KO -> autoPromptOrderKorean.ifEmpty { listOf(3, 7) }

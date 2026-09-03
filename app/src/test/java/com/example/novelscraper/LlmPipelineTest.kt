@@ -260,6 +260,35 @@ class LlmPipelineTest {
     }
 
     @Test
+    fun testEffectivePromptOrder_ModelCustomOverride() {
+        // 通常モデル (共通従属: useCustomPromptOrder = false)
+        val normalProfile = com.example.novelscraper.translation.llm.engine.ModelProfile(
+            modelName = "gemini-3.5-flash",
+            promptOrder = listOf(1, 1),
+            useCustomPromptOrder = false
+        )
+
+        // 特殊モデル (成人向け個別固定・保護: useCustomPromptOrder = true)
+        val nsfwProtectedProfile = com.example.novelscraper.translation.llm.engine.ModelProfile(
+            modelName = "gemma-4-31b-it",
+            promptOrder = listOf(4, 7),
+            useCustomPromptOrder = true
+        )
+
+        // 言語自動選択がONの場合
+        val autoConfig = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig(enableAutoPromptOrder = true)
+
+        // 1. 通常モデルは言語設定（韓: 3, 7 / 中: 1, 1）に従う
+        assertEquals(listOf(3, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, normalProfile))
+        assertEquals(listOf(1, 1), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, normalProfile))
+
+        // 2. 個別保護モデルは、言語自動選択がONでも上書きされず、固有設定 (4, 7) が100%最優先される！
+        assertEquals(listOf(4, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, nsfwProtectedProfile))
+        assertEquals(listOf(4, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, nsfwProtectedProfile))
+        assertEquals(listOf(4, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, nsfwProtectedProfile))
+    }
+
+    @Test
     fun testTextCharsetDetector_BOMAndFallback() {
         val utf8Bytes = "こんにちは世界".toByteArray(Charsets.UTF_8)
         val decodedUtf8 = TextCharsetDetector.decodeBytes(utf8Bytes)

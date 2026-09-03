@@ -95,6 +95,9 @@ fun LlmSettingsDialog(
     var langSplitEnglishKbText by remember { mutableStateOf(currentConfig.langSplitEnglishKb.toString()) }
 
     var enableAutoPromptOrder by remember { mutableStateOf(currentConfig.enableAutoPromptOrder) }
+    var autoPromptOrderKoreanText by remember { mutableStateOf(currentConfig.autoPromptOrderKorean.joinToString(", ")) }
+    var autoPromptOrderChineseText by remember { mutableStateOf(currentConfig.autoPromptOrderChinese.joinToString(", ")) }
+    var autoPromptOrderEnglishText by remember { mutableStateOf(currentConfig.autoPromptOrderEnglish.joinToString(", ")) }
 
     var enablePrevSrcContext by remember { mutableStateOf(currentConfig.enablePrevSrcContext) }
     var outputSubDir by remember { mutableStateOf(currentConfig.outputSubDir) }
@@ -181,132 +184,174 @@ fun LlmSettingsDialog(
 
                             Spacer(modifier = Modifier.height(8.dp))
 
-                            // 全モデル共通 プロンプト一括設定エリア
+                            // プロンプト順序設定エリア (言語連動自動選択 or 全モデル手動一括)
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = CardDefaults.cardColors(containerColor = AppColors.surfaceMedium),
                                 shape = RoundedCornerShape(6.dp)
                             ) {
                                 Column(modifier = Modifier.padding(10.dp)) {
-                                    Text("⚡ プロンプト順序 (全モデル一括設定):", color = AppColors.accentTealLight, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                    Spacer(modifier = Modifier.height(6.dp))
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        // プロンプト順序入力欄 (入力時に即座に全モデルへ自動反映)
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .height(36.dp)
-                                                .background(AppColors.backgroundDark, RoundedCornerShape(4.dp))
-                                                .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
-                                                .padding(horizontal = 8.dp),
-                                            contentAlignment = Alignment.CenterStart
-                                        ) {
-                                            BasicTextField(
-                                                value = batchPromptOrderText,
-                                                onValueChange = { str ->
-                                                    batchPromptOrderText = str
-                                                    val parsed = str.split(",").mapNotNull { it.trim().toIntOrNull() }
-                                                    if (parsed.isNotEmpty()) {
-                                                        for (i in modelProfiles.indices) {
-                                                            modelProfiles[i] = modelProfiles[i].copy(promptOrder = parsed)
-                                                        }
-                                                    }
-                                                },
-                                                singleLine = true,
-                                                textStyle = TextStyle(
-                                                    color = AppColors.textPrimary,
-                                                    fontSize = 12.sp
-                                                ),
-                                                cursorBrush = SolidColor(AppColors.accentTealLight),
-                                                modifier = Modifier.fillMaxWidth()
-                                            )
-                                        }
-
-                                        // 「プリセット」プルダウン正方形ボタン (純粋なBoxで 36.dp x 36.dp を完全一致)
-                                        Box(
-                                            modifier = Modifier
-                                                .size(36.dp)
-                                                .background(AppColors.accentTeal, RoundedCornerShape(4.dp))
-                                                .clickable { presetMenuExpanded = true },
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                Icons.Default.ArrowDropDown,
-                                                contentDescription = "プリセット",
-                                                tint = Color.White,
-                                                modifier = Modifier.size(24.dp)
-                                            )
-
-                                            DropdownMenu(
-                                                expanded = presetMenuExpanded,
-                                                onDismissRequest = { presetMenuExpanded = false },
-                                                modifier = Modifier.background(AppColors.surfaceDark)
-                                            ) {
-                                            promptPresets.forEach { preset ->
-                                                val isCurrent = (modelProfiles.firstOrNull()?.promptOrder == preset.order)
-                                                DropdownMenuItem(
-                                                    text = {
-                                                        Text(
-                                                            text = "${if (isCurrent) "✓ " else ""}${preset.label} [${preset.order.joinToString(",")}]",
-                                                            color = if (isCurrent) AppColors.accentTealLight else AppColors.textPrimary,
-                                                            fontSize = 11.sp,
-                                                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
-                                                        )
-                                                    },
-                                                    trailingIcon = {
-                                                        IconButton(
-                                                            onClick = {
-                                                                presetToDelete = preset
-                                                                presetMenuExpanded = false
-                                                            },
-                                                            modifier = Modifier.size(24.dp)
-                                                        ) {
-                                                            Icon(
-                                                                Icons.Default.Delete,
-                                                                contentDescription = "削除",
-                                                                tint = Color(0xFFFF6666),
-                                                                modifier = Modifier.size(14.dp)
-                                                            )
-                                                        }
-                                                    },
-                                                    onClick = {
-                                                        for (i in modelProfiles.indices) {
-                                                            modelProfiles[i] = modelProfiles[i].copy(promptOrder = preset.order)
-                                                        }
-                                                        batchPromptOrderText = preset.order.joinToString(", ")
-                                                        presetMenuExpanded = false
-                                                    }
-                                                )
-                                            }
-
-                                            HorizontalDivider(color = Color.DarkGray)
-
-                                            DropdownMenuItem(
-                                                text = {
-                                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                                        Icon(Icons.Default.Add, contentDescription = null, tint = AppColors.accentTeal, modifier = Modifier.size(14.dp))
-                                                        Spacer(modifier = Modifier.width(4.dp))
-                                                        Text("現在の順序をプリセット保存", color = AppColors.accentTealLight, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                                    }
-                                                },
-                                                onClick = {
-                                                    presetMenuExpanded = false
-                                                    showAddPresetDialog = true
-                                                }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(
+                                            checked = enableAutoPromptOrder,
+                                            onCheckedChange = { enableAutoPromptOrder = it }
+                                        )
+                                        Column {
+                                            Text("言語連動 プロンプト自動選択", color = AppColors.textPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            Text(
+                                                if (enableAutoPromptOrder) "※小説フォルダの言語に応じたプロンプト順序を自動適用"
+                                                else "※OFF: 成人向け等の手動プロンプト順序を最優先 (全モデル共通)",
+                                                color = AppColors.textSecondary,
+                                                fontSize = 9.sp
                                             )
                                         }
                                     }
-                                }
 
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text("※ 入力欄を変更すると全モデルに自動反映 /「▼」でプリセット選択・保存", color = AppColors.textSecondary, fontSize = 9.sp)
+                                    Spacer(modifier = Modifier.height(6.dp))
+
+                                    if (enableAutoPromptOrder) {
+                                        // 言語別 自動選択プロンプト順序のカスタマイズ入力欄
+                                        Text("言語別の適用プロンプト順序 (カンマ区切りで自由に変更可能):", color = AppColors.accentTealLight, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text("韓国語 (KO):", color = AppColors.textSecondary, fontSize = 9.sp)
+                                                BasicInputArea(value = autoPromptOrderKoreanText, onValueChange = { autoPromptOrderKoreanText = it })
+                                            }
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text("中国語 (ZH):", color = AppColors.textSecondary, fontSize = 9.sp)
+                                                BasicInputArea(value = autoPromptOrderChineseText, onValueChange = { autoPromptOrderChineseText = it })
+                                            }
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text("英語 (EN):", color = AppColors.textSecondary, fontSize = 9.sp)
+                                                BasicInputArea(value = autoPromptOrderEnglishText, onValueChange = { autoPromptOrderEnglishText = it })
+                                            }
+                                        }
+                                    } else {
+                                        // 手動一括プロンプト設定 (既存の入力欄 + プリセットボタン)
+                                        Text("⚡ 手動プロンプト順序 (全モデル一括設定):", color = AppColors.accentTealLight, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        Spacer(modifier = Modifier.height(6.dp))
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            // プロンプト順序入力欄 (入力時に即座に全モデルへ自動反映)
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(36.dp)
+                                                    .background(AppColors.backgroundDark, RoundedCornerShape(4.dp))
+                                                    .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 8.dp),
+                                                contentAlignment = Alignment.CenterStart
+                                            ) {
+                                                BasicTextField(
+                                                    value = batchPromptOrderText,
+                                                    onValueChange = { str ->
+                                                        batchPromptOrderText = str
+                                                        val parsed = str.split(",").mapNotNull { it.trim().toIntOrNull() }
+                                                        if (parsed.isNotEmpty()) {
+                                                            for (i in modelProfiles.indices) {
+                                                                modelProfiles[i] = modelProfiles[i].copy(promptOrder = parsed)
+                                                            }
+                                                        }
+                                                    },
+                                                    singleLine = true,
+                                                    textStyle = TextStyle(
+                                                        color = AppColors.textPrimary,
+                                                        fontSize = 12.sp
+                                                    ),
+                                                    cursorBrush = SolidColor(AppColors.accentTealLight),
+                                                    modifier = Modifier.fillMaxWidth()
+                                                )
+                                            }
+
+                                            // 「プリセット」プルダウン正方形ボタン (純粋なBoxで 36.dp x 36.dp を完全一致)
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(36.dp)
+                                                    .background(AppColors.accentTeal, RoundedCornerShape(4.dp))
+                                                    .clickable { presetMenuExpanded = true },
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.ArrowDropDown,
+                                                    contentDescription = "プリセット",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(24.dp)
+                                                )
+
+                                                DropdownMenu(
+                                                    expanded = presetMenuExpanded,
+                                                    onDismissRequest = { presetMenuExpanded = false },
+                                                    modifier = Modifier.background(AppColors.surfaceDark)
+                                                ) {
+                                                    promptPresets.forEach { preset ->
+                                                        val isCurrent = (modelProfiles.firstOrNull()?.promptOrder == preset.order)
+                                                        DropdownMenuItem(
+                                                            text = {
+                                                                Text(
+                                                                    text = "${if (isCurrent) "✓ " else ""}${preset.label} [${preset.order.joinToString(",")}]",
+                                                                    color = if (isCurrent) AppColors.accentTealLight else AppColors.textPrimary,
+                                                                    fontSize = 11.sp,
+                                                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
+                                                                )
+                                                            },
+                                                            trailingIcon = {
+                                                                IconButton(
+                                                                    onClick = {
+                                                                        presetToDelete = preset
+                                                                        presetMenuExpanded = false
+                                                                    },
+                                                                    modifier = Modifier.size(24.dp)
+                                                                ) {
+                                                                    Icon(
+                                                                        Icons.Default.Delete,
+                                                                        contentDescription = "削除",
+                                                                        tint = Color(0xFFFF6666),
+                                                                        modifier = Modifier.size(14.dp)
+                                                                    )
+                                                                }
+                                                            },
+                                                            onClick = {
+                                                                for (i in modelProfiles.indices) {
+                                                                    modelProfiles[i] = modelProfiles[i].copy(promptOrder = preset.order)
+                                                                }
+                                                                batchPromptOrderText = preset.order.joinToString(", ")
+                                                                presetMenuExpanded = false
+                                                            }
+                                                        )
+                                                    }
+
+                                                    HorizontalDivider(color = Color.DarkGray)
+
+                                                    DropdownMenuItem(
+                                                        text = {
+                                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                Icon(Icons.Default.Add, contentDescription = null, tint = AppColors.accentTeal, modifier = Modifier.size(14.dp))
+                                                                Spacer(modifier = Modifier.width(4.dp))
+                                                                Text("現在の順序をプリセット保存", color = AppColors.accentTealLight, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                            }
+                                                        },
+                                                        onClick = {
+                                                            presetMenuExpanded = false
+                                                            showAddPresetDialog = true
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text("※ 入力欄を変更すると全モデルに自動反映 /「▼」でプリセット選択・保存", color = AppColors.textSecondary, fontSize = 9.sp)
+                                    }
+                                }
                             }
-                        }
 
                             Spacer(modifier = Modifier.height(10.dp))
 
@@ -550,15 +595,6 @@ fun LlmSettingsDialog(
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(checked = enableAutoPromptOrder, onCheckedChange = { enableAutoPromptOrder = it })
-                                Column {
-                                    Text("言語連動 プロンプト自動選択 (韓:3,7 / 中:1,1 / 英:2,7)", color = AppColors.textPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                    Text("※OFF時は各モデルの手動プロンプト順序（成人向け等）を最優先", color = AppColors.textSecondary, fontSize = 9.sp)
-                                }
-                            }
-
                             Spacer(modifier = Modifier.height(6.dp))
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -696,8 +732,10 @@ fun LlmSettingsDialog(
                                 enableAutoLanguageSize = enableAutoLanguageSize,
                                 langSplitKoreanKb = langSplitKoreanKbText.toIntOrNull()?.coerceIn(5, 100) ?: 25,
                                 langSplitChineseKb = langSplitChineseKbText.toIntOrNull()?.coerceIn(5, 100) ?: 20,
-                                langSplitEnglishKb = langSplitEnglishKbText.toIntOrNull()?.coerceIn(5, 100) ?: 15,
-                                enableAutoPromptOrder = enableAutoPromptOrder
+                                enableAutoPromptOrder = enableAutoPromptOrder,
+                                autoPromptOrderKorean = autoPromptOrderKoreanText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(3, 7) },
+                                autoPromptOrderChinese = autoPromptOrderChineseText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(1, 1) },
+                                autoPromptOrderEnglish = autoPromptOrderEnglishText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(2, 7) }
                             )
                             onSaveConfig(newConfig)
                         },

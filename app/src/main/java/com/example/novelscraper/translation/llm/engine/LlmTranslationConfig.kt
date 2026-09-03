@@ -169,7 +169,10 @@ data class LlmTranslationConfig(
     val langSplitEnglishKb: Int = 15,           // 英語 分割閾値 (KB)
 
     // 言語連動プロンプト自動選択 (成人向け等の手動選択を保護するためデフォルトOFF)
-    val enableAutoPromptOrder: Boolean = false
+    val enableAutoPromptOrder: Boolean = false,
+    val autoPromptOrderKorean: List<Int> = listOf(3, 7),
+    val autoPromptOrderChinese: List<Int> = listOf(1, 1),
+    val autoPromptOrderEnglish: List<Int> = listOf(2, 7)
 ) {
     /**
      * 検出言語とプロファイルに応じた実効分割閾値（バイト）を取得
@@ -200,9 +203,9 @@ data class LlmTranslationConfig(
     fun getEffectivePromptOrder(sourceLang: SourceLanguage, profile: ModelProfile): List<Int> {
         if (!enableAutoPromptOrder) return profile.promptOrder
         return when (sourceLang) {
-            SourceLanguage.KO -> listOf(3, 7) // 3, 7 (韓)
-            SourceLanguage.ZH -> listOf(1, 1) // 1, 1 (中)
-            SourceLanguage.EN -> listOf(2, 7) // 2, 7 (英)
+            SourceLanguage.KO -> autoPromptOrderKorean.ifEmpty { listOf(3, 7) }
+            SourceLanguage.ZH -> autoPromptOrderChinese.ifEmpty { listOf(1, 1) }
+            SourceLanguage.EN -> autoPromptOrderEnglish.ifEmpty { listOf(2, 7) }
             SourceLanguage.JA -> profile.promptOrder
         }
     }

@@ -194,11 +194,14 @@ class LlmTranslationEngine(
         val primaryProfile = config.modelProfiles.firstOrNull() ?: ModelProfile(modelName = "gemini-3.5-flash")
         val splitThreshold = config.getEffectiveSplitThreshold(sourceLang, primaryProfile)
         val sizeLog = if (config.enableAutoLanguageSize) " (言語別サイズ自動: ${splitThreshold / 1000}KB)" else " (固定サイズ: ${splitThreshold / 1000}KB)"
-        val promptOrderLog = if (config.enableAutoPromptOrder) {
-            " (プロンプト自動選択: ${config.getEffectivePromptOrder(sourceLang, primaryProfile)})"
-        } else {
-            " (手動プロンプト: ${primaryProfile.promptOrder})"
+        val modelPromptSummaries = config.modelProfiles.mapIndexed { idx, prof ->
+            val pOrder = config.getEffectivePromptOrder(sourceLang, prof)
+            val tag = if (prof.useCustomPromptOrder) "個別" else "共通"
+            "#${idx + 1}(${prof.modelName}): $pOrder[$tag]"
+        }.ifEmpty {
+            listOf("#1(${primaryProfile.modelName}): ${config.getEffectivePromptOrder(sourceLang, primaryProfile)}[デフォルト]")
         }
+        val promptOrderLog = " (プロンプト構成: ${modelPromptSummaries.joinToString(" / ")})"
         addLog("⚙️ 翻訳パラメータ: ${sourceLang.displayName}$sizeLog$promptOrderLog")
 
         // 人名辞書生成 (有効時: 動的プロバイダー & 並列バッチ)

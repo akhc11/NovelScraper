@@ -242,11 +242,21 @@ class LlmPipelineTest {
         assertEquals(listOf(4, 7), defaultManualConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, nsfwProfile))
         assertEquals(listOf(4, 7), defaultManualConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, nsfwProfile))
 
-        // 2. 自動選択ON: 言語に応じた最適プロンプトに自動切替されること
+        // 2. 自動選択ON (デフォルト値): 言語に応じた最適プロンプトに自動切替されること
         val autoConfig = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig(enableAutoPromptOrder = true)
         assertEquals(listOf(3, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, nsfwProfile))
         assertEquals(listOf(1, 1), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, nsfwProfile))
         assertEquals(listOf(2, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, nsfwProfile))
+
+        // 3. 自動選択ON (ユーザーがカスタマイズした順序): ユーザー設定値が適用されること
+        val customAutoConfig = autoConfig.copy(
+            autoPromptOrderKorean = listOf(3, 1),
+            autoPromptOrderChinese = listOf(1, 6, 7),
+            autoPromptOrderEnglish = listOf(2, 1)
+        )
+        assertEquals(listOf(3, 1), customAutoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, nsfwProfile))
+        assertEquals(listOf(1, 6, 7), customAutoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, nsfwProfile))
+        assertEquals(listOf(2, 1), customAutoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, nsfwProfile))
     }
 
     @Test

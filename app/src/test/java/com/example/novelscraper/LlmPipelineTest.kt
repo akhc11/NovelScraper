@@ -286,6 +286,11 @@ class LlmPipelineTest {
         assertEquals(listOf(4, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, nsfwProtectedProfile))
         assertEquals(listOf(4, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, nsfwProtectedProfile))
         assertEquals(listOf(4, 7), autoConfig.getEffectivePromptOrder(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, nsfwProtectedProfile))
+
+        // 3. 空リスト入力時の安全フォールバック検証 (デフォルト [1, 1] が保証されること)
+        val emptyListProfile = normalProfile.copy(promptOrder = emptyList())
+        val sanitized = emptyListProfile.copy(promptOrder = emptyListProfile.promptOrder.ifEmpty { listOf(1, 1) })
+        assertEquals(listOf(1, 1), sanitized.promptOrder)
     }
 
     @Test

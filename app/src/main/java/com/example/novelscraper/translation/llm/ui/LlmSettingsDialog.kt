@@ -349,6 +349,19 @@ fun LlmSettingsDialog(
                                                             showAddPresetDialog = true
                                                         }
                                                     )
+
+                                                    DropdownMenuItem(
+                                                        text = {
+                                                            Text("⚡ 全モデルに強制一括適用 (個別保護を解除)", color = Color(0xFFFFB74D), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                        },
+                                                        onClick = {
+                                                            presetMenuExpanded = false
+                                                            val parsed = batchPromptOrderText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(1, 1) }
+                                                            for (i in modelProfiles.indices) {
+                                                                modelProfiles[i] = modelProfiles[i].copy(promptOrder = parsed, useCustomPromptOrder = false)
+                                                            }
+                                                        }
+                                                    )
                                                 }
                                             }
                                         }
@@ -397,6 +410,13 @@ fun LlmSettingsDialog(
                                     Text("モデルが登録されていません。「＋ モデルを追加」から追加してください", color = AppColors.textSecondary, fontSize = 11.sp)
                                 }
                             } else {
+                                val parsedBatchOrder = batchPromptOrderText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(1, 1) }
+                                val effectiveCommonOrder = if (enableAutoPromptOrder) {
+                                    autoPromptOrderKoreanText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(3, 7) }
+                                } else {
+                                    parsedBatchOrder
+                                }
+
                                 modelProfiles.forEachIndexed { index, profile ->
                                     val isExpanded = (expandedModelId == profile.id)
                                     ModelProfileCard(
@@ -405,6 +425,8 @@ fun LlmSettingsDialog(
                                         profile = profile,
                                         isExpanded = isExpanded,
                                         promptPresets = promptPresets,
+                                        commonPromptOrder = effectiveCommonOrder,
+                                        isAutoPromptEnabled = enableAutoPromptOrder,
                                         onToggleExpand = {
                                             expandedModelId = if (isExpanded) null else profile.id
                                         },
@@ -720,7 +742,7 @@ fun LlmSettingsDialog(
                                 geminiCooldownSec = geminiCooldownSecText.toIntOrNull() ?: 15,
                                 openRouterApiKey = openRouterKey.trim(),
                                 groqApiKey = groqKey.trim(),
-                                modelProfiles = modelProfiles.toList(),
+                                modelProfiles = modelProfiles.map { it.copy(promptOrder = it.promptOrder.ifEmpty { listOf(1, 1) }) },
                                 promptPresets = promptPresets.toList(),
                                 customPrompts = customPromptsMap.toMap(),
                                 outputSubDir = outputSubDir.trim().ifBlank { "翻訳完了_LLM" },
@@ -833,7 +855,8 @@ fun LlmSettingsDialog(
     if (showAddModelDialog) {
         AddModelSelectionDialog(
             onAdd = { newProf ->
-                modelProfiles.add(newProf)
+                val currentBatchOrder = batchPromptOrderText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(1, 1) }
+                modelProfiles.add(newProf.copy(promptOrder = currentBatchOrder, useCustomPromptOrder = false))
                 expandedModelId = newProf.id
                 showAddModelDialog = false
             },
@@ -852,6 +875,8 @@ private fun ModelProfileCard(
     profile: ModelProfile,
     isExpanded: Boolean,
     promptPresets: List<PromptOrderPreset>,
+    commonPromptOrder: List<Int>,
+    isAutoPromptEnabled: Boolean,
     onToggleExpand: () -> Unit,
     onUpdate: (ModelProfile) -> Unit,
     onMoveUp: () -> Unit,
@@ -1060,9 +1085,7 @@ private fun ModelProfileCard(
                                             onValueChange = { str ->
                                                 textVal = str
                                                 val list = str.split(Regex("[,\\s]+")).mapNotNull { it.toIntOrNull() }.filter { it in 1..7 }
-                                                if (list.isNotEmpty()) {
-                                                    onUpdate(profile.copy(promptOrder = list))
-                                                }
+                                                onUpdate(profile.copy(promptOrder = list.ifEmpty { listOf(1, 1) }))
                                             },
                                             singleLine = true,
                                             textStyle = TextStyle(color = AppColors.textPrimary, fontSize = 11.sp),
@@ -1115,6 +1138,24 @@ private fun ModelProfileCard(
                                     ) {
                                         Icon(Icons.Default.Add, contentDescription = "プリセット登録", tint = Color.White, modifier = Modifier.size(16.dp))
                                     }
+                                }
+                            } else {
+                                // 保護OFF時: 現在の実効プロンプト順序を可視化プレビュー
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(AppColors.surfaceMedium.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                                        .border(1.dp, Color.DarkGray.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                                ) {
+                                    val modeLabel = if (isAutoPromptEnabled) "言語連動に従う" else "共通一括設定に従う"
+                                    Text(
+                                        text = "現在の適用順序: [ ${commonPromptOrder.joinToString(", ")} ] ($modeLabel)",
+                                        color = AppColors.accentTealLight,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                         }

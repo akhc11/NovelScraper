@@ -1018,4 +1018,101 @@ class LlmPipelineTest {
         assertNotNull(emptyParsed)
         assertTrue(emptyParsed!!.characters.isEmpty())
     }
+
+    @Test
+    fun testGeminiQuotaInfo_MinuteAndDailyMixed() {
+        // 実429本文の代表形：分間枠と日次枠が混在＋RetryInfo
+        val body = """
+            {"error": {"code": 429, "message": "Resource has been exhausted (e.g. check quota).",
+             "status": "RESOURCE_EXHAUSTED",
+             "details": [
+              {"@type": "type.googleapis.com/google.rpc.Help",
+               "links": [{"description": "Learn more", "url": "https://ai.google.dev/gemini-api/docs/rate-limits"}]},
+              {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+               "violations": [
+                {"quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_input_token_count",
+                 "quotaId": "GenerateContentInputTokensPerModelPerMinute-FreeTier",
+                 "quotaDimensions": {"location": "global", "model": "gemini-2.0-flash"}},
+                {"quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                 "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+                 "quotaDimensions": {"location": "global", "model": "gemini-2.0-flash"}},
+                {"quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                 "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                 "quotaDimensions": {"model": "gemini-2.0-flash", "location": "global"}}
+               ]},
+              {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "17s"}
+             ]}}
+        """.trimIndent()
+
+        val info = com.example.novelscraper.translation.llm.api.GeminiApiClient.parseQuotaInfo(body)
+        assertEquals(3, info.quotaIds.size)
+        assertTrue(info.quotaIds.any { it.contains("PerMinute") })
+        assertTrue(info.quotaIds.any { it.contains("PerDay") })
+        assertEquals(listOf("gemini-2.0-flash"), info.models)
+        assertEquals(17, info.retryDelaySec)
+    }
+
+    @Test
+    fun testGeminiQuotaInfo_MinuteOnlyIsNotDaily() {
+        val body = """
+            {"error": {"code": 429, "message": "Resource has been exhausted.",
+             "status": "RESOURCE_EXHAUSTED",
+             "details": [
+              {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+               "violations": [
+                {"quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                 "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+                 "quotaDimensions": {"location": "global", "model": "gemini-3.5-flash-lite"}}
+               ]},
+              {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "31s"}
+             ]}}
+        """.trimIndent()
+
+        val info = com.example.novelscraper.translation.llm.api.GeminiApiClient.parseQuotaInfo(body)
+        assertEquals(1, info.quotaIds.size)
+        assertEquals(listOf("gemini-3.5-flash-lite"), info.models)
+        assertEquals(31, info.retryDelaySec)
+
+        // 要約文にquotaIdが載るため、既存の日次判定がそのまま使える
+        val summary = "[quota=${info.quotaIds.joinToString("|")} model=${info.models.joinToString("|")} retryDelay=${info.retryDelaySec}s]: $body"
+        assertFalse(com.example.novelscraper.translation.llm.rotation.ApiKeyPoolManager.isDailyQuotaExceeded(summary))
+
+        val dailySummary = "[quota=GenerateRequestsPerDayPerProjectPerModel-FreeTier model=gemini-3.5-flash-lite retryDelay=1s]: exhausted"
+        assertTrue(com.example.novelscraper.translation.llm.rotation.ApiKeyPoolManager.isDailyQuotaExceeded(dailySummary))
+    }
+
+    @Test
+    fun testGeminiQuotaInfo_BrokenBody() {
+        val empty = com.example.novelscraper.translation.llm.api.GeminiApiClient.parseQuotaInfo("not json at all")
+        assertTrue(empty.quotaIds.isEmpty())
+        assertTrue(empty.models.isEmpty())
+        assertNull(empty.retryDelaySec)
+
+        val noDetails = com.example.novelscraper.translation.llm.api.GeminiApiClient.parseQuotaInfo("""{"error":{"code":429}}""")
+        assertTrue(noDetails.quotaIds.isEmpty())
+        assertNull(noDetails.retryDelaySec)
+    }
+
+    @Test
+    fun testParseRetryDelaySec() {
+        val parse = com.example.novelscraper.translation.llm.api.GeminiApiClient::parseRetryDelaySec
+        assertEquals(17, parse("17s"))
+        assertEquals(18, parse("17.5963543s"))
+        assertEquals(1, parse("500ms"))
+        assertEquals(60, parse("60s"))
+        assertNull(parse(null))
+        assertNull(parse(""))
+        assertNull(parse("soon"))
+        assertNull(parse("0s"))
+    }
+
+    @Test
+    fun testQuotaSameModelWaitSec() {
+        val wait = com.example.novelscraper.translation.llm.api.LlmRetryPolicy::quotaSameModelWaitSec
+        assertEquals(5L, wait(1))
+        assertEquals(17L, wait(17))
+        assertEquals(120L, wait(500))
+        assertEquals(30L, wait(30))
+        assertEquals(com.example.novelscraper.translation.llm.api.LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES, 2)
+    }
 }

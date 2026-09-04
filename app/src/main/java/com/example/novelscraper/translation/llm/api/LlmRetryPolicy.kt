@@ -16,6 +16,16 @@ object LlmRetryPolicy {
     const val MAX_DELAY_MS = 60000L
     const val JITTER_MS = 1000L
 
+    /**
+     * 分間制限疑いの429で同モデル再試行する上限回数。
+     * これを超えたら従来通りモデル/キーローテーションへ進む。
+     */
+    const val MAX_SAME_MODEL_QUOTA_RETRIES = 2
+
+    /** 同モデル再試行の待機秒数の下限・上限 */
+    const val MIN_QUOTA_WAIT_SEC = 5
+    const val MAX_QUOTA_WAIT_SEC = 120
+
     fun backoffDelayMs(
         retry: Int,
         baseMs: Long = BASE_DELAY_MS,
@@ -28,5 +38,13 @@ object LlmRetryPolicy {
         val capped = min(exponential, maxMs)
         val jitter = if (jitterMs > 0) random.nextLong(0, jitterMs + 1) else 0L
         return capped + jitter
+    }
+
+    /**
+     * 分間制限疑いの429における同モデル再試行の待機秒数。
+     * サーバー指定の retryDelay を優先し、なければ30秒。5〜120秒に丸める。
+     */
+    fun quotaSameModelWaitSec(retryAfterSec: Int): Long {
+        return retryAfterSec.toLong().coerceIn(MIN_QUOTA_WAIT_SEC.toLong(), MAX_QUOTA_WAIT_SEC.toLong())
     }
 }

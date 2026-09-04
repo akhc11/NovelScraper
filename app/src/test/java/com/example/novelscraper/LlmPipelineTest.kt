@@ -1117,6 +1117,49 @@ class LlmPipelineTest {
     }
 
     @Test
+    fun testErrorClassifier_HttpStatus() {
+        val classify = com.example.novelscraper.translation.llm.api.ErrorClassifier::classifyHttpStatus
+
+        assertEquals(
+            com.example.novelscraper.translation.llm.api.ApiFailureKind.QUOTA,
+            classify(429, "Resource has been exhausted").kind
+        )
+        val auth = classify(401, "Unauthorized")
+        assertEquals(com.example.novelscraper.translation.llm.api.ApiFailureKind.CONFIG, auth.kind)
+        assertEquals(com.example.novelscraper.translation.llm.api.ConfigErrorKind.AUTH_FAILED, auth.configKind)
+
+        val payment = classify(402, "Insufficient credits")
+        assertEquals(com.example.novelscraper.translation.llm.api.ApiFailureKind.CONFIG, payment.kind)
+        assertEquals(com.example.novelscraper.translation.llm.api.ConfigErrorKind.PAYMENT_REQUIRED, payment.configKind)
+
+        val notFound = classify(404, "No endpoints found for model")
+        assertEquals(com.example.novelscraper.translation.llm.api.ApiFailureKind.CONFIG, notFound.kind)
+        assertEquals(com.example.novelscraper.translation.llm.api.ConfigErrorKind.MODEL_NOT_FOUND, notFound.configKind)
+
+        assertEquals(
+            com.example.novelscraper.translation.llm.api.ApiFailureKind.TRANSIENT,
+            classify(503, "overloaded").kind
+        )
+        assertEquals(
+            com.example.novelscraper.translation.llm.api.ApiFailureKind.FATAL,
+            classify(400, "Request contains an invalid argument").kind
+        )
+
+        val billing = classify(400, "FAILED_PRECONDITION: Enable billing")
+        assertEquals(com.example.novelscraper.translation.llm.api.ApiFailureKind.CONFIG, billing.kind)
+
+        val badKey = classify(400, "API_KEY_INVALID")
+        assertEquals(com.example.novelscraper.translation.llm.api.ApiFailureKind.CONFIG, badKey.kind)
+        assertEquals(com.example.novelscraper.translation.llm.api.ConfigErrorKind.AUTH_FAILED, badKey.configKind)
+
+        // 不明コード・壊文でも例外なくFATAL側に倒す
+        assertEquals(com.example.novelscraper.translation.llm.api.ApiFailureKind.FATAL, classify(418, "").kind)
+        assertTrue(
+            com.example.novelscraper.translation.llm.api.ConfigErrorKind.MODEL_NOT_FOUND.guidance().contains("モデルID")
+        )
+    }
+
+    @Test
     fun testInputSizeEstimateKb_MatchesThreshold() {
         // 画面表示の目安値と実効閾値が同一計算（単一管理点）であること
         val config = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig()

@@ -28,6 +28,15 @@ sealed class LlmApiResult {
         val reason: String
     ) : LlmApiResult()
 
+    /**
+     * 設定修正まで何度やっても直らない確定失敗 (404モデルなし・401/403キー不良・402残高不足等)。
+     * 即座の再試行・キー回しをせず、`.failed`も作らず設定確認の案内へ回すこと。
+     */
+    data class ConfigError(
+        val message: String,
+        val kind: ConfigErrorKind = ConfigErrorKind.UNKNOWN
+    ) : LlmApiResult()
+
     /** 致命的エラー (認証失敗 401/403、モデル非存在 404 等) */
     data class FatalError(
         val statusCode: Int,

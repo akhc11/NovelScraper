@@ -460,10 +460,9 @@ object NovelDictionaryGenerator {
                                 onLog("  📖 辞書生成: バッチ $batchNum/$totalBatches 完了")
                                 return@withPermit rawText
                             }
-                            is LlmApiResult.QuotaExceeded -> {
+                                                        is LlmApiResult.QuotaExceeded -> {
                                 // 429検知：全バッチに即座にクールダウンを共有！
                                 keyTracker.markCooldown(currentKeyIdx)
-
                                 if (retry < maxRetries) {
                                     val nextEntry = keyTracker.getAvailableKey(currentKeyIdx + 1)
                                     if (nextEntry != null) {
@@ -479,6 +478,11 @@ object NovelDictionaryGenerator {
                                 } else {
                                     onLog("  ❌ [429 Quota Exceeded] バッチ $batchNum: 最大再試行回数に達しました")
                                 }
+                            }
+                            is LlmApiResult.ConfigError -> {
+                                // 設定不良はキー回ししても直らないため即中断（次回設定修正後に再開）
+                                onLog("  ⚙️ [設定エラー] バッチ $batchNum: (${result.kind}) ${result.kind.guidance()} ➔ ${result.message.take(200)}")
+                                break
                             }
                             else -> {
                                 if (retry < maxRetries) {
@@ -563,9 +567,13 @@ object NovelDictionaryGenerator {
                             delay(1000L)
                         }
                     }
-                    else -> {
-                        if (mergeRetry < 2) delay(1000L * (mergeRetry + 1))
-                    }
+                            is LlmApiResult.ConfigError -> {
+                                onLog("  ⚙️ [設定エラー] 辞書マージ: (${mergeResult.kind}) ${mergeResult.kind.guidance()} ➔ 中断します")
+                                break
+                            }
+                            else -> {
+                                if (mergeRetry < 2) delay(1000L * (mergeRetry + 1))
+                            }
                 }
             }
             parsedMerged
@@ -619,9 +627,13 @@ object NovelDictionaryGenerator {
                         delay(1000L)
                     }
                 }
-                else -> {
-                    if (reviewRetry < 1) delay(1000L)
-                }
+                            is LlmApiResult.ConfigError -> {
+                                onLog("  ⚙️ [設定エラー] 辞書レビュー: (${reviewResult.kind}) ${reviewResult.kind.guidance()} ➔ 中断します")
+                                break
+                            }
+                            else -> {
+                                if (reviewRetry < 1) delay(1000L)
+                            }
             }
         }
 

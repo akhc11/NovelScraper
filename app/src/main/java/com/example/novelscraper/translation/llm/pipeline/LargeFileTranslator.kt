@@ -144,6 +144,9 @@ object LargeFileTranslator {
             val chunkPrevSrcTail = if (partNum == 1) prevSourceTail else null
 
             var chunkTranslatedText: String? = null
+            // チャンク試行の失敗内訳（設定エラーのみなら.failedを作らない）
+            var sawConfigError = false
+            var sawOtherFailure = false
 
             // --- 1. ドライバーループ ---
             for ((drvIdx, profile) in profiles.withIndex()) {
@@ -155,10 +158,12 @@ object LargeFileTranslator {
                 }
 
                 val promptList = config.getEffectivePromptOrder(sourceLang, profile).ifEmpty { listOf(1, 1) }
+                // 設定エラー時は同ドライバーの残りプロンプトを無駄打ちしない
+                var chunkAbortPrompts = false
 
                 // --- 2. プロンプトループ ---
                 for (promptNum in promptList) {
-                    if (isStopRequested() || !currentCoroutineContext().isActive) break
+                    if (chunkAbortPrompts || isStopRequested() || !currentCoroutineContext().isActive) break
 
                     val prompt = PromptBuilder.buildPrompt(
                         promptNumber = promptNum,
@@ -218,6 +223,7 @@ object LargeFileTranslator {
                                 }
                             }
                             is LlmApiResult.QuotaExceeded -> {
+                                sawOtherFailure = true
                                 onLog("    ⏳ $chunkName: Quota制限検知 (${apiResult.message.take(200)})")
                                 if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled &&
                                     !ApiKeyPoolManager.isDailyQuotaExceeded(apiResult.message) &&
@@ -244,6 +250,7 @@ object LargeFileTranslator {
                                 }
                             }
                             is LlmApiResult.NetworkError -> {
+                                sawOtherFailure = true
                                 if (retryCount + 1 >= maxRetryCount) {
                                     onLog("    ⚠️ $chunkName: ネットワークエラー (${apiResult.message}) → 再試行上限到達")
                                 } else {
@@ -254,11 +261,19 @@ object LargeFileTranslator {
                                 retryCount++
                             }
                             is LlmApiResult.QualityError -> {
+                                sawOtherFailure = true
                                 onLog("    ⚠️ $chunkName: レスポンス品質エラー (${apiResult.reason}) → 次のプロンプトへ")
                                 break
                             }
                             is LlmApiResult.FatalError -> {
+                                sawOtherFailure = true
                                 onLog("    ❌ $chunkName: 致命的APIエラー (${apiResult.statusCode} ${apiResult.message})")
+                                break
+                            }
+                            is LlmApiResult.ConfigError -> {
+                                sawConfigError = true
+                                chunkAbortPrompts = true
+                                onLog("    ⚙️ $chunkName: 設定エラー (${apiResult.kind}): ${apiResult.kind.guidance()} → 次のモデルへ")
                                 break
                             }
                         }
@@ -286,6 +301,11 @@ object LargeFileTranslator {
                 // 中断された場合は .failed を作成せず、作業状態を保持して次回再開できるようにする
                 if (isStopRequested() || !currentCoroutineContext().isActive) {
                     onLog("🛑 $chunkName : 停止要求により中断 (中間状態保持)")
+                    return false
+                }
+                // 設定エラーのみで全滅 → .failedを作らず設定修正を促す
+                if (sawConfigError && !sawOtherFailure) {
+                    onLog("    ⚙️ $chunkName : 設定エラーのため.failedは作りません（設定修正後に再実行してください）")
                     return false
                 }
                 val failedChunk = outDir.findFile("$chunkName.failed") ?: outDir.createFile("text/plain", "$chunkName.failed")

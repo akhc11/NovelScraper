@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper.translation.llm.api
+package com.example.novelscraper.translation.llm.api
 
 import com.example.novelscraper.translation.llm.api.LlmApiClient.awaitResponse
 import com.example.novelscraper.translation.llm.api.model.*
@@ -82,19 +82,19 @@ object GeminiApiClient {
                 }
                 429 -> {
                     LlmApiResult.QuotaExceeded(
-                        message = "Gemini Quota Exceeded (429): ${bodyString.take(150)}"
+                        message = "Gemini Quota Exceeded (429): ${bodyString.take(3000)}"
                     )
                 }
                 500, 502, 503, 504 -> {
                     LlmApiResult.NetworkError(
                         statusCode = code,
-                        message = "Gemini Server Error ($code): ${bodyString.take(150)}"
+                        message = "Gemini Server Error ($code): ${bodyString.take(1000)}"
                     )
                 }
                 else -> {
                     LlmApiResult.FatalError(
                         statusCode = code,
-                        message = "Gemini HTTP $code: ${bodyString.take(150)}"
+                        message = "Gemini HTTP $code: ${bodyString.take(1000)}"
                     )
                 }
             }

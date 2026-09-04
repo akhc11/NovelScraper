@@ -1,5 +1,6 @@
 package com.example.novelscraper.ui.components
 
+import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -46,6 +47,8 @@ fun TranslationPanel(
     onStartTranslationClick: (TranslationEngine) -> Unit,
     onStopTranslationClick: (TranslationEngine) -> Unit,
     onOpenWebTranslateClick: (TranslationEngine) -> Unit,
+    onToggleWebSplit: ((Boolean) -> Unit)? = null,
+    onUpdateWebSplitSize: ((Int) -> Unit)? = null,
     onCloseClick: () -> Unit
 ) {
     val activeEngine = uiState.activeTranslationEngine
@@ -94,7 +97,8 @@ fun TranslationPanel(
             val selectedTabIndex = when (activeEngine) {
                 TranslationEngine.GOOGLE -> 0
                 TranslationEngine.DEEPL -> 1
-                TranslationEngine.LLM_API -> 2
+                TranslationEngine.PAPAGO -> 2
+                TranslationEngine.LLM_API -> 3
             }
 
             TabRow(
@@ -132,6 +136,23 @@ fun TranslationPanel(
                                 "DeepL",
                                 fontWeight = if (activeEngine == TranslationEngine.DEEPL) FontWeight.Bold else FontWeight.Normal,
                                 color = if (activeEngine == TranslationEngine.DEEPL) AppColors.accentTeal else AppColors.textSecondary,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                )
+                Tab(
+                    selected = activeEngine == TranslationEngine.PAPAGO,
+                    onClick = { onSelectEngineTab(TranslationEngine.PAPAGO) },
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (uiState.papagoTranslationState.isTranslating) {
+                                Text("● ", color = Color(0xFF4CAF50), fontSize = 11.sp)
+                            }
+                            Text(
+                                "Papago",
+                                fontWeight = if (activeEngine == TranslationEngine.PAPAGO) FontWeight.Bold else FontWeight.Normal,
+                                color = if (activeEngine == TranslationEngine.PAPAGO) AppColors.accentTeal else AppColors.textSecondary,
                                 fontSize = 12.sp
                             )
                         }
@@ -306,10 +327,11 @@ fun TranslationPanel(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val outputInfo = if (activeEngine == TranslationEngine.GOOGLE) {
-                        "自動検出 → 日本語 (出力: 翻訳完了_GOOGLE / 3,500字)"
-                    } else {
-                        "自動検出 → 日本語 (出力: 翻訳完了_DEEPL / 1,300字)"
+                    val outputInfo = when (activeEngine) {
+                        TranslationEngine.GOOGLE -> "自動検出 → 日本語 (出力: 翻訳完了_GOOGLE / 3,500字)"
+                        TranslationEngine.DEEPL -> "自動検出 → 日本語 (出力: 翻訳完了_DEEPL / 1,300字)"
+                        TranslationEngine.PAPAGO -> "韓国語/自動 → 日本語 (出力: 翻訳完了_PAPAGO / 1,800字)"
+                        TranslationEngine.LLM_API -> "AI・LLM (出力: 翻訳完了_LLM)"
                     }
 
                     Text(
@@ -324,7 +346,12 @@ fun TranslationPanel(
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = if (activeEngine == TranslationEngine.GOOGLE) "Google翻訳を開く" else "DeepLを開く",
+                            text = when (activeEngine) {
+                                TranslationEngine.GOOGLE -> "Google翻訳を開く"
+                                TranslationEngine.DEEPL -> "DeepLを開く"
+                                TranslationEngine.PAPAGO -> "Papagoを開く"
+                                TranslationEngine.LLM_API -> "AI Studioを開く"
+                            },
                             color = AppColors.accentTealLight,
                             fontSize = 11.sp
                         )
@@ -340,8 +367,64 @@ fun TranslationPanel(
                         .background(AppColors.surfaceMedium, RoundedCornerShape(4.dp))
                         .padding(8.dp)
                 ) {
+                    // 事前物理分割トグル行
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "巨大小説の事前物理分割",
+                                color = AppColors.textPrimary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "指定フォルダ直下の生テキストを指定文字数ごとに分割して順次翻訳",
+                                color = AppColors.textTertiary,
+                                fontSize = 9.sp
+                            )
+                        }
+                        Switch(
+                            checked = uiState.isWebSplitEnabled,
+                            onCheckedChange = { onToggleWebSplit?.invoke(it) },
+                            enabled = !engineState.isTranslating,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = AppColors.accentTeal,
+                                uncheckedThumbColor = Color.Gray,
+                                uncheckedTrackColor = AppColors.surfaceDark
+                            ),
+                            modifier = Modifier.scale(0.8f)
+                        )
+                    }
+
+                    if (uiState.isWebSplitEnabled) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        DelaySettingInputRow(
+                            label = "分割文字数:",
+                            value = uiState.webSplitSizeChars.toString(),
+                            enabled = !engineState.isTranslating,
+                            unit = "文字",
+                            onValueChange = { newText ->
+                                val chars = newText.toIntOrNull()
+                                if (chars != null && chars >= 500) {
+                                    onUpdateWebSplitSize?.invoke(chars)
+                                }
+                            }
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
                     Text(
-                        text = "待機時間設定 (${if (activeEngine == TranslationEngine.GOOGLE) "Google" else "DeepL"}):",
+                        text = "待機時間設定 (${when (activeEngine) {
+                            TranslationEngine.GOOGLE -> "Google"
+                            TranslationEngine.DEEPL -> "DeepL"
+                            TranslationEngine.PAPAGO -> "Papago"
+                            TranslationEngine.LLM_API -> "AI/LLM"
+                        }}):",
                         color = AppColors.textSecondary,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
@@ -425,7 +508,12 @@ fun TranslationPanel(
                         Icon(Icons.Filled.PlayArrow, contentDescription = "翻訳開始", tint = Color.White, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (activeEngine == TranslationEngine.GOOGLE) "Google翻訳開始" else "DeepL翻訳開始",
+                            text = when (activeEngine) {
+                                TranslationEngine.GOOGLE -> "Google翻訳開始"
+                                TranslationEngine.DEEPL -> "DeepL翻訳開始"
+                                TranslationEngine.PAPAGO -> "Papago翻訳開始"
+                                TranslationEngine.LLM_API -> "AI翻訳開始"
+                            },
                             color = Color.White,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
@@ -461,6 +549,7 @@ private fun DelaySettingInputRow(
     label: String,
     value: String,
     enabled: Boolean,
+    unit: String = "秒",
     onValueChange: (String) -> Unit
 ) {
     var textValue by remember(value) { mutableStateOf(value) }
@@ -506,7 +595,7 @@ private fun DelaySettingInputRow(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-            Text(text = "秒", color = AppColors.textTertiary, fontSize = 11.sp)
+            Text(text = unit, color = AppColors.textTertiary, fontSize = 11.sp)
         }
     }
 }

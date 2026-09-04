@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper.translation.llm.pipeline
+package com.example.novelscraper.translation.llm.pipeline
 
 sealed class QualityValidationResult {
     object Success : QualityValidationResult()
@@ -52,10 +52,6 @@ object TranslationQualityValidator {
 
     /**
      * モデルの前口上1行を検知する判定関数 (bash v29.0.5.7.0 _is_preamble_line 準拠)
-     *
-     * 「以下」「了解」「承知」などの単語で始まるだけで削除してしまうと、
-     * 小説本文の台詞や地の文 (例:「了解しました、隊長。」「以下は彼の手記である。」) まで
-     * 誤って削除してしまうため、末尾が句点・コロン等で終わる短い決まり文句に限定して判定する。
      */
     fun isPreambleLine(rawLine: String): Boolean {
         val line = rawLine.trim().lowercase()
@@ -79,9 +75,18 @@ object TranslationQualityValidator {
         val lines = content.lines()
         if (lines.isEmpty()) return content.trim()
 
-        val firstLine = lines.first()
-        return if (isPreambleLine(firstLine)) {
-            lines.drop(1).joinToString("\n").trim()
+        // 先頭から連続する空行・前口上行をすべて除去する
+        // (LLMが空行を挟んでから「Here is the translation:」等を出力するケースに対応)
+        var dropCount = 0
+        for (line in lines) {
+            if (line.isBlank() || isPreambleLine(line)) {
+                dropCount++
+            } else {
+                break
+            }
+        }
+        return if (dropCount > 0) {
+            lines.drop(dropCount).joinToString("\n").trim()
         } else {
             content.trim()
         }
@@ -89,11 +94,15 @@ object TranslationQualityValidator {
 
     /**
      * 原文と訳文の総合品質バリデーション
+     * @param customMinRatio ユーザー設定の最小許容サイズ比率 (%)
+     * @param customMaxRatio ユーザー設定の最大許容サイズ比率 (%)
      */
     fun validate(
         sourceText: String,
         translatedText: String,
-        sourceLang: SourceLanguage
+        sourceLang: SourceLanguage,
+        customMinRatio: Int? = null,
+        customMaxRatio: Int? = null
     ): QualityValidationResult {
         val cleaned = stripPreamble(translatedText).trim()
         if (cleaned.isBlank()) {
@@ -119,8 +128,8 @@ object TranslationQualityValidator {
             return lineLenCheck
         }
 
-        // 4. サイズ比チェック (省略・水増し検出)
-        val sizeRatioCheck = checkSizeRatio(sourceText, cleaned, sourceLang)
+        // 4. サイズ比チェック (設定値または言語別適正デフォルト)
+        val sizeRatioCheck = checkSizeRatio(sourceText, cleaned, sourceLang, customMinRatio, customMaxRatio)
         if (sizeRatioCheck is QualityValidationResult.Failure) {
             return sizeRatioCheck
         }
@@ -206,25 +215,30 @@ object TranslationQualityValidator {
     private fun checkSizeRatio(
         sourceText: String,
         translatedText: String,
-        sourceLang: SourceLanguage
+        sourceLang: SourceLanguage,
+        customMinRatio: Int? = null,
+        customMaxRatio: Int? = null
     ): QualityValidationResult {
         val srcBytes = sourceText.toByteArray(Charsets.UTF_8).size
         val outBytes = translatedText.toByteArray(Charsets.UTF_8).size
         // 150B未満の極小テキスト (章タイトル・短い一文等) は比率誤差が大きいためバイパス
         if (srcBytes < 150) return QualityValidationResult.Success
 
-        val (minRatio, maxRatio) = when (sourceLang) {
+        val (defaultMin, defaultMax) = when (sourceLang) {
             SourceLanguage.ZH -> 102 to 200
             SourceLanguage.KO -> 102 to 150
-            SourceLanguage.EN -> 105 to 200
+            SourceLanguage.EN -> 105 to 220
             SourceLanguage.JA -> 100 to 200
         }
 
+        val minRatio = customMinRatio ?: defaultMin
+        val maxRatio = customMaxRatio ?: defaultMax
+
         if (outBytes * 100 < srcBytes * minRatio) {
-            return QualityValidationResult.Failure("サイズ比不足 ($outBytes B / $srcBytes B = ${outBytes * 100 / srcBytes}%) → 省略疑い")
+            return QualityValidationResult.Failure("サイズ比不足 ($outBytes B / $srcBytes B = ${outBytes * 100 / srcBytes}%) → 省略疑い [基準:${minRatio}%]")
         }
         if (outBytes * 100 > srcBytes * maxRatio) {
-            return QualityValidationResult.Failure("サイズ比超過 ($outBytes B / $srcBytes B = ${outBytes * 100 / srcBytes}%) → 水増し疑い")
+            return QualityValidationResult.Failure("サイズ比超過 ($outBytes B / $srcBytes B = ${outBytes * 100 / srcBytes}%) → 水増し疑い [基準:${maxRatio}%]")
         }
 
         return QualityValidationResult.Success

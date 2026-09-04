@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper.translation.llm.pipeline
+package com.example.novelscraper.translation.llm.pipeline
 
 object CompletionMarkerHelper {
     const val MARKER = "[SRC_END]"
@@ -32,8 +32,15 @@ object CompletionMarkerHelper {
         }
 
         if (text.endsWith(MARKER)) {
-            val stripped = text.substring(0, text.length - MARKER.length).trim()
-            return stripped
+            return text.substring(0, text.length - MARKER.length).trim()
+        }
+
+        // LLMが [SRC_END] の後に後口上（「以上です。」「Enjoy!」等）を付加した場合のフォールバック:
+        // 末尾200文字以内にマーカーが存在すれば、マーカー以前のテキストを正常な翻訳として抽出する
+        val searchStart = (text.length - 200).coerceAtLeast(0)
+        val markerIdx = text.lastIndexOf(MARKER)
+        if (markerIdx >= searchStart) {
+            return text.substring(0, markerIdx).trim()
         }
 
         // マーカーが見つからない → 生成途絶

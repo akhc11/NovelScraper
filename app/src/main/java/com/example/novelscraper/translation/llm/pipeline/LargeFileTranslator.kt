@@ -10,7 +10,9 @@ import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.llm.engine.ModelProfile
 import com.example.novelscraper.translation.llm.prompt.PromptBuilder
 import com.example.novelscraper.translation.llm.rotation.LlmRotationManager
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 /**
  * 巨大小説テキストを段落・空行境界でチャンク分割し、
@@ -33,11 +35,12 @@ object LargeFileTranslator {
         dictStyle: String? = null,
         dictGenders: Map<String, String>? = null,
         prevSourceTail: String? = null,
+        isStopRequested: () -> Boolean = { false },
         onLog: (String) -> Unit = {}
     ): Boolean {
         val profiles = config.modelProfiles.ifEmpty { listOf(ModelProfile(modelName = "gemini-3.5-flash")) }
-        val primaryProfile = profiles.first()
-        val chunkSize = config.getEffectiveChunkSize(sourceLang, primaryProfile)
+        val activeProfile = rotationManager.getCurrentProfile()
+        val chunkSize = config.getEffectiveChunkSize(sourceLang, activeProfile)
 
         // 作業ディレクトリ .parts_${filename}
         val workDirName = ".parts_${fileName}"
@@ -89,6 +92,11 @@ object LargeFileTranslator {
         var prevTranslatedSummary = ""
 
         for ((index, chunkDoc) in chunkDocs.withIndex()) {
+            if (isStopRequested() || !currentCoroutineContext().isActive) {
+                onLog("🛑 $fileName : 中止要求検知 → チャンク作業状態を保持して安全終了")
+                return false
+            }
+
             val partNum = index + 1
             val chunkName = chunkDoc.name ?: "chunk_${String.format("%04d", partNum)}"
 
@@ -118,6 +126,8 @@ object LargeFileTranslator {
 
             // --- 1. ドライバーループ ---
             for ((drvIdx, profile) in profiles.withIndex()) {
+                if (isStopRequested() || !currentCoroutineContext().isActive) break
+
                 if (drvIdx > 0) {
                     val prevProf = profiles[drvIdx - 1]
                     onLog("  🔄 $chunkName: ${prevProf.modelName} 全失敗 → ${profile.modelName} (${profile.provider.name}) へフォールバック")
@@ -127,6 +137,8 @@ object LargeFileTranslator {
 
                 // --- 2. プロンプトループ ---
                 for (promptNum in promptList) {
+                    if (isStopRequested() || !currentCoroutineContext().isActive) break
+
                     val prompt = PromptBuilder.buildPrompt(
                         promptNumber = promptNum,
                         customPrompts = config.customPrompts,
@@ -148,45 +160,50 @@ object LargeFileTranslator {
                     } else MAX_RETRIES
 
                     while (retryCount < maxRetryCount) {
-                        onLog("  📦 [${partNum}/${total}] $chunkName (${profile.modelName} / P$promptNum / 試行:${retryCount + 1})")
+                        if (isStopRequested() || !currentCoroutineContext().isActive) break
 
-                        val apiResult = when (profile.provider) {
+                        val activeProfile = rotationManager.getCurrentProfile()
+                        val targetProfile = if (profile.provider == LlmProvider.GEMINI) activeProfile else profile
+
+                        onLog("  📦 [${partNum}/${total}] $chunkName (${targetProfile.modelName} / P$promptNum / 試行:${retryCount + 1})")
+
+                        val apiResult = when (targetProfile.provider) {
                             LlmProvider.GEMINI -> {
                                 val key = if (config.geminiRotationEnabled) rotationManager.getCurrentKey() else config.geminiApiKeys.firstOrNull() ?: ""
                                 GeminiApiClient.generateContent(
                                     apiKey = key,
-                                    model = profile.modelName,
+                                    model = targetProfile.modelName,
                                     prompt = prompt,
                                     sourceText = preparedSource,
-                                    temperature = profile.temperature,
-                                    thinkingLevel = profile.thinkingLevel,
-                                    thinkingBudget = profile.thinkingBudget
+                                    temperature = targetProfile.temperature,
+                                    thinkingLevel = targetProfile.thinkingLevel,
+                                    thinkingBudget = targetProfile.thinkingBudget
                                 )
                             }
                             LlmProvider.OPENROUTER -> {
                                 OpenAiCompatibleClient.chatCompletion(
                                     apiKey = config.openRouterApiKey,
-                                    model = profile.modelName,
+                                    model = targetProfile.modelName,
                                     endpoint = config.openRouterEndpoint,
                                     prompt = prompt,
                                     sourceText = preparedSource,
-                                    temperature = profile.temperature ?: 0.5,
-                                    topP = profile.topP ?: 0.9,
-                                    repetitionPenalty = profile.repetitionPenalty ?: 1.05,
-                                    providerOrder = profile.providerOrder,
-                                    providerAllowFallbacks = profile.providerAllowFallbacks,
-                                    reasoningEffort = profile.reasoningEffort,
-                                    reasoningEnabled = profile.reasoningEnabled
+                                    temperature = targetProfile.temperature ?: 0.5,
+                                    topP = targetProfile.topP ?: 0.9,
+                                    repetitionPenalty = targetProfile.repetitionPenalty ?: 1.05,
+                                    providerOrder = targetProfile.providerOrder,
+                                    providerAllowFallbacks = targetProfile.providerAllowFallbacks,
+                                    reasoningEffort = targetProfile.reasoningEffort,
+                                    reasoningEnabled = targetProfile.reasoningEnabled
                                 )
                             }
                             LlmProvider.GROQ -> {
                                 OpenAiCompatibleClient.chatCompletion(
                                     apiKey = config.groqApiKey,
-                                    model = profile.modelName,
+                                    model = targetProfile.modelName,
                                     endpoint = config.groqEndpoint,
                                     prompt = prompt,
                                     sourceText = preparedSource,
-                                    temperature = profile.temperature ?: 0.5
+                                    temperature = targetProfile.temperature ?: 0.5
                                 )
                             }
                         }
@@ -200,7 +217,8 @@ object LargeFileTranslator {
                                 }
 
                                 val cleaned = TranslationQualityValidator.stripPreamble(markerStripped)
-                                val validation = TranslationQualityValidator.validate(chunkText, cleaned, sourceLang)
+                                val (minRatio, maxRatio) = config.getSizeRatioRange(sourceLang)
+                                val validation = TranslationQualityValidator.validate(chunkText, cleaned, sourceLang, minRatio, maxRatio)
                                 if (validation is QualityValidationResult.Success) {
                                     chunkTranslatedText = cleaned
                                     break
@@ -211,8 +229,11 @@ object LargeFileTranslator {
                             }
                             is LlmApiResult.QuotaExceeded -> {
                                 onLog("    ⏳ $chunkName: Quota制限検知 (${apiResult.message})")
-                                if (profile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
-                                    rotationManager.advanceRotation { onLog("      $it") }
+                                if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
+                                    val advanced = rotationManager.advanceRotation(apiResult.message) { onLog("      $it") }
+                                    if (!advanced) {
+                                        return false
+                                    }
                                     retryCount++
                                     continue
                                 } else {
@@ -251,6 +272,11 @@ object LargeFileTranslator {
                 onLog("  ✅ [${partNum}/${total}] $chunkName (保存完了)")
                 prevTranslatedSummary = chunkTranslatedText.lines().takeLast(20).joinToString("\n")
             } else {
+                // 中断された場合は .failed を作成せず、作業状態を保持して次回再開できるようにする
+                if (isStopRequested() || !currentCoroutineContext().isActive) {
+                    onLog("🛑 $chunkName : 停止要求により中断 (中間状態保持)")
+                    return false
+                }
                 val failedChunk = outDir.createFile("text/plain", "$chunkName.failed")
                 if (failedChunk != null) {
                     writeDocContent(context, failedChunk, chunkText)
@@ -262,6 +288,11 @@ object LargeFileTranslator {
             if (config.requestDelaySec > 0) {
                 delay(config.requestDelaySec * 1000L)
             }
+        }
+
+        // 中止要求があった場合は結合処理へ進まない
+        if (isStopRequested() || !currentCoroutineContext().isActive) {
+            return false
         }
 
         // 全チャンク揃ったか確認
@@ -282,7 +313,11 @@ object LargeFileTranslator {
             val cName = doc.name ?: continue
             val cOut = outDir.findFile(cName) ?: continue
             val text = readDocContent(context, cOut) ?: continue
-            if (combinedSb.isNotEmpty()) combinedSb.append("\n\n")
+            if (combinedSb.isNotEmpty()) {
+                // チャンク境界の余分な空行増殖を防止: 前のテキスト末尾の改行と重複しないよう調整
+                val prevEndsWithNewline = combinedSb.endsWith("\n")
+                combinedSb.append(if (prevEndsWithNewline) "\n" else "\n\n")
+            }
             combinedSb.append(text)
         }
 

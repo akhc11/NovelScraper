@@ -4,8 +4,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.util.Log
 import android.webkit.ConsoleMessage
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -15,12 +17,17 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -77,8 +84,8 @@ fun MainScreen(
 
     val folderLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        uri?.let { treeUri ->
+    ) { treeUri ->
+        if (treeUri != null) {
             try {
                 context.contentResolver.takePersistableUriPermission(
                     treeUri,
@@ -103,7 +110,8 @@ fun MainScreen(
         }
     }
 
-    BackHandler(enabled = uiState.activeDialog !is ActiveDialog.None || uiState.overlay != Overlay.None || (webViewRef?.canGoBack() == true)) {
+    // 戻るボタンのハンドリング
+    BackHandler(enabled = true) {
         if (uiState.activeDialog !is ActiveDialog.None) {
             viewModel.dismissDialog()
             return@BackHandler
@@ -147,7 +155,8 @@ fun MainScreen(
                     }
                 },
                 onStarClick = {
-                    val url = uiState.currentUrl
+                    val liveUrl = webViewRef?.url?.takeIf { it.isNotBlank() && !it.startsWith("javascript:") && !it.startsWith("data:") }
+                    val url = liveUrl ?: uiState.currentUrl
                     if (url.isNotEmpty()) {
                         val title = webViewRef?.title?.ifEmpty { url } ?: url
                         viewModel.showAddFavoriteDialog(title, url)
@@ -186,8 +195,12 @@ fun MainScreen(
                     callbacks.onToggleLiveTranslate(webViewRef)
                 },
                 onStartScrapingClick = {
-                    val url = uiState.currentUrl
+                    val liveUrl = webViewRef?.url?.takeIf { it.isNotBlank() && !it.startsWith("javascript:") && !it.startsWith("data:") }
+                    val url = liveUrl ?: uiState.currentUrl
                     if (url.isNotEmpty()) {
+                        if (liveUrl != null && liveUrl != uiState.currentUrl) {
+                            viewModel.setCurrentUrl(liveUrl)
+                        }
                         val currentTask = activeTasks.firstOrNull { it.currentUrl == url }
                         if (currentTask != null) {
                             currentTask.stop()
@@ -198,6 +211,9 @@ fun MainScreen(
                 },
                 onTestRunClick = {
                     webViewRef?.let { callbacks.onTestRun(it) }
+                },
+                onSearchTextQueryClick = {
+                    viewModel.showTextQuerySearchDialog()
                 }
             )
         },
@@ -231,10 +247,28 @@ fun MainScreen(
                             callbacks.onSetupWebView(this)
                             
                             webViewClient = object : WebViewClient() {
+                                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                    super.onPageStarted(view, url, favicon)
+                                    url?.let {
+                                        if (it.isNotEmpty() && !it.startsWith("javascript:") && !it.startsWith("data:")) {
+                                            viewModel.setCurrentUrl(it)
+                                        }
+                                    }
+                                }
+
+                                override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                                    super.doUpdateVisitedHistory(view, url, isReload)
+                                    url?.let {
+                                        if (it.isNotEmpty() && !it.startsWith("javascript:") && !it.startsWith("data:")) {
+                                            viewModel.setCurrentUrl(it)
+                                        }
+                                    }
+                                }
+
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     super.onPageFinished(view, url)
                                     url?.let {
-                                        if (it.isNotEmpty() && !it.startsWith("javascript:")) {
+                                        if (it.isNotEmpty() && !it.startsWith("javascript:") && !it.startsWith("data:")) {
                                             viewModel.setCurrentUrl(it)
                                             WebViewHelper.clearGoogleTranslateCookies(it)
                                         }
@@ -243,6 +277,17 @@ fun MainScreen(
                                     if (uiState.isInspectMode) {
                                         callbacks.onInjectInspector(view)
                                     }
+                                }
+
+                                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                                    val didCrash = detail?.didCrash() ?: false
+                                    val reason = if (didCrash) "レンダラークラッシュ (C++エラー)" else "メモリ不足によるOS強制終了 (OOM)"
+                                    Log.e("MainScreen", "WebView onRenderProcessGone 検知: $reason")
+                                    try {
+                                        view?.destroy()
+                                    } catch (_: Exception) {}
+                                    Toast.makeText(context, "ブラウザ描画プロセスが停止しました ($reason)", Toast.LENGTH_LONG).show()
+                                    return true // アプリ本体のクラッシュを100%阻止
                                 }
                             }
                             webViewRef = this
@@ -258,11 +303,9 @@ fun MainScreen(
                             view.settings.userAgentString = targetUA
                             view.reload()
                         }
-                        val lastDarkMode = view.tag as? Boolean
-                        if (lastDarkMode != uiState.isWebViewDarkMode) {
-                            view.tag = uiState.isWebViewDarkMode
+                        if (view.tag != uiState.isWebViewDarkMode) {
                             WebViewHelper.applyDarkMode(view, uiState.isWebViewDarkMode)
-                            view.reload()
+                            view.tag = uiState.isWebViewDarkMode
                         }
                     },
                     modifier = Modifier
@@ -283,6 +326,28 @@ fun MainScreen(
                 )
             }
 
+            // 虫眼鏡モード中の右下フローティング「文字検索」ボタン
+            if (uiState.isInspectMode) {
+                FloatingActionButton(
+                    onClick = { viewModel.showTextQuerySearchDialog() },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(bottom = 24.dp, end = 16.dp),
+                    containerColor = AppColors.accentTeal,
+                    contentColor = Color.White,
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(Icons.Filled.Search, contentDescription = "文字検索", modifier = Modifier.size(18.dp))
+                        Text("文字検索", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
             // 前面レイヤー: パネル群
             when (val ov = uiState.overlay) {
                 is Overlay.Panel -> when (ov.type) {
@@ -294,12 +359,21 @@ fun MainScreen(
                             presets = presets,
                             onCloseClick = { viewModel.closePanels() },
                             onPresetSelected = { name, config -> viewModel.applyPresetState(name, config) },
-                            onSavePresetClick = { viewModel.showSavePresetDialog(uiState.currentPresetName, uiState.currentUrl) },
-                            onDeletePresetClick = { viewModel.deletePreset(uiState.currentPresetName) },
+                            onSavePresetClick = {
+                                val domain = uiState.currentUrl.substringAfter("://").substringBefore("/")
+                                val defaultName = if (domain.isNotEmpty()) "Preset ($domain)" else "New Preset"
+                                viewModel.showSavePresetDialog(defaultName, uiState.currentUrl)
+                            },
+                            onDeletePresetClick = {
+                                if (uiState.currentPresetName.isNotEmpty()) {
+                                    viewModel.deletePreset(uiState.currentPresetName)
+                                }
+                            },
                             onConfigChange = { newConfig -> viewModel.updateCurrentConfig { newConfig } },
                             onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
                             onExportPresetsClick = { exportLauncher.launch("novel_scraper_presets.json") },
-                            onToggleWebViewDarkModeClick = { viewModel.toggleWebViewDarkMode() }
+                            onToggleWebViewDarkModeClick = { viewModel.toggleWebViewDarkMode() },
+                            currentUrl = uiState.currentUrl
                         )
                     }
                     PanelType.HISTORY -> {
@@ -357,10 +431,13 @@ fun MainScreen(
                             onOpenLlmSettingsClick = { viewModel.showLlmSettingsDialog() },
                             onStartTranslationClick = { engine -> viewModel.startTranslation(engine) },
                             onStopTranslationClick = { engine -> viewModel.stopTranslation(engine) },
+                            onToggleWebSplit = { enabled -> viewModel.toggleWebSplit(enabled) },
+                            onUpdateWebSplitSize = { sizeChars -> viewModel.updateWebSplitSizeChars(sizeChars) },
                             onOpenWebTranslateClick = { engine ->
                                 val targetUrl = when (engine) {
                                     TranslationEngine.GOOGLE -> "https://translate.google.com/?sl=auto&tl=ja&op=translate"
                                     TranslationEngine.DEEPL -> "https://www.deepl.com/ja/translator#auto/ja/"
+                                    TranslationEngine.PAPAGO -> "https://papago.naver.com/?sk=ko&tk=ja"
                                     TranslationEngine.LLM_API -> "https://aistudio.google.com/"
                                 }
                                 webViewRef?.let { callbacks.onNavigate(targetUrl, it) }
@@ -444,6 +521,23 @@ fun MainScreen(
                             Toast.makeText(context, "AI翻訳設定を保存しました", Toast.LENGTH_SHORT).show()
                         },
                         onDismiss = { viewModel.dismissDialog() }
+                    )
+                }
+                is ActiveDialog.TextQuerySearch -> {
+                    TextQuerySearchDialog(
+                        onDismiss = { viewModel.dismissDialog() },
+                        onSearch = { query ->
+                            if (!uiState.isInspectMode) {
+                                viewModel.setInspectMode(true)
+                                webViewRef?.let { callbacks.onInjectInspector(it) }
+                            }
+                            val js = ScrapingScriptBuilder.buildSearchTextInInspectorScript(query)
+                            webViewRef?.evaluateJavascript(js) { res ->
+                                if (res == "false" || res == null || res == "null") {
+                                    Toast.makeText(context, "該当するテキストが見つかりません", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
                     )
                 }
                 ActiveDialog.None -> {}

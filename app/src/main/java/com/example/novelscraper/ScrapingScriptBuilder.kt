@@ -6,28 +6,74 @@ import java.util.Base64
 
 object ScrapingScriptBuilder {
 
-    // --- JS共通スニペット（3スクリプト間の重複排除。仕様変更はここ1箇所のみ） ---
+    // --- JS共通スニペット（セレクタ生成・エスケープ・除外判定ユーティリティ） ---
     // 注意: Kotlin raw文字列のため `\s` 等はJSへそのまま渡る（二重エスケープ禁止）
     private val JS_UNIQUE_SELECTOR = """
+        function safeEscape(str) {
+            if (!str) return '';
+            if (window.CSS && CSS.escape) return CSS.escape(str);
+            return String(str).replace(/([ #;?%&,.+*~\':"!^$[\]()=>|\/@])/g, '\\$1');
+        }
+
+        function isUsefulClass(cls) {
+            if (!cls || cls.length < 2 || cls.length > 40) return false;
+            if (cls.startsWith('__novel') || cls.startsWith('notranslate') || cls.startsWith('skiptranslate')) return false;
+            // Tailwind / 汎用ユーティリティクラス（flex, text-*, p-*, m-*, w-*, h-*, col-*, bg-* など）の除外
+            if (/^(flex|inline|block|grid|text-|bg-|p[xytrbl]?-|m[xytrbl]?-|w-|h-|border|rounded|shadow|overflow|font-|items-|justify-|relative|absolute|fixed|static)/.test(cls)) return false;
+            // 短いランダムハッシュ系（例: sc-1234, css-abc1234, svelte-xyz）の除外
+            if (/^(css|sc|svelte|styled|jsx)-[a-zA-Z0-9]+$/.test(cls)) return false;
+            return true;
+        }
+
         function getUniqueSelector(el) {
             if (!el || el.nodeType !== 1) return '';
             var path = [];
-            while (el && el.nodeType === 1) {
-                var sel = el.nodeName.toLowerCase();
-                if (el.id && !String(el.id).match(/^[0-9]/)) {
-                    sel += '#' + el.id;
-                    path.unshift(sel);
+            var curr = el;
+            while (curr && curr.nodeType === 1) {
+                var tag = curr.nodeName.toLowerCase();
+                if (curr.id && !String(curr.id).match(/^[0-9]/)) {
+                    path.unshift(tag + '#' + safeEscape(curr.id));
                     break;
-                } else {
-                    var sib = el, nth = 1;
-                    while (sib = sib.previousElementSibling) {
-                        if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++;
-                    }
-                    if (nth !== 1) sel += ':nth-of-type(' + nth + ')';
                 }
-                path.unshift(sel);
-                el = el.parentNode;
-                if (path.length > 5 || (el && el.tagName === 'BODY')) break;
+                var testId = curr.getAttribute('data-testid') || curr.getAttribute('data-id');
+                if (testId) {
+                    path.unshift(tag + '[data-testid="' + safeEscape(testId) + '"]');
+                    break;
+                }
+                var rel = curr.getAttribute('rel');
+                if (rel) {
+                    path.unshift(tag + '[rel="' + safeEscape(rel) + '"]');
+                    break;
+                }
+                var usefulClass = null;
+                if (typeof curr.className === 'string' && curr.className.trim()) {
+                    var classes = curr.className.trim().split(/\s+/);
+                    for (var i = 0; i < classes.length; i++) {
+                        if (isUsefulClass(classes[i])) { usefulClass = classes[i]; break; }
+                    }
+                }
+                if (usefulClass) {
+                    var clsSel = tag + '.' + safeEscape(usefulClass);
+                    try {
+                        if (document.querySelectorAll(clsSel).length === 1) {
+                            path.unshift(clsSel);
+                            break;
+                        }
+                    } catch(e){}
+                    var sib = curr, nth = 1;
+                    while (sib = sib.previousElementSibling) {
+                        if (sib.nodeName.toLowerCase() === tag) nth++;
+                    }
+                    path.unshift(clsSel + (nth > 1 ? ':nth-of-type(' + nth + ')' : ''));
+                } else {
+                    var sib = curr, nth = 1;
+                    while (sib = sib.previousElementSibling) {
+                        if (sib.nodeName.toLowerCase() === tag) nth++;
+                    }
+                    path.unshift(tag + (nth > 1 ? ':nth-of-type(' + nth + ')' : ''));
+                }
+                curr = curr.parentNode;
+                if (path.length > 4 || (curr && (curr.tagName === 'BODY' || curr.tagName === 'HTML'))) break;
             }
             return path.join(' > ');
         }
@@ -35,11 +81,18 @@ object ScrapingScriptBuilder {
 
     private val JS_SHORT_SELECTOR = """
         function shortSelector(node) {
+            if (!node || node.nodeType !== 1) return null;
             var tag = node.tagName.toLowerCase();
-            if (node.id && !String(node.id).match(/^[0-9]/)) return tag + '#' + node.id;
+            if (node.id && !String(node.id).match(/^[0-9]/)) return tag + '#' + safeEscape(node.id);
+            var testId = node.getAttribute('data-testid') || node.getAttribute('data-id');
+            if (testId) return tag + '[data-testid="' + safeEscape(testId) + '"]';
+            var rel = node.getAttribute('rel');
+            if (rel) return tag + '[rel="' + safeEscape(rel) + '"]';
             if (typeof node.className === 'string' && node.className.trim()) {
-                var cls = node.className.trim().split(/\s+/)[0];
-                if (cls) return tag + '.' + cls;
+                var classes = node.className.trim().split(/\s+/);
+                for (var i = 0; i < classes.length; i++) {
+                    if (isUsefulClass(classes[i])) return tag + '.' + safeEscape(classes[i]);
+                }
             }
             return null;
         }
@@ -61,8 +114,6 @@ object ScrapingScriptBuilder {
                     ${JS_UNIQUE_SELECTOR}
 
                     // --- 除外処理 ---
-                    // 前回実行で付与した除外マークを必ず剥離してから現configを適用する
-                    // （設定から除外セレクタを削除した際に古いマークが残留するバグの根因修正）
                     try {
                         document.querySelectorAll('.__novel_exclude').forEach(function(el) { el.classList.remove('__novel_exclude'); });
                     } catch(e){}
@@ -91,41 +142,76 @@ object ScrapingScriptBuilder {
                     if (config.folder && config.folder.startsWith('@')) {
                         f = config.folder.substring(1);
                     } else if (config.folder) {
-                        var el = document.querySelector(config.folder);
-                        if (el) f = el.innerText;
-                    }
-                    if (!f && config.folderLink) {
-                        try {
-                            var fel = document.querySelector(config.folderLink);
-                            if (fel) {
-                                var a = fel.tagName === 'A' ? fel : fel.closest('a');
-                                if (a) {
-                                    var href = a.href || a.getAttribute('href');
-                                    if (href) f = '(別URL先で取得: ' + (new URL(href, location.href).href) + ')';
-                                }
-                            }
-                        } catch(e){}
+                        var targetSel = config.folder.trim();
+                        var el = null;
+                        try { el = document.querySelector(targetSel); } catch(e){}
+                        if (el) {
+                            f = (el.tagName === 'TITLE') ? (document.title || el.textContent || "") : (el.innerText || el.textContent || "");
+                        } else if (targetSel.toLowerCase() === 'title') {
+                            f = document.title || "";
+                        }
                     }
                     if (!f) {
                         var el = document.querySelector('.series-title, .novel_title, .novel-title, .p-novel__title');
-                        if (el) f = el.innerText;
+                        if (el) f = el.innerText || el.textContent || "";
                     }
                     if (!f && meta.isPartOf) f = meta.isPartOf.name || meta.isPartOf;
+                    if (!f && config.folder && config.folder.trim().toLowerCase() === 'title') {
+                        f = document.title || "";
+                    }
+
+                    // 作品名 Regex (config.regex) による抽出・加工
+                    if (f && config.regex) {
+                        try {
+                            if (/^(?:del|delete|remove):/i.test(config.regex)) {
+                                var pat = config.regex.replace(/^(?:del|delete|remove):/i, '').trim();
+                                f = f.replace(new RegExp(pat, 'g'), '');
+                            } else {
+                                var m = f.match(new RegExp(config.regex));
+                                if (m) f = (m[1] !== undefined && m[1] !== null) ? m[1] : m[0];
+                            }
+                        } catch(e){}
+                    }
                     result.folderName = clean(f);
 
                     var t = config.title ? document.querySelector(config.title) : null;
                     if (!t) t = document.querySelector('.novel_subtitle, .ep-title, .episode-title, .chapter-title, h1, h2');
-                    result.title = t ? clean(t.innerText) : "";
+                    result.title = t ? clean(t.innerText || t.textContent || "") : "";
                     if (!result.title) result.title = meta.headline || clean(document.title);
 
-                    var c = "";
-                    if (config.chapter && !config.chapter.startsWith("@")) {
-                        var text = (config.chapter === "@URL") ? location.href : (document.querySelector(config.chapter)?.innerText || "");
-                        if (text) {
-                            if (config.chapterRegex) {
-                                try { var m = text.match(new RegExp(config.chapterRegex)); if(m) c = m[1] || m[0]; } catch(e){}
+                    // タイトル Regex (config.fileRegex) による抽出・加工
+                    if (result.title && config.fileRegex) {
+                        try {
+                            if (/^(?:del|delete|remove):/i.test(config.fileRegex)) {
+                                var pat = config.fileRegex.replace(/^(?:del|delete|remove):/i, '').trim();
+                                result.title = clean(result.title.replace(new RegExp(pat, 'g'), ''));
+                            } else {
+                                var m = result.title.match(new RegExp(config.fileRegex));
+                                if (m) result.title = clean((m[1] !== undefined && m[1] !== null) ? m[1] : m[0]);
                             }
-                            if (!c) { var m = text.match(/(\d+)/); if(m) c = m[1]; }
+                        } catch(e){}
+                    }
+
+                    // --- チャプター番号抽出（@URLバグ修正 & ハイブリッド対応） ---
+                    var c = "";
+                    var chapSetting = (config.chapter || "").trim().replace('＠', '@');
+                    if (chapSetting.toUpperCase() === "@URL") {
+                        var pathOnly = "";
+                        try { pathOnly = location.pathname; } catch(e){ pathOnly = location.href; }
+                        var m = pathOnly.match(/(\d+)/g);
+                        if (m && m.length > 0) c = m[m.length - 1];
+                    } else if (chapSetting) {
+                        var actualSelector = chapSetting.split('||')[0].trim();
+                        if (actualSelector && !actualSelector.startsWith('@')) {
+                            var el = null;
+                            try { el = document.querySelector(actualSelector); } catch(e){}
+                            var text = el ? (el.innerText || el.textContent || "") : "";
+                            if (text) {
+                                if (config.chapterRegex) {
+                                    try { var m = text.match(new RegExp(config.chapterRegex)); if(m) c = m[1] || m[0]; } catch(e){}
+                                }
+                                if (!c) { var m = text.match(/(\d+)/); if(m) c = m[1]; }
+                            }
                         }
                     }
                     result.chapter = c;
@@ -152,8 +238,6 @@ object ScrapingScriptBuilder {
                         var formattedLines = [];
                         var debugLines = [];
 
-                        // デバッグ用テキストノードを1回だけ事前収集（行ごとのTreeWalker再走査を排除）。
-                        // 行→セレクタの意味論は変更しない（文書順で最初に一致したテキストノードの親）
                         var dbgTexts = [];
                         if (${isDebug}) {
                             try {
@@ -178,7 +262,6 @@ object ScrapingScriptBuilder {
                             formattedLines.push(processed);
 
                             if (${isDebug}) {
-                                // 元の要素のセレクタを探す（事前収集配列を文書順に走査し最初の一致を採用）
                                 var selector = "";
                                 try {
                                     for (var di = 0; di < dbgTexts.length; di++) {
@@ -194,12 +277,11 @@ object ScrapingScriptBuilder {
 
                         // 3. 結合と仕上げ
                         result.content = formattedLines.join('\n')
-                            .replace(/\n{3,}/g, '\n\n') // 連続空行を整理
+                            .replace(/\n{3,}/g, '\n\n')
                             .trim();
                         if (${isDebug}) result.debugLines = debugLines;
                     }
 
-                    // プロパティチェーンのみ許可する安全な解決関数（eval禁止）
                     function safeResolve(expr) {
                         if (!expr || !/^[a-zA-Z_$][\w$.]*$/.test(expr)) return "";
                         return expr.split('.').reduce(function(obj, key) { return obj ? obj[key] : undefined; }, window) || "";
@@ -212,7 +294,8 @@ object ScrapingScriptBuilder {
                         var nEl = config.next ? document.querySelector(config.next) : document.querySelector('a[rel="next"]');
                         if (!nEl) {
                             var links = Array.from(document.querySelectorAll('a'));
-                            var regex = /^(?:\u6b21|Next|\u7d1a\u304f|>>|\u300b|\u6b21\u3078|\u4e0b\u4e00\u7ae0|\u4e0b\u4e00\u9875)/i;
+                            // タイポ修正: \u7d1a(級) ➔ \u7d9a(続く)
+                            var regex = /^(?:\u6b21|Next|\u7d9a\u304f|>>|\u300b|\u6b21\u3078|\u4e0b\u4e00\u7ae0|\u4e0b\u4e00\u9875)/i;
                             nEl = links.find(a => a.innerText.trim().length < 15 && regex.test(a.innerText.trim()));
                         }
                         nUrl = nEl ? nEl.href : "";
@@ -234,59 +317,82 @@ object ScrapingScriptBuilder {
 
     /**
      * デバッグツール (Eruda) 起動スクリプト。
-     * 【重要】画面右下のフローティングボタン (eruda-entry-btn) は画面の邪魔になるため、
-     * Shadow DOM を含め CSS および API (eruda._entryBtn.hide()) で完全に非表示化し、
-     * アプリ上部のスパナボタンのみでトグル開閉させること。
+     * - Android WebView のクリップボードAPI遮断を突破し、AndroidBridge経由で確実にネイティブクリップボードにコピー
      */
     fun buildErudaScript(): String {
         return """
             (function() {
-                if (window.eruda) {
-                    if (window.__eruda_visible) {
-                        eruda.hide();
-                        if (eruda._entryBtn) eruda._entryBtn.hide();
-                        window.__eruda_visible = false;
-                    } else {
-                        eruda.show();
-                        if (eruda._entryBtn) eruda._entryBtn.hide();
-                        window.__eruda_visible = true;
+                try {
+                    // クリップボードAPIのネイティブブリッジ直結（Android WebView の navigator.clipboard 遮断を突破）
+                    if (window.AndroidBridge && window.AndroidBridge.onCopySelector) {
+                        var nativeCopy = function(text) {
+                            try { window.AndroidBridge.onCopySelector(text); return true; } catch(e){ return false; }
+                        };
+                        try {
+                            if (!navigator.clipboard) navigator.clipboard = {};
+                            navigator.clipboard.writeText = function(text) {
+                                nativeCopy(text);
+                                return Promise.resolve();
+                            };
+                        } catch(e){}
+                        try {
+                            var origExec = document.execCommand;
+                            document.execCommand = function(cmd) {
+                                if (cmd === 'copy') {
+                                    var sel = window.getSelection ? window.getSelection().toString() : '';
+                                    if (sel) nativeCopy(sel);
+                                }
+                                return origExec ? origExec.apply(document, arguments) : true;
+                            };
+                        } catch(e){}
                     }
-                    return;
-                }
-                var s = document.createElement('script');
-                s.src = 'https://cdn.jsdelivr.net/npm/eruda';
-                document.body.appendChild(s);
-                s.onload = function() {
-                    eruda.init({ autoShow: false });
-                    var hideCss = '.eruda-entry-btn, div[class*="eruda-entry-btn"] { display: none !important; visibility: hidden !important; width: 0 !important; height: 0 !important; }';
-                    var st = document.createElement('style');
-                    st.innerHTML = hideCss;
-                    document.head.appendChild(st);
-                    if (eruda._shadowRoot) {
-                        var st2 = document.createElement('style');
-                        st2.innerHTML = hideCss;
-                        eruda._shadowRoot.appendChild(st2);
+
+                    if (window.__erudaLoaded) {
+                        if (window.eruda) {
+                            if (window.__erudaVisible) {
+                                eruda.hide();
+                                window.__erudaVisible = false;
+                            } else {
+                                eruda.show();
+                                window.__erudaVisible = true;
+                            }
+                        }
+                        return;
                     }
-                    if (eruda._entryBtn) eruda._entryBtn.hide();
-                    eruda.show();
-                    if (eruda._entryBtn) eruda._entryBtn.hide();
-                    window.__eruda_visible = true;
-                };
+                    var s = document.createElement('script');
+                    s.src = 'https://cdn.jsdelivr.net/npm/eruda';
+                    s.onload = function() {
+                        if (window.eruda) {
+                            eruda.init();
+                            eruda.show();
+                            window.__erudaLoaded = true;
+                            window.__erudaVisible = true;
+                            // フローティング歯車アイコンをAPI・CSS双方で完全非表示
+                            try {
+                                eruda.scale(0.85);
+                                var entry = document.querySelector('.eruda-entry-btn');
+                                if (entry) entry.style.display = 'none';
+                            } catch(e){}
+                        }
+                    };
+                    document.head.appendChild(s);
+                } catch(e) {}
             })();
         """.trimIndent()
     }
 
     /**
-     * インスペクター v3（候補ポップアップ方式・即反映）
-     * - WebView内ツールバー廃止。終了は虫眼鏡トグル/戻る（buildInspectorStopScript）
-     * - タップ → 候補3種（要素自身/近い祖先/上位祖先）＋プレビュー → 割当先チップで即適用
-     * - 割当先: body/title/next/folder/exclude（SelectorField と対応）
+     * インスペクター（虫眼鏡モード）のJSスクリプト。
+     * - 各種要素候補のタップでコピー＆反映ボタン付きカードを表示
+     * - テキスト逆引き検索（searchByText）対応（自動スクロールなし、ハイライト＋候補カード展開）
+     * - リンク要素の自動親昇格
+     * - 全7フィールド対応
      */
     fun buildInspectorScript(config: ScraperConfig): String {
         val configJson = Json.encodeToString(config)
         val configBase64 = Base64.getEncoder().encodeToString(configJson.toByteArray(Charsets.UTF_8))
         return """
-            (function(){
+            (function() {
                 if (window.__novelInspectActive) return;
                 window.__novelInspectActive = true;
                 var config = JSON.parse(decodeURIComponent(escape(atob('$configBase64'))));
@@ -295,12 +401,15 @@ object ScrapingScriptBuilder {
                 var lastTarget = 'body';
                 var popup = null;
 
+                // 全7フィールドの完全定義（SelectorField と完全対応・ユーザーが使いやすい並び順）
                 var TARGETS = [
-                    { key: 'body',    label: '本文' },
-                    { key: 'title',   label: 'タイトル' },
-                    { key: 'next',    label: '次へ' },
-                    { key: 'folder',  label: '作品名' },
-                    { key: 'exclude', label: '除外' }
+                    { key: 'body',        label: '本文' },
+                    { key: 'title',       label: 'タイトル' },
+                    { key: 'next',        label: '次ページ' },
+                    { key: 'chapter',     label: 'チャプター番号' },
+                    { key: 'folder',      label: '作品名' },
+                    { key: 'folder_link', label: '別URL取得' },
+                    { key: 'exclude',     label: '除外' }
                 ];
 
                 // 翻訳 Cookie のパージ（インスペクター起動時の安全確保）
@@ -318,8 +427,8 @@ object ScrapingScriptBuilder {
                 hint.id = '__novel_hint';
                 hint.className = '__novel_notranslate notranslate skiptranslate';
                 hint.setAttribute('translate', 'no');
-                hint.innerText = '要素をタップして候補から設定';
-                hint.style = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.85);color:#fff;padding:6px 14px;border-radius:16px;z-index:2147483647;font-size:12px;';
+                hint.innerText = '要素をタップして候補を確認';
+                hint.style = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.85);color:#fff;padding:6px 14px;border-radius:16px;z-index:2147483647;font-size:12px;pointer-events:none;';
                 document.body.appendChild(hint);
                 setTimeout(function(){ if (hint.parentNode) hint.parentNode.removeChild(hint); }, 3000);
 
@@ -353,23 +462,35 @@ object ScrapingScriptBuilder {
                 }
 
                 function getExcludeList() {
-                    return config.exclude ? config.exclude.split(',').map(function(s){ return s.trim(); }).filter(Boolean) : [];
+                    return (config.exclude || '').split(',').map(function(s){ return s.trim(); }).filter(Boolean);
                 }
+
                 function isExcluded(sel) { return getExcludeList().indexOf(sel) > -1; }
 
                 function buildPreview(sel, target) {
                     var el = null;
                     try { el = document.querySelector(sel); } catch(e) {}
                     if (!el) return '(一致なし)';
-                    if (target === 'next') {
+
+                    // 次ページ または 別URL取得: リンク先URLをプレビュー
+                    if (target === 'next' || target === 'folder_link') {
                         var a = (el.tagName === 'A') ? el : (el.querySelector ? el.querySelector('a') : null);
                         if (!a && el.closest) a = el.closest('a');
                         var href = a ? (a.href || a.getAttribute('href') || '') : '';
                         if (href) { try { href = new URL(href, location.href).href; } catch(e){} }
-                        return href || '(リンクなし)';
+                        return href ? 'リンクURL: ' + href : '(リンク先URLが取得できません - aタグまたは親のaタグを選択してください)';
                     }
-                    var t = ((el.innerText || el.textContent || '') + '').replace(/\s+/g, ' ').trim();
-                    if (t.length > 100) t = t.substring(0, 100) + '…';
+
+                    // チャプター番号: 数字抽出結果をプレビュー
+                    if (target === 'chapter') {
+                        var raw = (el.innerText || el.textContent || '').trim();
+                        var digits = raw.match(/(\d+)/);
+                        var chapNum = digits ? digits[1].padStart(4, '0') : '(数字なし)';
+                        return '抽出話数: ' + chapNum + '  (元テキスト: ' + (raw.length > 50 ? raw.substring(0, 50) + '…' : raw) + ')';
+                    }
+
+                    var t = ((el.innerText || el.textContent || '') + '').trim();
+                    if (t.length > 150) t = t.substring(0, 150) + '…';
                     return t || '(テキストなし)';
                 }
 
@@ -391,27 +512,43 @@ object ScrapingScriptBuilder {
                         try { m = document.querySelectorAll(s).length; } catch(e) {}
                         cands.push({ node: node, selector: s, label: label, matchCount: m });
                     }
+
+                    // 1. 要素自身
                     push(el, '要素自身', getUniqueSelector(el));
+
+                    // 2. リンク要素 (自身または祖先に <a> があれば提示)
+                    var aEl = (el.tagName === 'A') ? el : (el.closest ? el.closest('a') : null);
+                    if (aEl && aEl !== el) {
+                        push(aEl, 'リンク(a)', shortSelector(aEl) || getUniqueSelector(aEl));
+                    }
+
+                    // 3. 有用属性・ID祖先
                     var p = el.parentElement;
                     while (p && p.tagName !== 'BODY' && !(p.id && !String(p.id).match(/^[0-9]/))) p = p.parentElement;
                     if (p && p.tagName !== 'BODY') push(p, 'ID祖先');
+
+                    // 4. Class祖先
                     var q = el.parentElement;
                     while (q && q.tagName !== 'BODY' && !(typeof q.className === 'string' && q.className.trim())) q = q.parentElement;
                     if (q && q.tagName !== 'BODY') push(q, 'Class祖先');
+
+                    // 5. 意味コンテナ（article, main, section, #novel_honbun等）
                     var sem = null;
-                    try { sem = el.closest('article, main, [role="main"], section'); } catch(e){}
+                    try { sem = el.closest('article, main, [role="main"], section, .novel_honbun, #novel_honbun'); } catch(e){}
                     if (sem && sem !== p && sem !== q && sem.tagName !== 'BODY') {
-                        push(sem, '意味コンテナ', sem.tagName.toLowerCase());
+                        push(sem, '意味コンテナ', shortSelector(sem) || sem.tagName.toLowerCase());
                     }
-                    // フォールバック: id/class/semantic が見つからない構造では親要素連鎖で補完
+
+                    // フォールバック: 親要素連鎖
                     if (cands.length < 3) {
                         var n = el.parentElement;
-                        while (n && n.tagName !== 'BODY' && cands.length < 3) {
+                        while (n && n.tagName !== 'BODY' && cands.length < 5) {
                             push(n, '親要素');
                             n = n.parentElement;
                         }
                     }
-                    return cands.slice(0, 4);
+                    // 最大5候補まで提示（意味コンテナ等の脱落を防止）
+                    return cands.slice(0, 5);
                 }
 
                 function closePopup() {
@@ -427,28 +564,28 @@ object ScrapingScriptBuilder {
                     popup.id = '__novel_popup';
                     popup.className = '__novel_notranslate notranslate skiptranslate';
                     popup.setAttribute('translate', 'no');
-                    popup.style = 'position:fixed;background:#222;color:#fff;z-index:2147483646;font-size:12px;border-radius:6px;box-shadow:0 3px 10px rgba(0,0,0,0.6);max-width:360px;width:min(92vw,360px);max-height:70vh;display:flex;flex-direction:column;overflow:hidden;';
+                    popup.style = 'position:fixed;background:#1e1e1e;color:#fff;z-index:2147483646;font-size:12px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.7);max-width:380px;width:min(94vw,380px);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;border:1px solid #444;';
 
                     var header = document.createElement('div');
-                    header.style = 'display:flex;align-items:center;padding:5px 8px;background:#333;flex-shrink:0;';
+                    header.style = 'display:flex;align-items:center;padding:6px 10px;background:#2c2c2c;flex-shrink:0;border-bottom:1px solid #3d3d3d;';
                     var title = document.createElement('span');
-                    title.innerText = '候補を選択して適用';
-                    title.style = 'flex:1;color:#ddd;';
+                    title.innerText = '要素候補のコピー / 反映';
+                    title.style = 'flex:1;color:#eee;font-weight:bold;';
                     var closeBtn = document.createElement('button');
                     closeBtn.innerText = '×';
-                    closeBtn.style = 'background:#f44336;color:#fff;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;';
+                    closeBtn.style = 'background:#e53935;color:#fff;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:14px;font-weight:bold;';
                     closeBtn.onclick = function(ev) { ev.stopPropagation(); closePopup(); };
                     header.appendChild(title);
                     header.appendChild(closeBtn);
                     popup.appendChild(header);
 
                     var chips = document.createElement('div');
-                    chips.style = 'display:flex;flex-wrap:wrap;gap:4px;padding:5px 8px;background:#2a2a2a;flex-shrink:0;';
+                    chips.style = 'display:flex;flex-wrap:wrap;gap:4px;padding:6px 10px;background:#252525;flex-shrink:0;border-bottom:1px solid #333;';
                     var chipBtns = {};
                     TARGETS.forEach(function(t) {
                         var b = document.createElement('button');
                         b.innerText = t.label;
-                        b.style = 'background:#555;color:#fff;border:none;border-radius:3px;padding:3px 7px;cursor:pointer;';
+                        b.style = 'background:#424242;color:#bbb;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:11px;';
                         b.onclick = function(ev) {
                             ev.stopPropagation();
                             pendingTarget = t.key;
@@ -460,76 +597,105 @@ object ScrapingScriptBuilder {
                     });
                     function updateChips() {
                         TARGETS.forEach(function(t) {
-                            chipBtns[t.key].style.background = (pendingTarget === t.key) ? '#FF5722' : '#555';
+                            var isSelected = (pendingTarget === t.key);
+                            chipBtns[t.key].style.background = isSelected ? '#00897B' : '#424242';
+                            chipBtns[t.key].style.color = isSelected ? '#ffffff' : '#bbb';
+                            chipBtns[t.key].style.fontWeight = isSelected ? 'bold' : 'normal';
                         });
                     }
                     updateChips();
                     popup.appendChild(chips);
 
                     var rowsBox = document.createElement('div');
-                    rowsBox.style = 'overflow-y:auto;min-height:0;';
+                    rowsBox.style = 'overflow-y:auto;min-height:0;padding:4px 0;';
                     popup.appendChild(rowsBox);
+
+                    function applyCandidateAction(c, isRemovable) {
+                        if (window.AndroidBridge) {
+                            if (pendingTarget === 'exclude') {
+                                if (isRemovable) {
+                                    config.exclude = getExcludeList().filter(function(s){ return s !== c.selector; }).join(', ');
+                                    try { window.AndroidBridge.onRemoveExclude(c.selector); } catch(e){}
+                                    try { document.querySelectorAll(c.selector).forEach(function(n){ n.style.opacity = ''; }); } catch(e){}
+                                } else {
+                                    var list = getExcludeList();
+                                    if (list.indexOf(c.selector) < 0) list.push(c.selector);
+                                    config.exclude = list.join(', ');
+                                    try { window.AndroidBridge.onApplyCandidate('exclude', c.selector); } catch(e){}
+                                    try { document.querySelectorAll(c.selector).forEach(function(n){ n.style.opacity = '0.3'; }); } catch(e){}
+                                }
+                            } else {
+                                config[pendingTarget] = c.selector;
+                                try { window.AndroidBridge.onApplyCandidate(pendingTarget, c.selector); } catch(e){}
+                                highlight(c.node);
+                            }
+                        }
+                        lastTarget = pendingTarget;
+                        applyCurrentConfig();
+                        closePopup();
+                    }
 
                     function refreshRows() {
                         rowsBox.innerHTML = '';
                         cands.forEach(function(c) {
                             var removable = (pendingTarget === 'exclude') && isExcluded(c.selector);
                             var row = document.createElement('div');
-                            row.style = 'padding:6px 8px;border-top:1px solid #444;cursor:pointer;';
+                            row.style = 'padding:8px 10px;border-top:1px solid #333;display:flex;flex-direction:column;gap:4px;';
+                            
                             var head = document.createElement('div');
                             head.style = 'display:flex;gap:6px;align-items:center;';
+                            
                             var lab = document.createElement('b');
-                            lab.innerText = removable ? 'この除外を解除' : c.label;
-                            lab.style = 'color:' + (removable ? '#4CAF50' : '#8ab4f8') + ';flex-shrink:0;';
+                            lab.innerText = removable ? '除外中' : c.label;
+                            lab.style = 'color:' + (removable ? '#81c784' : '#4dd0e1') + ';font-size:11px;flex-shrink:0;';
+                            
                             var selSpan = document.createElement('span');
                             selSpan.innerText = c.selector;
-                            selSpan.style = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aaa;';
-                            var cnt = document.createElement('span');
-                            if (pendingTarget === 'exclude') {
-                                cnt.innerText = '一致' + c.matchCount;
-                            } else if (pendingTarget === 'next') {
-                                cnt.innerText = '';
-                            } else {
-                                var tEl = null;
-                                try { tEl = document.querySelector(c.selector); } catch(e) {}
-                                var txt = ((tEl && tEl.innerText) || '') + '';
-                                var lineCount = txt ? txt.split('\n').filter(function(x){ return x.trim(); }).length : 0;
-                                cnt.innerText = txt.replace(/\s+/g, '').length + '字/' + lineCount + '行';
-                            }
-                            cnt.style = 'flex-shrink:0;color:#888;';
-                            head.appendChild(lab);
-                            head.appendChild(selSpan);
-                            head.appendChild(cnt);
-                            var prev = document.createElement('div');
-                            prev.innerText = buildPreview(c.selector, pendingTarget);
-                            prev.style = 'margin-top:4px;color:#ddd;max-height:110px;overflow-y:auto;line-height:16px;padding:4px;background:#111;border-radius:4px;white-space:pre-wrap;word-break:break-all;';
-                            row.appendChild(head);
-                            row.appendChild(prev);
-                            row.onclick = function(ev) {
+                            selSpan.style = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc;font-family:monospace;font-size:11px;';
+                            
+                            // 操作ボタン群（コピーボタン と 反映ボタン を独立配置）
+                            var actionBox = document.createElement('div');
+                            actionBox.style = 'display:flex;gap:4px;flex-shrink:0;';
+
+                            var copyBtn = document.createElement('button');
+                            copyBtn.innerText = 'コピー';
+                            copyBtn.style = 'background:#455a64;color:#fff;border:none;border-radius:3px;padding:3px 7px;cursor:pointer;font-size:11px;transition:background 0.2s;';
+                            copyBtn.onclick = function(ev) {
                                 ev.stopPropagation();
                                 if (window.AndroidBridge) {
-                                    if (pendingTarget === 'exclude') {
-                                        if (removable) {
-                                            config.exclude = getExcludeList().filter(function(s){ return s !== c.selector; }).join(', ');
-                                            window.AndroidBridge.onRemoveExclude(c.selector);
-                                            try { document.querySelectorAll(c.selector).forEach(function(n){ n.style.opacity = ''; }); } catch(e){}
-                                        } else {
-                                            var list = getExcludeList();
-                                            if (list.indexOf(c.selector) < 0) list.push(c.selector);
-                                            config.exclude = list.join(', ');
-                                            window.AndroidBridge.onApplyCandidate('exclude', c.selector);
-                                            try { document.querySelectorAll(c.selector).forEach(function(n){ n.style.opacity = '0.3'; }); } catch(e){}
-                                        }
-                                    } else {
-                                        config[pendingTarget] = c.selector;
-                                        window.AndroidBridge.onApplyCandidate(pendingTarget, c.selector);
-                                        highlight(c.node);
-                                    }
+                                    try {
+                                        window.AndroidBridge.onCopySelector(c.selector);
+                                    } catch(e){}
                                 }
-                                lastTarget = pendingTarget;
-                                applyCurrentConfig();
-                                closePopup();
+                                copyBtn.innerText = 'コピー済!';
+                                copyBtn.style.background = '#2e7d32';
+                                setTimeout(function(){
+                                    copyBtn.innerText = 'コピー';
+                                    copyBtn.style.background = '#455a64';
+                                }, 700);
                             };
+
+                            var applyBtn = document.createElement('button');
+                            applyBtn.innerText = removable ? '除外解除' : '反映';
+                            applyBtn.style = 'background:' + (removable ? '#2e7d32' : '#FF5722') + ';color:#fff;border:none;border-radius:3px;padding:3px 8px;cursor:pointer;font-size:11px;font-weight:bold;';
+                            applyBtn.onclick = function(ev) {
+                                ev.stopPropagation();
+                                applyCandidateAction(c, removable);
+                            };
+
+                            actionBox.appendChild(copyBtn);
+                            actionBox.appendChild(applyBtn);
+
+                            head.appendChild(lab);
+                            head.appendChild(selSpan);
+                            head.appendChild(actionBox);
+
+                            var prev = document.createElement('div');
+                            prev.innerText = buildPreview(c.selector, pendingTarget);
+                            prev.style = 'color:#aaa;max-height:80px;overflow-y:auto;line-height:15px;padding:5px 8px;background:#111;border-radius:4px;white-space:pre-wrap;word-break:break-all;font-size:11px;border:1px solid #282828;';
+
+                            row.appendChild(head);
+                            row.appendChild(prev);
                             rowsBox.appendChild(row);
                         });
                     }
@@ -537,8 +703,8 @@ object ScrapingScriptBuilder {
 
                     document.body.appendChild(popup);
 
-                    var w = popup.offsetWidth || 320;
-                    var h = popup.offsetHeight || 200;
+                    var w = popup.offsetWidth || 340;
+                    var h = popup.offsetHeight || 220;
                     var maxL = (window.innerWidth || 360) - w - 8;
                     var left = Math.min(Math.max(8, x - w / 2), Math.max(8, maxL));
                     var maxY = (window.innerHeight || 640) - h - 8;
@@ -557,10 +723,44 @@ object ScrapingScriptBuilder {
                     showCandidatePopup(cands, e.clientX || 0, e.clientY || 0);
                 }
 
+                // テキスト逆引き検索（ユーザー要望: 自動スクロールは行わず、ハイライト＋候補カード展開）
+                function searchByText(searchText) {
+                    if (!searchText || !searchText.trim()) return false;
+                    var query = searchText.trim().toLowerCase();
+                    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                    var node;
+                    var bestEl = null;
+                    while ((node = walker.nextNode())) {
+                        var text = (node.textContent || '').trim().toLowerCase();
+                        if (text && text.includes(query)) {
+                            var parent = node.parentElement;
+                            if (parent && !parent.closest('#__novel_popup, #__novel_hint, script, style, noscript')) {
+                                bestEl = parent;
+                                break;
+                            }
+                        }
+                    }
+                    if (bestEl) {
+                        highlight(bestEl);
+                        var rect = bestEl.getBoundingClientRect();
+                        var cands = getCandidates(bestEl);
+                        if (cands.length > 0) {
+                            var cx = (rect.left + rect.width / 2);
+                            var cy = (rect.top + rect.height / 2);
+                            if (cx < 20 || cx > window.innerWidth - 20) cx = window.innerWidth / 2;
+                            if (cy < 20 || cy > window.innerHeight - 20) cy = window.innerHeight / 2;
+                            showCandidatePopup(cands, cx, cy);
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+
                 document.addEventListener('click', handleClick, true);
                 applyCurrentConfig();
 
                 window.__novelInspector = {
+                    searchByText: searchByText,
                     stop: function() {
                         active = false;
                         document.removeEventListener('click', handleClick, true);
@@ -576,9 +776,23 @@ object ScrapingScriptBuilder {
     }
 
     /**
-     * 除外候補プローブ: 指定セレクタの要素から4種類の候補（要素自身/ID祖先/Class祖先/意味コンテナ）を
+     * テキスト逆引き検索スクリプト。
+     */
+    fun buildSearchTextInInspectorScript(query: String): String {
+        val safeQuery = query.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
+        return """
+            (function(){
+                if (window.__novelInspector && window.__novelInspector.searchByText) {
+                    return window.__novelInspector.searchByText('$safeQuery');
+                }
+                return false;
+            })();
+        """.trimIndent()
+    }
+
+    /**
+     * 除外候補プローブ: 指定セレクタの要素から4種類の候補を
      * JSON配列で返す（evaluateJavascript の戻り値として受領。WebViewへの注入不要）。
-     * metric は除外用に「一致数・消える文字数」を含む。
      */
     fun buildCandidateProbeScript(baseSelector: String): String {
         val safeSelector = baseSelector.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
@@ -586,11 +800,10 @@ object ScrapingScriptBuilder {
             (function(){
                 try {
                     var baseEl = document.querySelector('$safeSelector');
-                if (!baseEl) return '[]';
-                // 共通スニペット
-                ${JS_UNIQUE_SELECTOR}
-                ${JS_SHORT_SELECTOR}
-                var cands = [];
+                    if (!baseEl) return '[]';
+                    ${JS_UNIQUE_SELECTOR}
+                    ${JS_SHORT_SELECTOR}
+                    var cands = [];
                     var seen = {};
                     function push(node, label, sel) {
                         if (!node || node.nodeType !== 1) return;
@@ -626,15 +839,14 @@ object ScrapingScriptBuilder {
                     if (sem && sem !== p && sem !== q && sem.tagName !== 'BODY') {
                         push(sem, '意味コンテナ', sem.tagName.toLowerCase());
                     }
-                    // フォールバック: id/class/semantic が見つからない構造では親要素連鎖で補完
                     if (cands.length < 3) {
                         var n = baseEl.parentElement;
-                        while (n && n.tagName !== 'BODY' && cands.length < 3) {
+                        while (n && n.tagName !== 'BODY' && cands.length < 5) {
                             push(n, '親要素');
                             n = n.parentElement;
                         }
                     }
-                    return JSON.stringify(cands.slice(0, 4));
+                    return JSON.stringify(cands.slice(0, 5));
                 } catch(e) { return '[]'; }
             })();
         """.trimIndent()

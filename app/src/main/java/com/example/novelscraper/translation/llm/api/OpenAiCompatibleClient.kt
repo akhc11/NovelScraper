@@ -62,16 +62,24 @@ object OpenAiCompatibleClient {
                 .build()
 
             val call = LlmApiClient.httpClient.newCall(request)
-            val (code, bodyString) = call.awaitResponse().use { response ->
-                response.code to (response.body?.string() ?: "")
+            val (code, bodyString, retryAfterHeader) = call.awaitResponse().use { response ->
+                Triple(
+                    response.code,
+                    response.body?.string() ?: "",
+                    response.header("Retry-After")?.toLongOrNull()
+                )
             }
 
             when (code) {
                 200 -> {
                     val openAiResp = LlmApiClient.json.decodeFromString(OpenAiChatResponse.serializer(), bodyString)
-                    val msg = openAiResp.choices?.firstOrNull()?.message
+                    val choice = openAiResp.choices?.firstOrNull()
+                    val msg = choice?.message
                     val text = msg?.content
                     if (text.isNullOrBlank()) {
+                        if (choice?.finishReason == "length") {
+                            return@withContext LlmApiResult.QualityError("OpenAI/OpenRouter応答が途中で切断 (finish_reason=length)")
+                        }
                         if (!msg?.reasoning.isNullOrBlank()) {
                             // 推論過程のみで翻訳本文なし（推論文を訳文に混ぜない）
                             return@withContext LlmApiResult.QualityError("OpenAI/OpenRouter推論のみ応答 (翻訳本文なし)")
@@ -88,7 +96,8 @@ object OpenAiCompatibleClient {
                 }
                 429 -> {
                     LlmApiResult.QuotaExceeded(
-                        message = "Quota Exceeded (429): ${bodyString.take(3000)}"
+                        message = "Quota Exceeded (429): ${bodyString.take(3000)}",
+                        retryAfterSec = retryAfterHeader?.coerceIn(1L, 600L)?.toInt() ?: -1
                     )
                 }
                 500, 502, 503, 504 -> {

@@ -144,6 +144,10 @@ class GemmaStressTest {
                                 log("  ⚠️ [Network Error] バッチ #$batchNum: HTTP ${result.statusCode} - ${result.message}")
                                 if (retry < maxRetries) delay(2000L)
                             }
+                            is LlmApiResult.ConfigError -> {
+                                log("  ⚙️ [Config Error] バッチ #$batchNum: (${result.kind}) ${result.message}")
+                                break
+                            }
                             is LlmApiResult.FatalError -> {
                                 log("  ❌ [Fatal Error] バッチ #$batchNum: HTTP ${result.statusCode} - ${result.message}")
                                 break
@@ -334,6 +338,10 @@ class GemmaStressTest {
                             is LlmApiResult.NetworkError -> {
                                 log("  ⚠️ [Network Error] バッチ #$batchNum: HTTP ${result.statusCode} - ${result.message}")
                                 if (retry < maxRetries) delay(2000L)
+                            }
+                            is LlmApiResult.ConfigError -> {
+                                log("  ⚙️ [Config Error] バッチ #$batchNum: (${result.kind}) ${result.message}")
+                                break
                             }
                             is LlmApiResult.FatalError -> {
                                 log("  ❌ [Fatal Error] バッチ #$batchNum: HTTP ${result.statusCode} - ${result.message}")

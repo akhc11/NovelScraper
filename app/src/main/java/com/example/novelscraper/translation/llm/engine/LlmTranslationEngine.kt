@@ -5,6 +5,7 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.llm.api.LlmApiResult
+import com.example.novelscraper.translation.llm.api.ConfigErrorKind
 import com.example.novelscraper.translation.llm.api.LlmRequestRunner
 import com.example.novelscraper.translation.llm.api.LlmRetryPolicy
 import com.example.novelscraper.translation.common.NovelPhysicalSplitter
@@ -673,6 +674,10 @@ class LlmTranslationEngine(
                         if (outcome.completed < batchItems.size) {
                             addLog("[W#$workerId] ⚠️ バッチ未完 (確定:${outcome.completed}/${batchItems.size}) → 未確定分は次回再試行")
                         }
+                        if (outcome.configBlocked) {
+                            addLog("[W#$workerId] 🛑 設定エラーのため中断します（設定修正後に再実行してください）")
+                            return
+                        }
                     } else {
                         // 1件のみ: 単体翻訳
                         addLog("[W#$workerId] $fileName (単体処理: ${fsize}B / 専有キー[${rotationManager.getCurrentKeyIndex() + 1}])")
@@ -724,6 +729,10 @@ class LlmTranslationEngine(
         val combinedInput = BatchTranslator.buildBatchInput(filePairs)
         val profiles = config.modelProfiles.ifEmpty { listOf(ModelProfile(modelName = "gemini-3.5-flash")) }
         var parsedSegments: Map<Int, String>? = null
+        // バッチ試行の失敗内訳（全滅時に単体フォールバックすべきか判定する）
+        var batchSawConfigError = false
+        var batchSawOtherFailure = false
+        var batchConfigKind = ConfigErrorKind.UNKNOWN
 
         // --- 1. ドライバーループ ---
         for ((drvIdx, profile) in profiles.withIndex()) {
@@ -738,10 +747,12 @@ class LlmTranslationEngine(
             // JSON SchemaはGeminiかつ両フラグONのプロファイルでのみ試行し、失敗時はXMLへ自動劣化する
             val jsonEligible = config.enableBatchJsonSchema && profile.useJsonSchema &&
                 profile.provider == LlmProvider.GEMINI
+            // 設定エラー時は同ドライバーの残りプロンプトを無駄打ちしない
+            var batchAbortPrompts = false
 
             // --- 2. プロンプトループ ---
             for (promptNum in promptList) {
-                if (isStopRequested || !currentCoroutineContext().isActive) break
+                if (batchAbortPrompts || isStopRequested || !currentCoroutineContext().isActive) break
 
                 val xmlPrompt = PromptBuilder.buildBatchPrompt(
                     promptNumber = promptNum,
@@ -813,12 +824,14 @@ class LlmTranslationEngine(
                             }
 
                             if (!CompletionMarkerHelper.checkBatchCompletion(apiResult.text, true)) {
+                                batchSawOtherFailure = true
                                 addLog("[W#$workerId] ⚠️ バッチ: 完走タグなし (生成途絶疑い) → 次のプロンプトへ")
                                 break
                             }
 
                             val parsed = BatchTranslator.parseBatchResponse(apiResult.text, batchItems.size)
                             if (parsed.isNullOrEmpty()) {
+                                batchSawOtherFailure = true
                                 addLog("[W#$workerId] ⚠️ バッチ: セグメント分離失敗 (形式不一致/欠落) → 次のプロンプトへ")
                                 break
                             }
@@ -831,6 +844,7 @@ class LlmTranslationEngine(
                             break
                         }
                         is LlmApiResult.QuotaExceeded -> {
+                            batchSawOtherFailure = true
                             if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled &&
                                 !ApiKeyPoolManager.isDailyQuotaExceeded(apiResult.message) &&
                                 sameModelQuotaRetries < LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES
@@ -853,6 +867,7 @@ class LlmTranslationEngine(
                             }
                         }
                         is LlmApiResult.NetworkError -> {
+                            batchSawOtherFailure = true
                             if (retry + 1 >= maxRetryCount) {
                                 addLog("[W#$workerId] ⚠️ バッチ通信エラー (${apiResult.statusCode}): ${apiResult.message.take(120)} ➔ 再試行上限到達")
                             } else {
@@ -863,16 +878,25 @@ class LlmTranslationEngine(
                             retry++
                         }
                         is LlmApiResult.QualityError -> {
+                            batchSawOtherFailure = true
                             addLog("[W#$workerId] ⚠️ バッチ品質エラー: ${apiResult.reason} ➔ 次のプロンプト/モデルへ")
                             break
                         }
                         is LlmApiResult.FatalError -> {
+                            batchSawOtherFailure = true
                             if (useJson && apiResult.statusCode == 400) {
                                 jsonAttempted = true
                                 addLog("[W#$workerId] ⚠️ バッチ: JSON Schema未対応 (400) → XMLへ劣化して再試行")
                                 continue
                             }
                             addLog("[W#$workerId] ❌ バッチ致命的エラー (${apiResult.statusCode}): ${apiResult.message.take(200)} ➔ 次のプロンプト/モデルへ")
+                            break
+                        }
+                        is LlmApiResult.ConfigError -> {
+                            batchSawConfigError = true
+                            batchConfigKind = apiResult.kind
+                            batchAbortPrompts = true
+                            addLog("[W#$workerId] ⚙️ バッチ設定エラー (${apiResult.kind}): ${apiResult.kind.guidance()} ➔ 次のモデルへ")
                             break
                         }
                     }
@@ -902,6 +926,11 @@ class LlmTranslationEngine(
             addLog("[W#$workerId] 🛑 バッチ中断 → 未完了のまま保持")
             return BatchOutcome(0, 0)
         }
+        // 設定エラーのみで全滅 → 単体フォールバックしても同じ404等になるため行わず、案内して止める
+        if (batchSawConfigError && !batchSawOtherFailure) {
+            addLog("[W#$workerId] ⚙️ バッチ設定エラー (${batchConfigKind}): ${batchConfigKind.guidance()} → .failedを作らず中断します")
+            return BatchOutcome(0, 0, true)
+        }
         addLog("[W#$workerId] ⚠️ バッチ全滅 (全ドライバー失敗) → 全${batchItems.size}件を単体翻訳へフォールバック")
         return fallbackItemsToSingle(
             items = batchItems,
@@ -918,8 +947,9 @@ class LlmTranslationEngine(
     /**
      * バッチ処理の確定結果。completed=翻訳確定数、settled=処理済数（確定＋失敗確定）。
      * 中断により未処理の分はどちらにも含めない。
+     * configBlocked=true時は設定エラーのみで全滅し、単体フォールバックも行っていない。
      */
-    private data class BatchOutcome(val completed: Int, val settled: Int)
+    private data class BatchOutcome(val completed: Int, val settled: Int, val configBlocked: Boolean = false)
 
     /**
      * バッチ抽出結果の部分回収：成功分は即保存し、
@@ -1051,6 +1081,9 @@ class LlmTranslationEngine(
         val fileName = fileDoc.name ?: "file.txt"
         val profiles = config.modelProfiles.ifEmpty { listOf(ModelProfile(modelName = "gemini-3.5-flash")) }
         var translatedText: String? = null
+        // 単体試行の失敗内訳（設定エラーのみなら.failedを作らない）
+        var sawConfigError = false
+        var sawOtherFailure = false
 
         // --- 1. ドライバーループ ---
         for ((drvIdx, profile) in profiles.withIndex()) {
@@ -1062,10 +1095,12 @@ class LlmTranslationEngine(
             }
 
             val promptList = config.getEffectivePromptOrder(sourceLang, profile).ifEmpty { listOf(1, 1) }
+            // 設定エラー時は同ドライバーの残りプロンプトを無駄打ちしない
+            var driverAbortPrompts = false
 
             // --- 2. プロンプトループ ---
             for (promptNum in promptList) {
-                if (isStopRequested || !currentCoroutineContext().isActive) break
+                if (driverAbortPrompts || isStopRequested || !currentCoroutineContext().isActive) break
 
                 val prompt = PromptBuilder.buildPrompt(
                     promptNumber = promptNum,
@@ -1115,6 +1150,7 @@ class LlmTranslationEngine(
                             }
                         }
                         is LlmApiResult.QuotaExceeded -> {
+                            sawOtherFailure = true
                             if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled &&
                                 !ApiKeyPoolManager.isDailyQuotaExceeded(apiResult.message) &&
                                 sameModelQuotaRetries < LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES
@@ -1138,6 +1174,7 @@ class LlmTranslationEngine(
                             }
                         }
                         is LlmApiResult.NetworkError -> {
+                            sawOtherFailure = true
                             if (retry + 1 >= maxRetryCount) {
                                 addLog("[W#$workerId] ⚠️ $fileName 通信エラー (${apiResult.statusCode}): ${apiResult.message.take(120)} ➔ 再試行上限到達")
                             } else {
@@ -1148,11 +1185,19 @@ class LlmTranslationEngine(
                             retry++
                         }
                         is LlmApiResult.QualityError -> {
+                            sawOtherFailure = true
                             addLog("[W#$workerId] ⚠️ $fileName 品質エラー: ${apiResult.reason} ➔ 次のプロンプト/モデルへ")
                             break
                         }
                         is LlmApiResult.FatalError -> {
+                            sawOtherFailure = true
                             addLog("[W#$workerId] ❌ $fileName 致命的エラー (${apiResult.statusCode}): ${apiResult.message.take(200)} ➔ 次のプロンプト/モデルへ")
+                            break
+                        }
+                        is LlmApiResult.ConfigError -> {
+                            sawConfigError = true
+                            driverAbortPrompts = true
+                            addLog("[W#$workerId] ⚙️ $fileName 設定エラー (${apiResult.kind}): ${apiResult.kind.guidance()} ➔ 次のモデルへ")
                             break
                         }
                     }
@@ -1175,6 +1220,11 @@ class LlmTranslationEngine(
         } else {
             // 中断された場合は .failed を作成せず次回再開可能に保持
             if (!isStopRequested && currentCoroutineContext().isActive) {
+                // 設定エラーのみで全滅 → .failedを作らず設定修正を促す（掃除なしで再実行可能にする）
+                if (sawConfigError && !sawOtherFailure) {
+                    addLog("[W#$workerId] ⚙️ $fileName 設定エラーのため.failedは作りません（設定修正後に再実行してください）")
+                    return false
+                }
                 val failedFileName = "$fileName.failed"
                 val failedFile = outputDir.findFile(failedFileName) ?: outputDir.createFile("text/plain", failedFileName)
                 if (failedFile != null && saveFileContent(failedFile, content)) {

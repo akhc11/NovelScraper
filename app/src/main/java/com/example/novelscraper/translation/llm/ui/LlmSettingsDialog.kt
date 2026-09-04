@@ -945,7 +945,7 @@ fun LlmSettingsDialog(
                                 dict429CooldownSec = dict429CooldownSecText.toIntOrNull()?.coerceIn(5, 300) ?: 60,
                                 parallelWorkers = parallelWorkersText.toIntOrNull()?.coerceIn(1, 6) ?: 3,
                                 enablePrevSrcContext = enablePrevSrcContext,
-                                requestDelaySec = requestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 30,
+                                requestDelaySec = requestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 10,
                                 enableAutoPromptOrder = enableAutoPromptOrder,
                                 autoPromptOrderKorean = autoPromptOrderKoreanText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(3, 7) },
                                 autoPromptOrderChinese = autoPromptOrderChineseText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(1, 1) },

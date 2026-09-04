@@ -9,6 +9,7 @@ import com.example.novelscraper.translation.llm.engine.LlmProvider
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.llm.engine.ModelProfile
 import com.example.novelscraper.translation.llm.prompt.PromptBuilder
+import com.example.novelscraper.translation.llm.rotation.ApiKeyPoolManager
 import com.example.novelscraper.translation.llm.rotation.LlmRotationManager
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -174,6 +175,8 @@ object LargeFileTranslator {
                     val preparedSource = CompletionMarkerHelper.appendMarker(chunkText, config.enableCompletionMarker)
 
                     // --- 3. ネットワークリトライループ ---
+                    // 分間制限疑いの429は同モデル再試行を優先し、即時のモデル切替を避ける
+                    var sameModelQuotaRetries = 0
                     var retryCount = 0
                     val maxRetryCount = if (profile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
                         (config.geminiApiKeys.size * profiles.size).coerceAtLeast(MAX_RETRIES)
@@ -215,7 +218,18 @@ object LargeFileTranslator {
                                 }
                             }
                             is LlmApiResult.QuotaExceeded -> {
-                                onLog("    ⏳ $chunkName: Quota制限検知 (${apiResult.message})")
+                                onLog("    ⏳ $chunkName: Quota制限検知 (${apiResult.message.take(200)})")
+                                if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled &&
+                                    !ApiKeyPoolManager.isDailyQuotaExceeded(apiResult.message) &&
+                                    sameModelQuotaRetries < LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES
+                                ) {
+                                    sameModelQuotaRetries++
+                                    val waitSec = LlmRetryPolicy.quotaSameModelWaitSec(apiResult.retryAfterSec)
+                                    onLog("    ⏳ $chunkName: 分間制限疑い → ${waitSec}秒待機して同モデル再試行 [${sameModelQuotaRetries}/${LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES}]")
+                                    delay(waitSec * 1000L)
+                                    retryCount++
+                                    continue
+                                }
                                 if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
                                     val advanced = rotationManager.advanceRotation(apiResult.message) { onLog("      $it") }
                                     if (!advanced) {

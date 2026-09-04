@@ -768,6 +768,8 @@ class LlmTranslationEngine(
                     )
                 } else null
                 var jsonAttempted = false
+                // 分間制限疑いの429は同モデル再試行を優先し、即時のモデル切替を避ける
+                var sameModelQuotaRetries = 0
 
                 // --- 3. ネットワークリトライループ ---
                 var retry = 0
@@ -829,6 +831,17 @@ class LlmTranslationEngine(
                             break
                         }
                         is LlmApiResult.QuotaExceeded -> {
+                            if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled &&
+                                !ApiKeyPoolManager.isDailyQuotaExceeded(apiResult.message) &&
+                                sameModelQuotaRetries < LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES
+                            ) {
+                                sameModelQuotaRetries++
+                                val waitSec = LlmRetryPolicy.quotaSameModelWaitSec(apiResult.retryAfterSec)
+                                addLog("[W#$workerId] ⏳ バッチ分間制限疑い → ${waitSec}秒待機して同モデル再試行 [${sameModelQuotaRetries}/${LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES}]")
+                                delay(waitSec * 1000L)
+                                retry++
+                                continue
+                            }
                             if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
                                 val advanced = rotationManager.advanceRotation(apiResult.message) { addLog("[W#$workerId]  $it") }
                                 if (!advanced) return BatchOutcome(0, 0)
@@ -1066,6 +1079,8 @@ class LlmTranslationEngine(
                 )
 
                 val preparedSource = CompletionMarkerHelper.appendMarker(content, config.enableCompletionMarker)
+                // 分間制限疑いの429は同モデル再試行を優先し、即時のモデル切替を避ける
+                var sameModelQuotaRetries = 0
 
                 // --- 3. ネットワークリトライループ ---
                 var retry = 0
@@ -1100,6 +1115,17 @@ class LlmTranslationEngine(
                             }
                         }
                         is LlmApiResult.QuotaExceeded -> {
+                            if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled &&
+                                !ApiKeyPoolManager.isDailyQuotaExceeded(apiResult.message) &&
+                                sameModelQuotaRetries < LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES
+                            ) {
+                                sameModelQuotaRetries++
+                                val waitSec = LlmRetryPolicy.quotaSameModelWaitSec(apiResult.retryAfterSec)
+                                addLog("[W#$workerId] ⏳ $fileName 分間制限疑い → ${waitSec}秒待機して同モデル再試行 [${sameModelQuotaRetries}/${LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES}]")
+                                delay(waitSec * 1000L)
+                                retry++
+                                continue
+                            }
                             if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
                                 val advanced = rotationManager.advanceRotation(apiResult.message) { addLog("[W#$workerId]  $it") }
                                 if (!advanced) {

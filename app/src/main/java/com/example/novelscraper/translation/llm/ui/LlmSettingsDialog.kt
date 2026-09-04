@@ -35,6 +35,10 @@ import com.example.novelscraper.translation.llm.engine.LlmProvider
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.llm.engine.ModelProfile
 import com.example.novelscraper.translation.llm.engine.PromptOrderPreset
+import com.example.novelscraper.translation.llm.api.LlmHealthResult
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.example.novelscraper.translation.llm.prompt.TranslationPrompts
 import com.example.novelscraper.ui.theme.AppColors
 
@@ -447,6 +451,15 @@ fun LlmSettingsDialog(
                                         onRequestSavePreset = { order ->
                                             presetOrderToSave = order.joinToString(", ")
                                             showAddPresetDialog = true
+                                        },
+                                        onHealthCheck = { target ->
+                                            // 編集中のキーで疎通確認する（保存前でも試せる）
+                                            val snapshot = currentConfig.copy(
+                                                geminiApiKeys = geminiKeysText.lines().map { it.trim() }.filter { it.isNotBlank() },
+                                                openRouterApiKey = openRouterKey.trim(),
+                                                groqApiKey = groqKey.trim()
+                                            )
+                                            com.example.novelscraper.translation.llm.api.LlmHealthCheck.ping(snapshot, target)
                                         },
                                         onMoveUp = {
                                             if (index > 0) {
@@ -1109,7 +1122,8 @@ private fun ModelProfileCard(
     onMoveDown: () -> Unit,
     onDelete: () -> Unit,
     onRequestSavePreset: (List<Int>) -> Unit,
-    onShowBatchSplitHelp: () -> Unit = {}
+    onShowBatchSplitHelp: () -> Unit = {},
+    onHealthCheck: (suspend (ModelProfile) -> LlmHealthResult)? = null
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1432,6 +1446,48 @@ private fun ModelProfileCard(
                             color = AppColors.textTertiary,
                             fontSize = 8.sp
                         )
+                        val healthScope = rememberCoroutineScope()
+                        var healthTesting by remember { mutableStateOf(false) }
+                        var healthResult by remember { mutableStateOf<LlmHealthResult?>(null) }
+                        if (onHealthCheck != null) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        healthScope.launch {
+                                            healthTesting = true
+                                            healthResult = null
+                                            healthResult = try {
+                                                withContext(Dispatchers.IO) { onHealthCheck(profile) }
+                                            } catch (e: Exception) {
+                                                LlmHealthResult(
+                                                    com.example.novelscraper.translation.llm.api.LlmHealthStatus.FAILED,
+                                                    "疎通例外: ${e.message}"
+                                                )
+                                            }
+                                            healthTesting = false
+                                        }
+                                    },
+                                    enabled = !healthTesting,
+                                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
+                                    shape = RoundedCornerShape(4.dp),
+                                    modifier = Modifier.height(30.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
+                                ) {
+                                    Text(
+                                        if (healthTesting) "確認中…" else "接続テスト",
+                                        color = Color.White,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                                healthResult?.let {
+                                    Text(it.statusText(), color = AppColors.textSecondary, fontSize = 9.sp)
+                                }
+                            }
+                        }
                     }
                 }
             }

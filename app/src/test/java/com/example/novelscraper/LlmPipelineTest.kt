@@ -1246,4 +1246,24 @@ class LlmPipelineTest {
         assertEquals(39, ko15)
         assertEquals(26, en15)
     }
+
+    @Test
+    fun testHealthResult_StatusText() {
+        val ok = com.example.novelscraper.translation.llm.api.LlmHealthResult(
+            com.example.novelscraper.translation.llm.api.LlmHealthStatus.OK, "応答あり"
+        )
+        assertTrue(ok.statusText().contains("接続OK"))
+
+        val cfg = com.example.novelscraper.translation.llm.api.LlmHealthResult(
+            com.example.novelscraper.translation.llm.api.LlmHealthStatus.CONFIG,
+            "No endpoints",
+            com.example.novelscraper.translation.llm.api.ConfigErrorKind.MODEL_NOT_FOUND
+        )
+        assertTrue(cfg.statusText().contains("モデルID"))
+
+        val timeout = com.example.novelscraper.translation.llm.api.LlmHealthResult(
+            com.example.novelscraper.translation.llm.api.LlmHealthStatus.TIMEOUT, ""
+        )
+        assertTrue(timeout.statusText().contains("タイムアウト"))
+    }
 }

@@ -46,4 +46,21 @@ object CompletionMarkerHelper {
         // マーカーが見つからない → 生成途絶
         return null
     }
+
+    /**
+     * バッチ翻訳出力が正常に完走したか（最外周閉じタグまたは最終セグメント閉じタグが存在するか）を判定する。
+     */
+    fun checkBatchCompletion(content: String, enabled: Boolean): Boolean {
+        if (!enabled) return true
+
+        var text = content.trim()
+        if (text.endsWith("```")) {
+            text = text.removeSuffix("```").trim()
+        }
+
+        // 末尾400文字以内に </translations>、</trans>、または旧マーカー [SRC_END] があるか確認
+        val searchWindow = text.takeLast(400)
+        val closingTagRegex = Regex("""</\s*(?:translations|trans)\s*>|\[SRC_END\]""", RegexOption.IGNORE_CASE)
+        return closingTagRegex.containsMatchIn(searchWindow)
+    }
 }

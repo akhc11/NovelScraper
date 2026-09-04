@@ -574,7 +574,7 @@ fun LlmSettingsDialog(
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text("物理分割文字数 (文字):", color = AppColors.textSecondary, fontSize = 9.sp)
                                 BasicInputArea(value = textSplitSizeCharsText, onValueChange = { textSplitSizeCharsText = it })
-                                Text("※例: 8000 ➔ 約8,000文字 (約2〜3話相当) 毎にパート分割", color = AppColors.textTertiary, fontSize = 8.sp)
+                                Text("※例: 7000 ➔ 約7,000文字 (約2〜3話相当) 毎にパート分割", color = AppColors.textTertiary, fontSize = 8.sp)
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(checked = enablePrevSrcContext, onCheckedChange = { enablePrevSrcContext = it })
@@ -914,7 +914,7 @@ fun LlmSettingsDialog(
                                 outputSubDir = outputSubDir.trim().ifBlank { "翻訳完了_LLM" },
                                 enableCompletionMarker = enableCompletionMarker,
                                 enableTextSplit = enableTextSplit,
-                                textSplitSizeChars = (textSplitSizeCharsText.toIntOrNull() ?: 8000).coerceAtLeast(500),
+                                textSplitSizeChars = (textSplitSizeCharsText.toIntOrNull() ?: 7000).coerceAtLeast(500),
                                 enableDictGen = enableDictGen,
                                 dictProvider = dictProvider,
                                 dictModel = when (dictProvider) {

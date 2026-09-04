@@ -1160,6 +1160,47 @@ class LlmPipelineTest {
     }
 
     @Test
+    fun testMapHttpError_OpenAiCompatible() {
+        val map = com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient::mapHttpError
+
+        val notFound = map(404, """{"error": {"message": "No endpoints found for model"}}""")
+        assertTrue(notFound is com.example.novelscraper.translation.llm.api.LlmApiResult.ConfigError)
+        assertEquals(
+            com.example.novelscraper.translation.llm.api.ConfigErrorKind.MODEL_NOT_FOUND,
+            (notFound as com.example.novelscraper.translation.llm.api.LlmApiResult.ConfigError).kind
+        )
+
+        val payment = map(402, "Payment Required: insufficient credits")
+        assertTrue(payment is com.example.novelscraper.translation.llm.api.LlmApiResult.ConfigError)
+
+        val invalid = map(400, "Request contains an invalid argument")
+        assertTrue(invalid is com.example.novelscraper.translation.llm.api.LlmApiResult.FatalError)
+
+        val transient = map(503, "overloaded")
+        assertTrue(transient is com.example.novelscraper.translation.llm.api.LlmApiResult.NetworkError)
+    }
+
+    @Test
+    fun testOpenAiReasoningField_Decode() {
+        // 推論系モデルの reasoning 枠付き応答がデコードでき、content空を検出できること
+        val body = """
+            {"id": "x", "choices": [
+              {"index": 0, "message": {"role": "assistant", "content": "", "reasoning": "考え中..."},
+               "finish_reason": "stop"}
+            ]}
+        """.trimIndent()
+        val resp = com.example.novelscraper.translation.llm.api.LlmApiClient.json.decodeFromString(
+            com.example.novelscraper.translation.llm.api.model.OpenAiChatResponse.serializer(),
+            body
+        )
+        val msg = resp.choices?.firstOrNull()?.message
+        assertNotNull(msg)
+        assertTrue(msg!!.content.isNullOrBlank())
+        assertEquals("考え中...", msg.reasoning)
+        assertEquals("stop", resp.choices?.firstOrNull()?.finishReason)
+    }
+
+    @Test
     fun testInputSizeEstimateKb_MatchesThreshold() {
         // 画面表示の目安値と実効閾値が同一計算（単一管理点）であること
         val config = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig()

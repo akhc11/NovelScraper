@@ -885,8 +885,21 @@ class LlmTranslationEngine(
             )
         }
 
-        addLog("[W#$workerId] ⚠️ バッチ全滅 (全ドライバー失敗) → 未完了のまま保持 (次回再試行)")
-        return BatchOutcome(0, 0)
+        if (isStopRequested || !currentCoroutineContext().isActive) {
+            addLog("[W#$workerId] 🛑 バッチ中断 → 未完了のまま保持")
+            return BatchOutcome(0, 0)
+        }
+        addLog("[W#$workerId] ⚠️ バッチ全滅 (全ドライバー失敗) → 全${batchItems.size}件を単体翻訳へフォールバック")
+        return fallbackItemsToSingle(
+            items = batchItems,
+            outputDir = outputDir,
+            existingOutputNames = existingOutputNames,
+            rotationManager = rotationManager,
+            sourceLang = sourceLang,
+            novelDict = novelDict,
+            prevSourceTail = prevSourceTail,
+            workerId = workerId
+        )
     }
 
     /**
@@ -949,32 +962,62 @@ class LlmTranslationEngine(
         }
 
         // 失敗分のみ単体翻訳へ（成功分は確定済みのため再翻訳しない）
-        if (failedItems.isNotEmpty()) {
-            if (isStopRequested || !currentCoroutineContext().isActive) {
-                addLog("[W#$workerId] 🛑 バッチ部分回収: 中断のため残り${failedItems.size}件は未処理で保持")
-                return BatchOutcome(completed, settled)
-            }
-            addLog("[W#$workerId] ⚠️ バッチ部分回収: ${failedItems.size}件を単体翻訳へフォールバック")
-            for (item in failedItems) {
-                if (isStopRequested || !currentCoroutineContext().isActive) break
-                if (translateSingleFile(
-                        fileDoc = item.first,
-                        content = item.second,
-                        outputDir = outputDir,
-                        existingOutputNames = existingOutputNames,
-                        rotationManager = rotationManager,
-                        sourceLang = sourceLang,
-                        novelDict = novelDict,
-                        prevSourceTail = prevSourceTail,
-                        workerId = workerId
-                    )
-                ) {
-                    completed++
-                }
-                settled++
-            }
+        if (failedItems.isEmpty()) {
+            return BatchOutcome(completed, settled)
         }
+        if (isStopRequested || !currentCoroutineContext().isActive) {
+            addLog("[W#$workerId] 🛑 バッチ部分回収: 中断のため残り${failedItems.size}件は未処理で保持")
+            return BatchOutcome(completed, settled)
+        }
+        addLog("[W#$workerId] ⚠️ バッチ部分回収: ${failedItems.size}件を単体翻訳へフォールバック")
+        val fallback = fallbackItemsToSingle(
+            items = failedItems,
+            outputDir = outputDir,
+            existingOutputNames = existingOutputNames,
+            rotationManager = rotationManager,
+            sourceLang = sourceLang,
+            novelDict = novelDict,
+            prevSourceTail = prevSourceTail,
+            workerId = workerId
+        )
 
+        return BatchOutcome(completed + fallback.completed, settled + fallback.settled)
+    }
+
+    /**
+     * 指定ファイル群を1件ずつ単体翻訳へフォールバックする。
+     * 中断時は残りを未処理として打ち切る。
+     */
+    private suspend fun fallbackItemsToSingle(
+        items: List<Pair<DocumentFile, String>>,
+        outputDir: DocumentFile,
+        existingOutputNames: MutableSet<String>,
+        rotationManager: LlmRotationManager,
+        sourceLang: SourceLanguage,
+        novelDict: NovelDictionary?,
+        prevSourceTail: String?,
+        workerId: Int
+    ): BatchOutcome {
+        var completed = 0
+        var settled = 0
+        for (item in items) {
+            if (isStopRequested || !currentCoroutineContext().isActive) break
+            if (translateSingleFile(
+                    fileDoc = item.first,
+                    content = item.second,
+                    outputDir = outputDir,
+                    existingOutputNames = existingOutputNames,
+                    rotationManager = rotationManager,
+                    sourceLang = sourceLang,
+                    novelDict = novelDict,
+                    prevSourceTail = prevSourceTail,
+                    workerId = workerId
+                )
+            ) {
+                completed++
+            }
+            settled++
+        }
         return BatchOutcome(completed, settled)
     }
 

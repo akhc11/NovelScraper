@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.llm.api.LlmApiResult
 import com.example.novelscraper.translation.llm.api.LlmRequestRunner
+import com.example.novelscraper.translation.llm.api.LlmRetryPolicy
 import com.example.novelscraper.translation.llm.engine.LlmProvider
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.llm.engine.ModelProfile
@@ -229,8 +230,13 @@ object LargeFileTranslator {
                                 }
                             }
                             is LlmApiResult.NetworkError -> {
-                                onLog("    ⚠️ $chunkName: ネットワークエラー (${apiResult.message}) → 再試行")
-                                delay(RETRY_DELAY_SEC * 1000L)
+                                if (retryCount + 1 >= maxRetryCount) {
+                                    onLog("    ⚠️ $chunkName: ネットワークエラー (${apiResult.message}) → 再試行上限到達")
+                                } else {
+                                    val waitMs = LlmRetryPolicy.backoffDelayMs(retryCount)
+                                    onLog("    ⚠️ $chunkName: ネットワークエラー (${apiResult.message}) → ${(waitMs / 1000)}秒後再試行")
+                                    delay(waitMs)
+                                }
                                 retryCount++
                             }
                             is LlmApiResult.QualityError -> {
@@ -274,10 +280,6 @@ object LargeFileTranslator {
                 }
                 onLog("❌ $chunkName : 全ドライバー失敗 → $chunkName.failed を保存して停止")
                 return false
-            }
-
-            if (config.requestDelaySec > 0) {
-                delay(config.requestDelaySec * 1000L)
             }
         }
 

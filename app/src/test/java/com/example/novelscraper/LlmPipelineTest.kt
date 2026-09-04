@@ -634,4 +634,103 @@ class LlmPipelineTest {
         )
         assertEquals(500000, config500kb.dictBatchMaxBytes)
     }
+
+    @Test
+    fun testGeminiGenerationConfig_MaxOutputTokensSerialization() {
+        val cfg = com.example.novelscraper.translation.llm.api.model.GeminiGenerationConfig(
+            maxOutputTokens = 65536
+        )
+        val json = com.example.novelscraper.translation.llm.api.LlmApiClient.json.encodeToString(
+            com.example.novelscraper.translation.llm.api.model.GeminiGenerationConfig.serializer(),
+            cfg
+        )
+        assertTrue(json.contains("\"maxOutputTokens\":65536"))
+    }
+
+    @Test
+    fun testModelProfile_DefaultMaxOutputChars15000() {
+        val profile = com.example.novelscraper.translation.llm.engine.ModelProfile(modelName = "gemini-3.5-flash")
+        assertEquals(15000, profile.maxOutputChars)
+
+        val config = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig()
+        // 中国語: 15000 * 3.0 / 1.6 = 28125B ≒ 28KB
+        val zhThreshold = config.getEffectiveSplitThreshold(SourceLanguage.ZH, profile)
+        assertEquals(28125, zhThreshold)
+
+        // 韓国語: 15000 * 3.0 / 1.1 = 40909B ≒ 40KB
+        val koThreshold = config.getEffectiveSplitThreshold(SourceLanguage.KO, profile)
+        assertEquals(40909, koThreshold)
+
+        // ログ出力用フォーマット検証 (15000 -> 1.5万字, 20000 -> 2万字)
+        val zhManChars = String.format(java.util.Locale.US, "%.1f", profile.maxOutputChars / 10000.0).removeSuffix(".0")
+        assertEquals("1.5", zhManChars)
+        val profile20k = profile.copy(maxOutputChars = 20000)
+        val manChars20k = String.format(java.util.Locale.US, "%.1f", profile20k.maxOutputChars / 10000.0).removeSuffix(".0")
+        assertEquals("2", manChars20k)
+    }
+
+    @Test
+    fun testGeminiResponse_ThinkingPartFilteringAndMultiPartJoining() {
+        val jsonWithThoughts = """
+            {
+              "candidates": [
+                {
+                  "content": {
+                    "parts": [
+                      {
+                        "text": "This is internal thinking process...",
+                        "thought": true
+                      },
+                      {
+                        "text": "第1パートの翻訳本文です。\n"
+                      },
+                      {
+                        "text": "第2パートの翻訳本文です。[SRC_END]"
+                      }
+                    ]
+                  },
+                  "finishReason": "STOP"
+                }
+              ],
+              "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 50,
+                "totalTokenCount": 150,
+                "thoughtsTokenCount": 30
+              }
+            }
+        """.trimIndent()
+
+        val resp = com.example.novelscraper.translation.llm.api.LlmApiClient.json.decodeFromString(
+            com.example.novelscraper.translation.llm.api.model.GeminiResponse.serializer(),
+            jsonWithThoughts
+        )
+        val candidate = resp.candidates?.firstOrNull()
+        val nonThoughtParts = candidate?.content?.parts?.filter { it.thought != true } ?: emptyList()
+        val text = nonThoughtParts.mapNotNull { it.text }.joinToString("")
+
+        assertEquals("第1パートの翻訳本文です。\n第2パートの翻訳本文です。[SRC_END]", text)
+        assertFalse(text.contains("internal thinking process"))
+        assertEquals(30, resp.usageMetadata?.thoughtsTokenCount)
+    }
+
+    @Test
+    fun testGeminiResponse_SafetyBlockDetection() {
+        val jsonSafetyBlock = """
+            {
+              "candidates": [
+                {
+                  "finishReason": "SAFETY"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val resp = com.example.novelscraper.translation.llm.api.LlmApiClient.json.decodeFromString(
+            com.example.novelscraper.translation.llm.api.model.GeminiResponse.serializer(),
+            jsonSafetyBlock
+        )
+        val candidate = resp.candidates?.firstOrNull()
+        assertEquals("SAFETY", candidate?.finishReason)
+    }
 }

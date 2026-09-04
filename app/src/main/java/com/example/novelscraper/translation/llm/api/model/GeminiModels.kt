@@ -25,7 +25,8 @@ data class GeminiContent(
 
 @Serializable
 data class GeminiPart(
-    val text: String
+    val text: String? = null,
+    val thought: Boolean? = null
 )
 
 @Serializable
@@ -33,6 +34,7 @@ data class GeminiGenerationConfig(
     val temperature: Double? = null,
     val topP: Double? = null,
     val topK: Int? = null,
+    val maxOutputTokens: Int? = null,
     val thinkingConfig: GeminiThinkingConfig? = null
 )
 
@@ -45,8 +47,14 @@ data class GeminiThinkingConfig(
 @Serializable
 data class GeminiResponse(
     val candidates: List<GeminiCandidate>? = null,
+    val promptFeedback: GeminiPromptFeedback? = null,
     val usageMetadata: GeminiUsageMetadata? = null,
     val error: GeminiError? = null
+)
+
+@Serializable
+data class GeminiPromptFeedback(
+    val blockReason: String? = null
 )
 
 @Serializable
@@ -65,7 +73,8 @@ data class GeminiCandidateContent(
 data class GeminiUsageMetadata(
     val promptTokenCount: Int? = null,
     val candidatesTokenCount: Int? = null,
-    val totalTokenCount: Int? = null
+    val totalTokenCount: Int? = null,
+    val thoughtsTokenCount: Int? = null
 )
 
 @Serializable

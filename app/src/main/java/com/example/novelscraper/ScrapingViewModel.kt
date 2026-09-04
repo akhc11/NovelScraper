@@ -140,10 +140,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { it.copy(activeDialog = ActiveDialog.SavePreset(defaultName, currentUrl)) }
     }
 
-    fun showInspectElementDialog(selector: String) {
-        _uiState.update { it.copy(activeDialog = ActiveDialog.InspectElement(selector)) }
-    }
-
     fun showLlmSettingsDialog() {
         _uiState.update { it.copy(activeDialog = ActiveDialog.LlmSettings) }
     }

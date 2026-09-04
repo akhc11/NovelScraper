@@ -28,7 +28,6 @@ sealed interface ActiveDialog {
     data object None : ActiveDialog
     data class AddFavorite(val title: String, val url: String) : ActiveDialog
     data class SavePreset(val defaultName: String, val currentUrl: String) : ActiveDialog
-    data class InspectElement(val selector: String) : ActiveDialog
     data object LlmSettings : ActiveDialog
     data object TextQuerySearch : ActiveDialog
 }

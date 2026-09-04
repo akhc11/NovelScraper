@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper.translation.llm.api
+package com.example.novelscraper.translation.llm.api
 
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
@@ -31,7 +31,7 @@ object LlmApiClient {
         OkHttpClient.Builder()
             .dispatcher(dispatcher)
             .connectTimeout(25, TimeUnit.SECONDS)
-            .readTimeout(180, TimeUnit.SECONDS)
+            .readTimeout(360, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()

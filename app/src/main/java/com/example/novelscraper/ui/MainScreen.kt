@@ -38,13 +38,14 @@ import com.example.novelscraper.translation.llm.engine.LlmEngineState
 import com.example.novelscraper.translation.llm.ui.LlmSettingsDialog
 import com.example.novelscraper.ui.components.*
 import com.example.novelscraper.ui.theme.AppColors
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.drop
+import kotlinx.serialization.json.Json
 
 /**
  * MainScreen から Activity への通知用コールバック群。
  */
 data class MainScreenCallbacks(
-    val onStartScraping: (String) -> Unit,
-    val onResumeScraping: (String, String) -> Unit,
     val onLaunchAnalysisTool: (WebView) -> Unit,
     val onSetupWebView: (WebView) -> Unit,
     val onInjectInspector: (WebView?) -> Unit,
@@ -101,14 +102,23 @@ fun MainScreen(
         }
     }
 
-    // インスペクター注入/破棄の単一管理（状態変化のみをトリガーにする）
+    // インスペクター注入/破棄の単一管理（起動中の設定変更はupdateConfigで差分同期・再注入しない）
     val inspectActive = uiState.overlay is Overlay.InspectMode
-    LaunchedEffect(inspectActive) {
+    LaunchedEffect(inspectActive, webViewRef) {
         if (inspectActive) {
             callbacks.onInjectInspector(webViewRef)
         } else {
             callbacks.onRemoveInspector(webViewRef)
         }
+    }
+    // 起動中の設定変更（テキスト検索反映・設定手編集）をデバウンスして差分同期。
+    // キー入力毎の evaluateJavascript 連打によるページちらつきを防止する。
+    LaunchedEffect(inspectActive, webViewRef) {
+        if (!inspectActive) return@LaunchedEffect
+        snapshotFlow { uiState.currentConfig }
+            .drop(1) // 初回分は上記注入済みのため除外
+            .debounce(400)
+            .collect { callbacks.onInjectInspector(webViewRef) }
     }
 
     // 戻るボタンのハンドリング
@@ -206,7 +216,7 @@ fun MainScreen(
                         if (currentTask != null) {
                             currentTask.stop()
                         } else {
-                            callbacks.onStartScraping(url)
+                            viewModel.startScraping(url)
                         }
                     }
                 },
@@ -398,7 +408,7 @@ fun MainScreen(
                                     val nextConfig = item.config.copy(chapter = "@${lastNum + 1}")
                                     val presetName = if (item.presetName.isNotEmpty()) item.presetName else "(履歴から再開)"
                                     viewModel.applyPresetState(presetName, nextConfig)
-                                    callbacks.onResumeScraping(item.nextUrl, folder)
+                                    viewModel.startScraping(item.nextUrl, folder)
                                     viewModel.closePanels()
                                 } else {
                                     Toast.makeText(context, "次のページが見つかりません（最新話か、古い履歴です）", Toast.LENGTH_LONG).show()
@@ -497,23 +507,6 @@ fun MainScreen(
                         onDismiss = { viewModel.dismissDialog() }
                     )
                 }
-                is ActiveDialog.InspectElement -> {
-                    InspectElementDialog(
-                        initialSelector = dialog.selector,
-                        onApply = { field, sel ->
-                            viewModel.applySelectorToConfig(field, sel)
-                            viewModel.dismissDialog()
-                            Toast.makeText(context, "${field.displayName} にセレクタを反映しました", Toast.LENGTH_SHORT).show()
-                        },
-                        onCopy = { sel ->
-                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            cm.setPrimaryClip(ClipData.newPlainText("Selector", sel))
-                            viewModel.dismissDialog()
-                            Toast.makeText(context, "セレクタをコピーしました", Toast.LENGTH_SHORT).show()
-                        },
-                        onDismiss = { viewModel.dismissDialog() }
-                    )
-                }
                 is ActiveDialog.LlmSettings -> {
                     LlmSettingsDialog(
                         currentConfig = viewModel.getLlmConfig(),
@@ -527,16 +520,38 @@ fun MainScreen(
                 is ActiveDialog.TextQuerySearch -> {
                     TextQuerySearchDialog(
                         onDismiss = { viewModel.dismissDialog() },
-                        onSearch = { query ->
-                            if (!uiState.isInspectMode) {
-                                viewModel.setInspectMode(true)
-                                webViewRef?.let { callbacks.onInjectInspector(it) }
-                            }
-                            val js = ScrapingScriptBuilder.buildSearchTextInInspectorScript(query)
+                        onSearch = { query, onResult ->
+                            val js = ScrapingScriptBuilder.buildSearchTextScript(query)
                             webViewRef?.evaluateJavascript(js) { res ->
-                                if (res == "false" || res == null || res == "null") {
-                                    Toast.makeText(context, "該当するテキストが見つかりません", Toast.LENGTH_SHORT).show()
+                                val list = if (res != null && res != "null" && res != "false") {
+                                    try {
+                                        val rawJson = Json.decodeFromString<String>(res)
+                                        Json.decodeFromString<List<TextSearchResultItem>>(rawJson)
+                                    } catch (e: Exception) {
+                                        try {
+                                            Json.decodeFromString<List<TextSearchResultItem>>(res)
+                                        } catch (e2: Exception) {
+                                            emptyList()
+                                        }
+                                    }
+                                } else {
+                                    emptyList()
                                 }
+                                // JS側エラー行や空セレクタは設定破壊防止のため除外
+                                onResult(list.filter { it.selector.isNotBlank() && it.tag != "ERROR" })
+                            }
+                        },
+                        onApplyToField = { field, selector ->
+                            viewModel.applySelectorToConfig(field, selector)
+                            Toast.makeText(context, "${field.displayName}に反映しました", Toast.LENGTH_SHORT).show()
+                        },
+                        onCopySelector = { selector ->
+                            try {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("CSS Selector", selector))
+                                Toast.makeText(context, "セレクタをコピーしました", Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "コピー失敗: ${e.message}", Toast.LENGTH_SHORT).show()
                             }
                         }
                     )

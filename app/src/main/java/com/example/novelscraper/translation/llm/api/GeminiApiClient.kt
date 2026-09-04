@@ -87,8 +87,12 @@ object GeminiApiClient {
                 .build()
 
             val call = LlmApiClient.httpClient.newCall(request)
-            val (code, bodyString) = call.awaitResponse().use { response ->
-                response.code to (response.body?.string() ?: "")
+            val (code, bodyString, retryAfterHeader) = call.awaitResponse().use { response ->
+                Triple(
+                    response.code,
+                    response.body?.string() ?: "",
+                    response.header("Retry-After")?.toLongOrNull()
+                )
             }
 
             when (code) {
@@ -138,7 +142,9 @@ object GeminiApiClient {
                     }
                     LlmApiResult.QuotaExceeded(
                         message = summary,
-                        retryAfterSec = quota.retryDelaySec ?: 30
+                        retryAfterSec = quota.retryDelaySec
+                            ?: retryAfterHeader?.coerceIn(1L, 600L)?.toInt()
+                            ?: 30
                     )
                 }
                 500, 502, 503, 504 -> {

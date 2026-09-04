@@ -11,10 +11,13 @@ sealed class LlmApiResult {
         val totalTokens: Int = 0
     ) : LlmApiResult()
 
-    /** HTTP 429 Quota制限 */
+    /**
+     * HTTP 429 Quota制限。
+     * @param retryAfterSec サーバー指定の待機秒数。不明時は -1（呼び出し側で既定待機を使うこと）。
+     */
     data class QuotaExceeded(
         val message: String,
-        val retryAfterSec: Int = 60
+        val retryAfterSec: Int = -1
     ) : LlmApiResult()
 
     /** ネットワークエラー・一時的なサーバー障害 (HTTP 502/503/Timeout等) */

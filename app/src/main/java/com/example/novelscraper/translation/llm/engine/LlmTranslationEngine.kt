@@ -861,8 +861,11 @@ class LlmTranslationEngine(
                                 if (!advanced) return BatchOutcome(0, 0)
                                 retry++
                             } else {
-                                addLog("[W#$workerId] ⏳ バッチ制限待機 (429): ${apiResult.message.take(100)}...")
-                                delay(5000L)
+                                // OpenRouter/Groq等：Retry-After指定があれば従い、なければ5秒
+                                val waitSec = apiResult.retryAfterSec
+                                    .takeIf { it > 0 }?.toLong()?.coerceIn(5, 120) ?: 5
+                                addLog("[W#$workerId] ⏳ バッチ制限待機 (429・${waitSec}秒): ${apiResult.message.take(80)}...")
+                                delay(waitSec * 1000L)
                                 retry++
                             }
                         }
@@ -1169,7 +1172,10 @@ class LlmTranslationEngine(
                                 }
                                 retry++
                             } else {
-                                delay(5000L)
+                                // OpenRouter/Groq等：Retry-After指定があれば従い、なければ5秒
+                                val waitSec = apiResult.retryAfterSec
+                                    .takeIf { it > 0 }?.toLong()?.coerceIn(5, 120) ?: 5
+                                delay(waitSec * 1000L)
                                 retry++
                             }
                         }

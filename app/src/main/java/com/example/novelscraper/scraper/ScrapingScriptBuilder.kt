@@ -383,8 +383,7 @@ object ScrapingScriptBuilder {
 
     /**
      * インスペクター（虫眼鏡モード）のJSスクリプト。
-     * - 各種要素候補のタップでコピー＆反映ボタン付きカードを表示
-     * - テキスト逆引き検索（searchByText）対応（自動スクロールなし、ハイライト＋候補カード展開）
+     * - 各種要素候補のタップでコピー＆反映ボタン付きカードを表示（最大10候補）
      * - リンク要素の自動親昇格
      * - 全7フィールド対応
      */
@@ -393,7 +392,14 @@ object ScrapingScriptBuilder {
         val configBase64 = Base64.getEncoder().encodeToString(configJson.toByteArray(Charsets.UTF_8))
         return """
             (function() {
-                if (window.__novelInspectActive) return;
+                if (window.__novelInspectActive) {
+                    try {
+                        if (window.__novelInspector && window.__novelInspector.updateConfig) {
+                            window.__novelInspector.updateConfig('$configBase64');
+                        }
+                    } catch(e){}
+                    return;
+                }
                 window.__novelInspectActive = true;
                 var config = JSON.parse(decodeURIComponent(escape(atob('$configBase64'))));
                 var active = true;
@@ -420,6 +426,7 @@ object ScrapingScriptBuilder {
                 } catch(e){}
 
                 var style = document.createElement('style');
+                style.id = '__novel_inspector_style';
                 style.innerHTML = '.__novel_notranslate, .notranslate, .skiptranslate { -webkit-user-select: auto; } .__novel_mark_title { outline: 3px solid #2196F3 !important; } .__novel_mark_body { outline: 3px solid #4CAF50 !important; } .__novel_mark_next { outline: 3px solid #FF9800 !important; }';
                 document.head.appendChild(style);
 
@@ -428,7 +435,7 @@ object ScrapingScriptBuilder {
                 hint.className = '__novel_notranslate notranslate skiptranslate';
                 hint.setAttribute('translate', 'no');
                 hint.innerText = '要素をタップして候補を確認';
-                hint.style = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.85);color:#fff;padding:6px 14px;border-radius:16px;z-index:2147483647;font-size:12px;pointer-events:none;';
+                hint.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.85);color:#fff;padding:6px 14px;border-radius:16px;z-index:2147483647;font-size:12px;pointer-events:none;';
                 document.body.appendChild(hint);
                 setTimeout(function(){ if (hint.parentNode) hint.parentNode.removeChild(hint); }, 3000);
 
@@ -443,15 +450,36 @@ object ScrapingScriptBuilder {
                     }
                 }
 
-                function applyCurrentConfig() {
-                    document.querySelectorAll('.__novel_mark_title, .__novel_mark_body, .__novel_mark_next').forEach(function(el){
-                        el.style.outline = '';
-                        el.classList.remove('__novel_mark_title', '__novel_mark_body', '__novel_mark_next');
-                    });
+                function clearHighlight() {
+                    if (prevHighlight) { try { prevHighlight.style.outline = ''; } catch(e){} prevHighlight = null; }
+                }
+
+                function getExcludeList() {
+                    return (config.exclude || '').split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+                }
+
+                function isExcluded(sel) { return getExcludeList().indexOf(sel) > -1; }
+
+                function clearInspectorMarks() {
                     try {
-                        if (config.title) document.querySelector(config.title).classList.add('__novel_mark_title');
-                        if (config.body) document.querySelector(config.body).classList.add('__novel_mark_body');
-                        if (config.next) document.querySelector(config.next).classList.add('__novel_mark_next');
+                        document.querySelectorAll('.__novel_mark_title, .__novel_mark_body, .__novel_mark_next').forEach(function(el){
+                            el.style.outline = '';
+                            el.classList.remove('__novel_mark_title', '__novel_mark_body', '__novel_mark_next');
+                        });
+                    } catch(e){}
+                    try {
+                        getExcludeList().forEach(function(s) {
+                            try { document.querySelectorAll(s).forEach(function(n){ n.style.opacity = ''; }); } catch(e){}
+                        });
+                    } catch(e){}
+                }
+
+                function applyCurrentConfig() {
+                    clearInspectorMarks();
+                    try { if (config.title) document.querySelector(config.title).classList.add('__novel_mark_title'); } catch(e){}
+                    try { if (config.body) document.querySelector(config.body).classList.add('__novel_mark_body'); } catch(e){}
+                    try { if (config.next) document.querySelector(config.next).classList.add('__novel_mark_next'); } catch(e){}
+                    try {
                         if (config.exclude) {
                             config.exclude.split(',').forEach(function(s) {
                                 var sel = s.trim();
@@ -460,12 +488,6 @@ object ScrapingScriptBuilder {
                         }
                     } catch(e){}
                 }
-
-                function getExcludeList() {
-                    return (config.exclude || '').split(',').map(function(s){ return s.trim(); }).filter(Boolean);
-                }
-
-                function isExcluded(sel) { return getExcludeList().indexOf(sel) > -1; }
 
                 function buildPreview(sel, target) {
                     var el = null;
@@ -539,16 +561,18 @@ object ScrapingScriptBuilder {
                         push(sem, '意味コンテナ', shortSelector(sem) || sem.tagName.toLowerCase());
                     }
 
-                    // フォールバック: 親要素連鎖
-                    if (cands.length < 3) {
-                        var n = el.parentElement;
-                        while (n && n.tagName !== 'BODY' && cands.length < 5) {
-                            push(n, '親要素');
-                            n = n.parentElement;
-                        }
+                    // フォールバック: 親要素・祖先要素連鎖 (最大10候補まで探索)
+                    var n = el.parentElement;
+                    var depth = 1;
+                    while (n && n.tagName !== 'BODY' && n.tagName !== 'HTML' && cands.length < 10) {
+                        var tag = (n.tagName || '').toLowerCase();
+                        var label = (depth === 1) ? '親要素' : '祖先要素(' + tag + ')';
+                        push(n, label);
+                        n = n.parentElement;
+                        depth++;
                     }
-                    // 最大5候補まで提示（意味コンテナ等の脱落を防止）
-                    return cands.slice(0, 5);
+                    // 最大10候補まで提示（ユーザー要望）
+                    return cands.slice(0, 10);
                 }
 
                 function closePopup() {
@@ -564,28 +588,28 @@ object ScrapingScriptBuilder {
                     popup.id = '__novel_popup';
                     popup.className = '__novel_notranslate notranslate skiptranslate';
                     popup.setAttribute('translate', 'no');
-                    popup.style = 'position:fixed;background:#1e1e1e;color:#fff;z-index:2147483646;font-size:12px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.7);max-width:380px;width:min(94vw,380px);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;border:1px solid #444;';
+                    popup.style.cssText = 'position:fixed;background:#1e1e1e;color:#fff;z-index:2147483646;font-size:12px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.7);max-width:480px;width:min(96vw,480px);max-height:88vh;display:flex;flex-direction:column;overflow:hidden;border:1px solid #444;';
 
                     var header = document.createElement('div');
-                    header.style = 'display:flex;align-items:center;padding:6px 10px;background:#2c2c2c;flex-shrink:0;border-bottom:1px solid #3d3d3d;';
+                    header.style.cssText = 'display:flex;align-items:center;padding:6px 10px;background:#2c2c2c;flex-shrink:0;border-bottom:1px solid #3d3d3d;';
                     var title = document.createElement('span');
                     title.innerText = '要素候補のコピー / 反映';
-                    title.style = 'flex:1;color:#eee;font-weight:bold;';
+                    title.style.cssText = 'flex:1;color:#eee;font-weight:bold;';
                     var closeBtn = document.createElement('button');
                     closeBtn.innerText = '×';
-                    closeBtn.style = 'background:#e53935;color:#fff;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:14px;font-weight:bold;';
+                    closeBtn.style.cssText = 'background:#e53935;color:#fff;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:14px;font-weight:bold;';
                     closeBtn.onclick = function(ev) { ev.stopPropagation(); closePopup(); };
                     header.appendChild(title);
                     header.appendChild(closeBtn);
                     popup.appendChild(header);
 
                     var chips = document.createElement('div');
-                    chips.style = 'display:flex;flex-wrap:wrap;gap:4px;padding:6px 10px;background:#252525;flex-shrink:0;border-bottom:1px solid #333;';
+                    chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;padding:6px 10px;background:#252525;flex-shrink:0;border-bottom:1px solid #333;';
                     var chipBtns = {};
                     TARGETS.forEach(function(t) {
                         var b = document.createElement('button');
                         b.innerText = t.label;
-                        b.style = 'background:#424242;color:#bbb;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:11px;';
+                        b.style.cssText = 'background:#424242;color:#bbb;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:11px;';
                         b.onclick = function(ev) {
                             ev.stopPropagation();
                             pendingTarget = t.key;
@@ -607,7 +631,7 @@ object ScrapingScriptBuilder {
                     popup.appendChild(chips);
 
                     var rowsBox = document.createElement('div');
-                    rowsBox.style = 'overflow-y:auto;min-height:0;padding:4px 0;';
+                    rowsBox.style.cssText = 'overflow-y:auto;min-height:0;padding:4px 0;';
                     popup.appendChild(rowsBox);
 
                     function applyCandidateAction(c, isRemovable) {
@@ -627,10 +651,10 @@ object ScrapingScriptBuilder {
                             } else {
                                 config[pendingTarget] = c.selector;
                                 try { window.AndroidBridge.onApplyCandidate(pendingTarget, c.selector); } catch(e){}
-                                highlight(c.node);
                             }
                         }
                         lastTarget = pendingTarget;
+                        clearHighlight();
                         applyCurrentConfig();
                         closePopup();
                     }
@@ -640,26 +664,27 @@ object ScrapingScriptBuilder {
                         cands.forEach(function(c) {
                             var removable = (pendingTarget === 'exclude') && isExcluded(c.selector);
                             var row = document.createElement('div');
-                            row.style = 'padding:8px 10px;border-top:1px solid #333;display:flex;flex-direction:column;gap:4px;';
+                            row.style.cssText = 'padding:8px 10px;border-top:1px solid #333;display:flex;flex-direction:column;gap:4px;';
                             
                             var head = document.createElement('div');
-                            head.style = 'display:flex;gap:6px;align-items:center;';
+                            head.style.cssText = 'display:flex;gap:6px;align-items:center;';
                             
                             var lab = document.createElement('b');
                             lab.innerText = removable ? '除外中' : c.label;
-                            lab.style = 'color:' + (removable ? '#81c784' : '#4dd0e1') + ';font-size:11px;flex-shrink:0;';
+                            if (c.matchCount > 1) lab.innerText += ' (' + c.matchCount + '件)';
+                            lab.style.cssText = 'color:' + (removable ? '#81c784' : '#4dd0e1') + ';font-size:11px;flex-shrink:0;';
                             
                             var selSpan = document.createElement('span');
                             selSpan.innerText = c.selector;
-                            selSpan.style = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc;font-family:monospace;font-size:11px;';
+                            selSpan.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc;font-family:monospace;font-size:11px;';
                             
                             // 操作ボタン群（コピーボタン と 反映ボタン を独立配置）
                             var actionBox = document.createElement('div');
-                            actionBox.style = 'display:flex;gap:4px;flex-shrink:0;';
+                            actionBox.style.cssText = 'display:flex;gap:4px;flex-shrink:0;';
 
                             var copyBtn = document.createElement('button');
                             copyBtn.innerText = 'コピー';
-                            copyBtn.style = 'background:#455a64;color:#fff;border:none;border-radius:3px;padding:3px 7px;cursor:pointer;font-size:11px;transition:background 0.2s;';
+                            copyBtn.style.cssText = 'background:#455a64;color:#fff;border:none;border-radius:3px;padding:3px 7px;cursor:pointer;font-size:11px;transition:background 0.2s;';
                             copyBtn.onclick = function(ev) {
                                 ev.stopPropagation();
                                 if (window.AndroidBridge) {
@@ -677,7 +702,7 @@ object ScrapingScriptBuilder {
 
                             var applyBtn = document.createElement('button');
                             applyBtn.innerText = removable ? '除外解除' : '反映';
-                            applyBtn.style = 'background:' + (removable ? '#2e7d32' : '#FF5722') + ';color:#fff;border:none;border-radius:3px;padding:3px 8px;cursor:pointer;font-size:11px;font-weight:bold;';
+                            applyBtn.style.cssText = 'background:' + (removable ? '#2e7d32' : '#FF5722') + ';color:#fff;border:none;border-radius:3px;padding:3px 8px;cursor:pointer;font-size:11px;font-weight:bold;';
                             applyBtn.onclick = function(ev) {
                                 ev.stopPropagation();
                                 applyCandidateAction(c, removable);
@@ -692,7 +717,7 @@ object ScrapingScriptBuilder {
 
                             var prev = document.createElement('div');
                             prev.innerText = buildPreview(c.selector, pendingTarget);
-                            prev.style = 'color:#aaa;max-height:80px;overflow-y:auto;line-height:15px;padding:5px 8px;background:#111;border-radius:4px;white-space:pre-wrap;word-break:break-all;font-size:11px;border:1px solid #282828;';
+                            prev.style.cssText = 'color:#aaa;max-height:80px;overflow-y:auto;line-height:15px;padding:5px 8px;background:#111;border-radius:4px;white-space:pre-wrap;word-break:break-all;font-size:11px;border:1px solid #282828;';
 
                             row.appendChild(head);
                             row.appendChild(prev);
@@ -715,59 +740,39 @@ object ScrapingScriptBuilder {
 
                 function handleClick(e) {
                     if (!active) return;
-                    if (e.target.closest('#__novel_popup')) return;
+                    try {
+                        var t = e.target;
+                        if (t && t.closest && t.closest('#__novel_popup')) return;
+                    } catch(e){}
                     e.preventDefault();
                     e.stopPropagation();
                     var cands = getCandidates(e.target);
                     if (!cands.length) return;
+                    try { highlight(e.target); } catch(e){}
                     showCandidatePopup(cands, e.clientX || 0, e.clientY || 0);
-                }
-
-                // テキスト逆引き検索（ユーザー要望: 自動スクロールは行わず、ハイライト＋候補カード展開）
-                function searchByText(searchText) {
-                    if (!searchText || !searchText.trim()) return false;
-                    var query = searchText.trim().toLowerCase();
-                    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-                    var node;
-                    var bestEl = null;
-                    while ((node = walker.nextNode())) {
-                        var text = (node.textContent || '').trim().toLowerCase();
-                        if (text && text.includes(query)) {
-                            var parent = node.parentElement;
-                            if (parent && !parent.closest('#__novel_popup, #__novel_hint, script, style, noscript')) {
-                                bestEl = parent;
-                                break;
-                            }
-                        }
-                    }
-                    if (bestEl) {
-                        highlight(bestEl);
-                        var rect = bestEl.getBoundingClientRect();
-                        var cands = getCandidates(bestEl);
-                        if (cands.length > 0) {
-                            var cx = (rect.left + rect.width / 2);
-                            var cy = (rect.top + rect.height / 2);
-                            if (cx < 20 || cx > window.innerWidth - 20) cx = window.innerWidth / 2;
-                            if (cy < 20 || cy > window.innerHeight - 20) cy = window.innerHeight / 2;
-                            showCandidatePopup(cands, cx, cy);
-                        }
-                        return true;
-                    }
-                    return false;
                 }
 
                 document.addEventListener('click', handleClick, true);
                 applyCurrentConfig();
 
                 window.__novelInspector = {
-                    searchByText: searchByText,
+                    updateConfig: function(base64) {
+                        try {
+                            config = JSON.parse(decodeURIComponent(escape(atob(base64))));
+                            clearHighlight();
+                            applyCurrentConfig();
+                        } catch(e){}
+                    },
                     stop: function() {
                         active = false;
-                        document.removeEventListener('click', handleClick, true);
+                        try { document.removeEventListener('click', handleClick, true); } catch(e){}
                         closePopup();
                         var h = document.getElementById('__novel_hint');
                         if (h && h.parentNode) h.parentNode.removeChild(h);
-                        if (prevHighlight) prevHighlight.style.outline = '';
+                        clearHighlight();
+                        try { clearInspectorMarks(); } catch(e){}
+                        var st = document.getElementById('__novel_inspector_style');
+                        if (st && st.parentNode) st.parentNode.removeChild(st);
                         window.__novelInspectActive = false;
                     }
                 };
@@ -776,16 +781,122 @@ object ScrapingScriptBuilder {
     }
 
     /**
-     * テキスト逆引き検索スクリプト。
+     * テキストおよびセレクタによる要素逆引き検索スクリプト。
+     * - <head> の <title> や <meta> タグを含む HTML 全体を探索
+     * - セレクタ直接指定（title, h1, #content 等）のマッチ判定
+     * - document.documentElement 全体のテキストノード探索
+     * - 候補セレクタ、タグ、プレビューテキスト、マッチ種別を JSON 配列で返却
      */
-    fun buildSearchTextInInspectorScript(query: String): String {
-        val safeQuery = query.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
+    fun buildSearchTextScript(query: String): String {
+        val safeQuery = query.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ").replace("\r", " ").replace("\u2028", " ").replace("\u2029", " ")
         return """
             (function(){
-                if (window.__novelInspector && window.__novelInspector.searchByText) {
-                    return window.__novelInspector.searchByText('$safeQuery');
+                try {
+                    var query = '$safeQuery'.trim();
+                    if (!query) return '[]';
+                    var qLower = query.toLowerCase();
+                    
+                    ${JS_UNIQUE_SELECTOR}
+                    ${JS_SHORT_SELECTOR}
+
+                    // 短いセレクタが一意でない場合は一意セレクタにフォールバック（誤適用防止）
+                    function pickSelector(el) {
+                        try {
+                            var s = shortSelector(el);
+                            if (s && document.querySelectorAll(s).length === 1) return s;
+                        } catch(e){}
+                        return getUniqueSelector(el);
+                    }
+
+                    var results = [];
+                    var seen = {};
+
+                    function addCandidate(el, customSelector, matchType, customPreview) {
+                        if (!el && !customSelector) return;
+                        var sel = customSelector;
+                        if (!sel && el) {
+                            sel = pickSelector(el);
+                        }
+                        if (!sel || seen[sel]) return;
+                        seen[sel] = true;
+
+                        var tag = el ? (el.tagName || '').toUpperCase() : '';
+                        var preview = customPreview;
+                        if (preview === undefined && el) {
+                            var t = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+                            preview = (t.length > 150) ? t.substring(0, 150) + '…' : (t || '(テキストなし)');
+                        }
+                        results.push({
+                            selector: sel,
+                            tag: tag,
+                            preview: preview || '',
+                            matchType: matchType
+                        });
+                    }
+
+                    // 1. document.title & <title> タグの検査
+                    var docTitle = (document.title || '').trim();
+                    var titleEl = document.querySelector('title');
+                    if (titleEl || docTitle) {
+                        if (docTitle.toLowerCase().indexOf(qLower) >= 0 || qLower === 'title' || qLower === '<title>') {
+                            addCandidate(titleEl, 'title', 'ページタイトル (<title>)', docTitle);
+                        }
+                    }
+
+                    // 2. <meta> タグの検査 (og:title, og:novel:book_name, keywords, description など)
+                    var metaEls = document.querySelectorAll('meta[content]');
+                    for (var i = 0; i < metaEls.length; i++) {
+                        var m = metaEls[i];
+                        var c = (m.getAttribute('content') || '').trim();
+                        if (c && c.toLowerCase().indexOf(qLower) >= 0) {
+                            var name = m.getAttribute('name') || m.getAttribute('property') || m.getAttribute('itemprop') || '';
+                            var mSel = name ? 'meta[' + (m.hasAttribute('property') ? 'property' : (m.hasAttribute('itemprop') ? 'itemprop' : 'name')) + '="' + name + '"]' : '';
+                            if (mSel) {
+                                addCandidate(m, mSel, 'メタ情報 (' + (name || 'meta') + ')', c);
+                            }
+                        }
+                    }
+
+                    // 3. セレクタ直接指定クエリとしての判定（, () + を含む複合セレクタ対応）
+                    try {
+                        if (/^[a-zA-Z0-9_\-\.\#\>\s\[\]\:\=\*\^\~\$\|\"\'\,\(\)\+]+$/.test(query)) {
+                            var directEls = document.querySelectorAll(query);
+                            if (directEls.length > 0) {
+                                var firstEl = directEls[0];
+                                var firstText = (firstEl.innerText || firstEl.textContent || '').trim().replace(/\s+/g, ' ');
+                                var pText = (firstText.length > 150) ? firstText.substring(0, 150) + '…' : (firstText || '(空要素)');
+                                addCandidate(firstEl, query, 'セレクタ直接指定 (' + directEls.length + '件該当)', pText);
+                            }
+                        }
+                    } catch(e){}
+
+                    // 4. 全DOMツリー（document.documentElement）のテキストノード探索
+                    var walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_TEXT, null, false);
+                    var node;
+                    while ((node = walker.nextNode())) {
+                        var text = (node.textContent || '').trim();
+                        if (text && text.toLowerCase().indexOf(qLower) >= 0) {
+                            var p = node.parentElement;
+                            if (p) {
+                                var pTag = (p.tagName || '').toUpperCase();
+                                if (pTag === 'SCRIPT' || pTag === 'STYLE' || pTag === 'NOSCRIPT' || (p.closest && p.closest('#__novel_popup, #__novel_hint, #eruda'))) {
+                                    continue;
+                                }
+                                if (pTag === 'TITLE') {
+                                    addCandidate(p, 'title', 'ページタイトル (<title>)', text);
+                                } else {
+                                    var pSel = pickSelector(p);
+                                    addCandidate(p, pSel, pTag + ' 要素');
+                                }
+                            }
+                        }
+                        if (results.length >= 20) break;
+                    }
+
+                    return JSON.stringify(results.slice(0, 15));
+                } catch(err) {
+                    return JSON.stringify([{ selector: '', tag: 'ERROR', preview: err.toString(), matchType: 'エラー' }]);
                 }
-                return false;
             })();
         """.trimIndent()
     }
@@ -839,14 +950,17 @@ object ScrapingScriptBuilder {
                     if (sem && sem !== p && sem !== q && sem.tagName !== 'BODY') {
                         push(sem, '意味コンテナ', sem.tagName.toLowerCase());
                     }
-                    if (cands.length < 3) {
-                        var n = baseEl.parentElement;
-                        while (n && n.tagName !== 'BODY' && cands.length < 5) {
-                            push(n, '親要素');
-                            n = n.parentElement;
-                        }
+                    // フォールバック: 親要素・祖先要素連鎖 (最大10候補まで探索)
+                    var n = baseEl.parentElement;
+                    var depth = 1;
+                    while (n && n.tagName !== 'BODY' && n.tagName !== 'HTML' && cands.length < 10) {
+                        var tag = (n.tagName || '').toLowerCase();
+                        var label = (depth === 1) ? '親要素' : '祖先要素(' + tag + ')';
+                        push(n, label);
+                        n = n.parentElement;
+                        depth++;
                     }
-                    return JSON.stringify(cands.slice(0, 5));
+                    return JSON.stringify(cands.slice(0, 10));
                 } catch(e) { return '[]'; }
             })();
         """.trimIndent()

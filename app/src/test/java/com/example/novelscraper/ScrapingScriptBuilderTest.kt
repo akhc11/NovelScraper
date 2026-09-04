@@ -104,27 +104,16 @@ class ScrapingScriptBuilderTest {
     }
 
     @Test
-    fun testBuildInspectorScript_containsTextQuerySearchWithoutScroll() {
+    fun testBuildInspectorScript_containsTenCandidatesAndPopup() {
         val config = ScraperConfig()
         val inspectorScript = ScrapingScriptBuilder.buildInspectorScript(config)
 
-        // テキスト逆引き検索関数が含まれていること
-        assertTrue("searchByText 関数が含まれていること", inspectorScript.contains("function searchByText("))
-        assertTrue("ハイライト処理が含まれていること", inspectorScript.contains("highlight(bestEl)"))
+        // 候補ポップアップ表示が含まれていること
         assertTrue("候補ポップアップ表示が含まれていること", inspectorScript.contains("showCandidatePopup(cands"))
-
-        // ユーザー要望の確認: 自動スクロール（scrollIntoView）は含まれていないこと
-        assertFalse("自動スクロールは含まれていないこと", inspectorScript.contains("scrollIntoView"))
-    }
-
-    @Test
-    fun testBuildSearchTextInInspectorScript_escapesProperly() {
-        val dangerousQuery = "第1話 'プロローグ' \\ \"引用\"\n改行"
-        val script = ScrapingScriptBuilder.buildSearchTextInInspectorScript(dangerousQuery)
-
-        assertFalse("改行が除去されていること", script.contains("\n改行"))
-        assertTrue("シングルクォートがエスケープされていること", script.contains("\\'プロローグ\\'"))
-        assertTrue("searchByText を呼び出していること", script.contains("__novelInspector.searchByText"))
+        // 最大10候補までの提示が含まれていること
+        assertTrue("最大10候補提示が含まれていること", inspectorScript.contains("cands.slice(0, 10)"))
+        // 一致件数（matchCount）が行ラベルに表示されること（非一意セレクタの警告）
+        assertTrue("一致件数表示が含まれていること", inspectorScript.contains("c.matchCount > 1"))
     }
 
     @Test
@@ -163,5 +152,95 @@ class ScrapingScriptBuilderTest {
         assertTrue("del: 判定正規表現が含まれていること", script.contains("/^(?:del|delete|remove):/i"))
         assertTrue("作品名del置換ロジックが含まれていること", script.contains("f.replace(new RegExp(pat, 'g'), '')"))
         assertTrue("タイトルdel置換ロジックが含まれていること", script.contains("result.title.replace(new RegExp(pat, 'g'), '')"))
+    }
+
+    @Test
+    fun testBuildSearchTextScript_containsHeadTitleMetaAndDirectSelector() {
+        val script = ScrapingScriptBuilder.buildSearchTextScript("仙子的修行")
+
+        // IIFE形式であること
+        assertTrue(script.trim().startsWith("(function(){"))
+        assertTrue(script.trim().endsWith("})();"))
+
+        // <title> & document.title の検査が含まれていること
+        assertTrue("document.title の検査が含まれていること", script.contains("document.title"))
+        assertTrue("title タグの候補追加が含まれていること", script.contains("document.querySelector('title')"))
+
+        // <meta> タグの検査が含まれていること
+        assertTrue("metaタグの属性content探索が含まれていること", script.contains("document.querySelectorAll('meta[content]')"))
+
+        // 全DOM（document.documentElement）のテキスト探索が含まれていること
+        assertTrue("全DOMツリー（document.documentElement）の走査が含まれていること", script.contains("document.createTreeWalker(document.documentElement"))
+
+        // セレクタ直接指定の判定ロジックが含まれていること
+        assertTrue("セレクタ直接指定の判定が含まれていること", script.contains("document.querySelectorAll(query)"))
+    }
+
+    @Test
+    fun testBuildInspectorScript_supportsConfigUpdateWithoutReinjection() {
+        val config = ScraperConfig()
+        val inspectorScript = ScrapingScriptBuilder.buildInspectorScript(config)
+
+        // 起動済み場合は updateConfig で差分同期して return（リスナー再登録なし）
+        assertTrue("updateConfig呼び出しが含まれていること", inspectorScript.contains("__novelInspector.updateConfig"))
+        assertTrue("updateConfig定義が含まれていること", inspectorScript.contains("updateConfig: function(base64)"))
+        // 再注入ガード内で return していること
+        assertTrue("起動済みガードが含まれていること", inspectorScript.contains("if (window.__novelInspectActive)"))
+    }
+
+    @Test
+    fun testBuildInspectorScript_cleansUpFullyOnStop() {
+        val config = ScraperConfig()
+        val inspectorScript = ScrapingScriptBuilder.buildInspectorScript(config)
+
+        // stop() でマーク・dim・styleタグを完全除去すること
+        assertTrue("clearInspectorMarks定義が含まれていること", inspectorScript.contains("function clearInspectorMarks()"))
+        assertTrue("stop内でclearInspectorMarksを呼ぶこと", inspectorScript.contains("clearInspectorMarks();"))
+        assertTrue("styleタグにIDが付与されていること", inspectorScript.contains("__novel_inspector_style"))
+        assertTrue("stop内でstyleタグを除去すること", inspectorScript.contains("getElementById('__novel_inspector_style')"))
+        // removeEventListener が capture=true で呼ばれていること
+        assertTrue(inspectorScript.contains("removeEventListener('click', handleClick, true)"))
+    }
+
+    @Test
+    fun testBuildInspectorScript_usesCssTextForStyleInit() {
+        val config = ScraperConfig()
+        val inspectorScript = ScrapingScriptBuilder.buildInspectorScript(config)
+
+        // 非標準の `el.style = '...'` 代入が残っていないこと
+        assertFalse(
+            "styleへの直接文字列代入が残っていないこと",
+            Regex("""\w+\.style = '""").containsMatchIn(inspectorScript)
+        )
+        assertTrue("cssText初期化が含まれていること", inspectorScript.contains("hint.style.cssText"))
+        assertTrue("popupのcssText初期化が含まれていること", inspectorScript.contains("popup.style.cssText"))
+    }
+
+    @Test
+    fun testBuildSearchTextScript_prefersUniqueSelectorAndExpandedSyntax() {
+        val script = ScrapingScriptBuilder.buildSearchTextScript("test")
+
+        // 非ユニークshortSelectorの誤適用防止ヘルパー
+        assertTrue("pickSelector定義が含まれていること", script.contains("function pickSelector(el)"))
+        assertTrue("一意性検証が含まれていること", script.contains("querySelectorAll(s).length === 1"))
+        // 複合セレクタ (, () +) を直接指定として認識できること
+        assertTrue("カンマが許可文字に含まれていること", script.contains("\\,"))
+        assertTrue("丸括弧が許可文字に含まれていること", script.contains("\\("))
+    }
+
+    @Test
+    fun testBuildSearchTextScript_escapesSpecialCharactersSafely() {
+        val dangerousQuery = "仙子'の\"修\\行\n改行"
+        val script = ScrapingScriptBuilder.buildSearchTextScript(dangerousQuery)
+
+        assertFalse("改行が除去されていること", script.contains("\n改行"))
+        assertTrue("シングルクォートがエスケープされていること", script.contains("仙子\\'の"))
+        assertTrue("バックスラッシュがエスケープされていること", script.contains("修\\\\行"))
+    }
+
+    @Test
+    fun testBuildSearchTextScript_escapesCarriageReturnSafely() {
+        val script = ScrapingScriptBuilder.buildSearchTextScript("a\rb")
+        assertFalse("CRが除去されていること", script.contains("\rb"))
     }
 }

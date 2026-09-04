@@ -29,7 +29,7 @@ data class ModelProfile(
     val id: String = UUID.randomUUID().toString(),
     val provider: LlmProvider = LlmProvider.GEMINI,
     val modelName: String,
-    val maxOutputChars: Int = 20000,     // 目標日本語出力文字数 (デフォルト20,000文字)
+    val maxOutputChars: Int = 15000,     // 目標日本語出力文字数 (デフォルト15,000文字)
     val thinkingLevel: String = "medium", // minimal, low, medium, high
     val thinkingBudget: Int? = null,     // 0=思考OFF, -1=動的, 正数=トークン数
     val temperature: Double? = null,     // null時はAPIに送信しない
@@ -176,7 +176,7 @@ data class LlmTranslationConfig(
 
     val parallelWorkers: Int = 2, // 本文翻訳並列ワーカー数 (1〜6)
     val filesPerFolder: Int = 0,   // 0=無制限, >0=フォルダあたり上限
-    val requestDelaySec: Int = 2,
+    val requestDelaySec: Int = 10,
 
     // 言語連動プロンプト自動選択 (成人向け等の手動選択を保護するためデフォルトOFF)
     val enableAutoPromptOrder: Boolean = false,

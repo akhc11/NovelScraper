@@ -6,6 +6,7 @@ import android.widget.Toast
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.llm.api.LlmApiResult
 import com.example.novelscraper.translation.llm.api.LlmRequestRunner
+import com.example.novelscraper.translation.llm.api.LlmRetryPolicy
 import com.example.novelscraper.translation.common.NovelPhysicalSplitter
 import com.example.novelscraper.translation.llm.pipeline.*
 import com.example.novelscraper.translation.llm.prompt.PromptBuilder
@@ -93,6 +94,8 @@ class LlmTranslationEngine(
                         }.sortedBy { it.name }
 
                         if (rawFiles.isNotEmpty()) {
+                            // 親フォルダ直下で言語判定を先行実施（全分割サブフォルダで1つの判定結果を共有しキャッシュを1つに集約）
+                            val parentSourceLang = detectOrLoadLanguage(docFolder, rawFiles)
                             val splitRootDir = docFolder.findFile("分割済み") ?: docFolder.createDirectory("分割済み")
                             if (splitRootDir != null) {
                                 for ((rawIndex, rawFile) in rawFiles.withIndex()) {
@@ -108,7 +111,7 @@ class LlmTranslationEngine(
                                     )
                                     if (splitSubFolder != null && !isStopRequested && isActive) {
                                         addLog("📂 [小説 ${rawIndex + 1}/${rawFiles.size}] 分割済みサブフォルダ翻訳開始: ${splitSubFolder.name}")
-                                        processFolder(splitSubFolder, keyPoolManager)
+                                        processFolder(splitSubFolder, keyPoolManager, parentSourceLang)
                                     }
                                 }
                                 continue // 生テキストの処理が完了したため、親フォルダ直下の直接翻訳はスキップ
@@ -147,9 +150,81 @@ class LlmTranslationEngine(
         ) }
     }
 
+    /**
+     * フォルダの言語を判定または既存キャッシュ (.lang_cache / .lang_cache.txt) から取得する。
+     * キャッシュ欠落・空ファイル時は検出後に補完作成する。
+     */
+    private fun ensureLangCache(outputDir: DocumentFile?, lang: SourceLanguage): Boolean {
+        if (outputDir == null) {
+            addLog("❌ 言語キャッシュ保存先なし (出力フォルダ作成失敗のため未作成)")
+            return false
+        }
+        val existing = outputDir.findFile(".lang_cache")
+            ?: outputDir.findFile(".lang_cache.txt")
+        if (existing != null) {
+            val current = readFileContent(existing)?.trim() ?: ""
+            if (current == "ZH" || current == "KO" || current == "EN" || current == "JA") {
+                return true
+            }
+            // 空・破損 (0バイト含む) は上書きで補完する
+            if (saveFileContent(existing, lang.name)) {
+                addLog("🔤 言語キャッシュ補完: ${lang.displayName}")
+                return true
+            }
+            addLog("⚠️ 言語キャッシュの上書き保存に失敗 (次回再補完します)")
+            return false
+        }
+        val created = outputDir.createFile("text/plain", ".lang_cache")
+        if (created == null) {
+            addLog("❌ 言語キャッシュの作成に失敗 (SAF createFileがnullを返却)")
+            return false
+        }
+        if (!saveFileContent(created, lang.name)) {
+            addLog("⚠️ 言語キャッシュの保存に失敗 (次回再検出します)")
+            return false
+        }
+        addLog("🔤 言語キャッシュ作成: ${lang.displayName}")
+        return true
+    }
+
+    private fun detectOrLoadLanguage(
+        folderDoc: DocumentFile,
+        sampleFiles: List<DocumentFile>
+    ): SourceLanguage {
+        val outSubDirName = config.outputSubDir.ifBlank { "翻訳完了_LLM" }
+        val outputDir = folderDoc.findFile(outSubDirName) ?: folderDoc.createDirectory(outSubDirName)
+
+        val existingCache = outputDir?.findFile(".lang_cache") ?: outputDir?.findFile(".lang_cache.txt")
+        if (existingCache != null) {
+            val cachedCode = readFileContent(existingCache)?.trim() ?: ""
+            val lang = when (cachedCode) {
+                "ZH" -> SourceLanguage.ZH
+                "KO" -> SourceLanguage.KO
+                "EN" -> SourceLanguage.EN
+                "JA" -> SourceLanguage.JA
+                else -> null
+            }
+            if (lang != null) {
+                addLog("🔤 言語 (キャッシュ読込): ${lang.displayName}")
+                return lang
+            }
+            addLog("⚠️ 言語キャッシュが空/不正のため再検出します")
+        }
+
+        val firstFile = sampleFiles.firstOrNull()
+        val firstContent = if (firstFile != null) readFileContent(firstFile) ?: "" else ""
+        val langResult = LanguageDetector.detect(firstContent)
+        val detected = langResult.language
+        addLog("🔤 言語検出: ${detected.displayName} [${langResult.reason}]")
+
+        ensureLangCache(outputDir, detected)
+        return detected
+    }
+
     private suspend fun processFolder(
         folderDoc: DocumentFile,
-        keyPoolManager: ApiKeyPoolManager
+        keyPoolManager: ApiKeyPoolManager,
+        inheritedSourceLang: SourceLanguage? = null
     ) {
         val outSubDirName = config.outputSubDir.ifBlank { "翻訳完了_LLM" }
         val folderName = folderDoc.name ?: "Unknown"
@@ -202,38 +277,19 @@ class LlmTranslationEngine(
             addLog("⚠️ サイズ0の出力 $zeroByteCount 件は未翻訳扱いで再処理します")
         }
 
-        // 言語判定 (キャッシュ .lang_cache を確認、無ければ先頭ファイルで判定して保存)
-        val langCacheDoc = if (existingOutputNames.contains(".lang_cache")) outputDir.findFile(".lang_cache") else null
-        val sourceLang: SourceLanguage = if (langCacheDoc != null) {
-            val cachedCode = readFileContent(langCacheDoc)?.trim() ?: ""
-            when (cachedCode) {
-                "ZH" -> SourceLanguage.ZH
-                "KO" -> SourceLanguage.KO
-                "EN" -> SourceLanguage.EN
-                "JA" -> SourceLanguage.JA
-                else -> SourceLanguage.ZH
-            }.also {
-                addLog("🔤 言語 (キャッシュ読込): ${it.displayName}")
-            }
+        // 言語判定 (継承時は再検出せず再利用するが、キャッシュ欠落時は補完作成する)
+        val sourceLang: SourceLanguage
+        if (inheritedSourceLang != null) {
+            sourceLang = inheritedSourceLang
+            ensureLangCache(outputDir, inheritedSourceLang)
         } else {
-            val firstContent = readFileContent(files.first()) ?: ""
-            val langResult = LanguageDetector.detect(firstContent)
-            val detected = langResult.language
-            addLog("🔤 言語検出: ${detected.displayName} [${langResult.reason}]")
-            val newCacheDoc = outputDir.findFile(".lang_cache") ?: outputDir.createFile("text/plain", ".lang_cache")
-            if (newCacheDoc != null) {
-                if (saveFileContent(newCacheDoc, detected.name)) {
-                    existingOutputNames.add(".lang_cache")
-                } else {
-                    addLog("⚠️ 言語キャッシュの保存に失敗 (次回再検出します)")
-                }
-            }
-            detected
+            sourceLang = detectOrLoadLanguage(folderDoc, files)
         }
 
         val primaryProfile = config.modelProfiles.firstOrNull() ?: ModelProfile(modelName = "gemini-3.5-flash")
         val splitThreshold = config.getEffectiveSplitThreshold(sourceLang, primaryProfile)
-        val sizeLog = " (目標出力: ${primaryProfile.maxOutputChars / 1000}万字 ➔ 入力閾値: ${splitThreshold / 1000}KB)"
+        val outputManChars = String.format(java.util.Locale.US, "%.1f", primaryProfile.maxOutputChars / 10000.0).removeSuffix(".0")
+        val sizeLog = " (目標出力: ${outputManChars}万字 ➔ 入力閾値: ${splitThreshold / 1000}KB)"
         val modelPromptSummaries = config.modelProfiles.mapIndexed { idx, prof ->
             val pOrder = config.getEffectivePromptOrder(sourceLang, prof)
             val tag = if (prof.useCustomPromptOrder) "個別" else "共通"
@@ -362,6 +418,14 @@ class LlmTranslationEngine(
                     )
 
                     val job = async(Dispatchers.IO) {
+                        if (wId > 1) {
+                            val delaySec = (wId - 1) * 10
+                            addLog("⏳ [W#$wId] 503過負荷回避のため ${delaySec}秒待機後に開始します...")
+                            for (s in 0 until delaySec) {
+                                if (isStopRequested || !currentCoroutineContext().isActive) return@async
+                                delay(1000L)
+                            }
+                        }
                         try {
                             runWorker(
                                 workerId = wId,
@@ -629,10 +693,6 @@ class LlmTranslationEngine(
                                     progress = done to totalCount,
                                     currentFileName = item.first.name ?: ""
                                 ) }
-
-                                if (config.requestDelaySec > 0) {
-                                    delay(config.requestDelaySec * 1000L)
-                                }
                             }
                         }
                     } else {
@@ -664,10 +724,6 @@ class LlmTranslationEngine(
                     for (item in batchItems) {
                         fileClaimManager.releaseFile(folderKey, item.first.name ?: "")
                     }
-                }
-
-                if (config.requestDelaySec > 0) {
-                    delay(config.requestDelaySec * 1000L)
                 }
             }
         }
@@ -774,16 +830,29 @@ class LlmTranslationEngine(
                                 if (!advanced) return false
                                 retry++
                             } else {
+                                addLog("[W#$workerId] ⏳ バッチ制限待機 (429): ${apiResult.message.take(100)}...")
                                 delay(5000L)
                                 retry++
                             }
                         }
                         is LlmApiResult.NetworkError -> {
-                            delay(5000L)
+                            if (retry + 1 >= maxRetryCount) {
+                                addLog("[W#$workerId] ⚠️ バッチ通信エラー (${apiResult.statusCode}): ${apiResult.message.take(120)} ➔ 再試行上限到達")
+                            } else {
+                                val waitMs = LlmRetryPolicy.backoffDelayMs(retry)
+                                addLog("[W#$workerId] ⚠️ バッチ通信エラー (${apiResult.statusCode}): ${apiResult.message.take(120)} ➔ ${(waitMs / 1000)}秒後再試行 [${retry + 1}/$maxRetryCount]")
+                                delay(waitMs)
+                            }
                             retry++
                         }
-                        is LlmApiResult.QualityError -> break
-                        is LlmApiResult.FatalError -> break
+                        is LlmApiResult.QualityError -> {
+                            addLog("[W#$workerId] ⚠️ バッチ品質エラー: ${apiResult.reason} ➔ 次のプロンプト/モデルへ")
+                            break
+                        }
+                        is LlmApiResult.FatalError -> {
+                            addLog("[W#$workerId] ❌ バッチ致命的エラー (${apiResult.statusCode}): ${apiResult.message.take(200)} ➔ 次のプロンプト/モデルへ")
+                            break
+                        }
                     }
                 }
 
@@ -906,13 +975,21 @@ class LlmTranslationEngine(
                             }
                         }
                         is LlmApiResult.NetworkError -> {
-                            delay(5000L)
+                            if (retry + 1 >= maxRetryCount) {
+                                addLog("[W#$workerId] ⚠️ $fileName 通信エラー (${apiResult.statusCode}): ${apiResult.message.take(120)} ➔ 再試行上限到達")
+                            } else {
+                                val waitMs = LlmRetryPolicy.backoffDelayMs(retry)
+                                addLog("[W#$workerId] ⚠️ $fileName 通信エラー (${apiResult.statusCode}): ${apiResult.message.take(120)} ➔ ${(waitMs / 1000)}秒後再試行 [${retry + 1}/$maxRetryCount]")
+                                delay(waitMs)
+                            }
                             retry++
                         }
                         is LlmApiResult.QualityError -> {
+                            addLog("[W#$workerId] ⚠️ $fileName 品質エラー: ${apiResult.reason} ➔ 次のプロンプト/モデルへ")
                             break
                         }
                         is LlmApiResult.FatalError -> {
+                            addLog("[W#$workerId] ❌ $fileName 致命的エラー (${apiResult.statusCode}): ${apiResult.message.take(200)} ➔ 次のプロンプト/モデルへ")
                             break
                         }
                     }

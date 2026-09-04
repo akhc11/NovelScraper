@@ -35,16 +35,11 @@ import kotlinx.serialization.json.Json
  * Activity への暗黙参照によるメモリリークを防止するため、独立クラスとして定義。
  */
 class NovelScraperBridge(
-    private val onInspect: (String) -> Unit,
     private val onApply: (String, String) -> Unit,
     private val onCopy: (String) -> Unit,
     private val onRemove: (String) -> Unit,
     private val onStatusUpdate: (String) -> Unit
 ) {
-    @JavascriptInterface
-    fun onInspectResult(selector: String) {
-        onInspect(selector)
-    }
 
     @JavascriptInterface
     fun onApplyCandidate(target: String, selector: String) {
@@ -90,8 +85,6 @@ class MainActivity : ComponentActivity() {
                 MainScreen(
                     viewModel = viewModel,
                     callbacks = MainScreenCallbacks(
-                        onStartScraping = { url -> viewModel.startScraping(url) },
-                        onResumeScraping = { url, folder -> viewModel.startScraping(url, folder) },
                         onLaunchAnalysisTool = { view -> launchAnalysisTool(view) },
                         onSetupWebView = { view -> setupWebView(view) },
                         onInjectInspector = { view -> injectInspector(view) },
@@ -208,13 +201,6 @@ class MainActivity : ComponentActivity() {
     private fun setupWebView(view: WebView) {
         mainWebView = view
         val bridge = NovelScraperBridge(
-            onInspect = { selector ->
-                mainHandler.post {
-                    if (!isFinishing && !isDestroyed) {
-                        viewModel.showInspectElementDialog(selector)
-                    }
-                }
-            },
             onApply = { target, selector ->
                 mainHandler.post {
                     if (!isFinishing && !isDestroyed) {

@@ -5,6 +5,8 @@ import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.llm.api.GeminiApiClient
 import com.example.novelscraper.translation.llm.api.LlmApiClient
 import com.example.novelscraper.translation.llm.api.LlmApiResult
+import com.example.novelscraper.translation.llm.api.LlmRequestRunner
+import com.example.novelscraper.translation.llm.api.LlmRetryPolicy
 import com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient
 import com.example.novelscraper.translation.llm.engine.DictSampleMode
 import com.example.novelscraper.translation.llm.engine.LlmProvider
@@ -476,7 +478,8 @@ object NovelDictionaryGenerator {
                             }
                             else -> {
                                 if (retry < maxRetries) {
-                                    delay(1000L * (retry + 1))
+                                    // 503等の同時多発時は指数バックオフ＋ジッターで再送時刻を散らす
+                                    delay(LlmRetryPolicy.backoffDelayMs(retry))
                                 }
                             }
                         }
@@ -675,6 +678,8 @@ object NovelDictionaryGenerator {
         providerOrder: List<String> = emptyList(),
         providerAllowFallbacks: Boolean? = null
     ): LlmApiResult {
+        // 本文翻訳と共通の送信ゲートを共有し、辞書バースト由来の503を抑える (推論自体の並行は維持)
+        LlmRequestRunner.acquireGate(LlmRequestRunner.GATE_MIN_MS)
         return when (provider) {
             LlmProvider.GEMINI -> {
                 GeminiApiClient.generateContent(

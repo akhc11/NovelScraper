@@ -19,7 +19,8 @@ object GeminiApiClient {
         endpointBase: String = DEFAULT_ENDPOINT,
         temperature: Double? = null,
         thinkingLevel: String? = null,
-        thinkingBudget: Int? = null
+        thinkingBudget: Int? = null,
+        maxOutputTokens: Int? = 65536
     ): LlmApiResult = withContext(Dispatchers.IO) {
         try {
             // thinkingBudget と thinkingLevel の排他制御 (Google API仕様: 同時指定は400エラー)
@@ -30,9 +31,10 @@ object GeminiApiClient {
             }
 
             // Gemini 3.x Flash など temperature 非対応モデルでは temperature を送らない
-            val genConfig = if (temperature != null || thinkingConfig != null) {
+            val genConfig = if (temperature != null || thinkingConfig != null || maxOutputTokens != null) {
                 GeminiGenerationConfig(
                     temperature = temperature,
+                    maxOutputTokens = maxOutputTokens,
                     thinkingConfig = thinkingConfig
                 )
             } else null
@@ -68,9 +70,24 @@ object GeminiApiClient {
             when (code) {
                 200 -> {
                     val geminiResp = LlmApiClient.json.decodeFromString(GeminiResponse.serializer(), bodyString)
-                    val text = geminiResp.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
-                    if (text.isNullOrBlank()) {
-                        return@withContext LlmApiResult.QualityError("Gemini空応答またはテキスト欠損")
+                    val candidate = geminiResp.candidates?.firstOrNull()
+                    val nonThoughtParts = candidate?.content?.parts?.filter { it.thought != true } ?: emptyList()
+                    val text = nonThoughtParts.mapNotNull { it.text }.joinToString("").ifBlank {
+                        // 思考パート単体の場合等のフォールバック
+                        candidate?.content?.parts?.mapNotNull { it.text }?.joinToString("") ?: ""
+                    }
+
+                    if (text.isBlank()) {
+                        val blockReason = geminiResp.promptFeedback?.blockReason
+                        val finishReason = candidate?.finishReason
+                        val detail = when {
+                            blockReason != null -> "プロンプト拒否 ($blockReason)"
+                            finishReason == "SAFETY" -> "セーフティ検知 (SAFETY)"
+                            finishReason == "MAX_TOKENS" -> "最大トークン上限到達"
+                            finishReason != null -> "生成停止 ($finishReason)"
+                            else -> "空応答またはテキスト欠損"
+                        }
+                        return@withContext LlmApiResult.QualityError("Gemini $detail")
                     }
                     val usage = geminiResp.usageMetadata
                     LlmApiResult.Success(

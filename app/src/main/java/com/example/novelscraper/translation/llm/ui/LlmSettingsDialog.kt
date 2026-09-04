@@ -945,7 +945,7 @@ fun LlmSettingsDialog(
                                 dict429CooldownSec = dict429CooldownSecText.toIntOrNull()?.coerceIn(5, 300) ?: 60,
                                 parallelWorkers = parallelWorkersText.toIntOrNull()?.coerceIn(1, 6) ?: 2,
                                 enablePrevSrcContext = enablePrevSrcContext,
-                                requestDelaySec = requestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 2,
+                                requestDelaySec = requestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 10,
                                 enableAutoPromptOrder = enableAutoPromptOrder,
                                 autoPromptOrderKorean = autoPromptOrderKoreanText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(3, 7) },
                                 autoPromptOrderChinese = autoPromptOrderChineseText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(1, 1) },
@@ -1410,11 +1410,11 @@ private fun ModelProfileCard(
                             Box(modifier = Modifier.weight(1f)) {
                                 BasicInputArea(
                                     value = profile.maxOutputChars.toString(),
-                                    onValueChange = { onUpdate(profile.copy(maxOutputChars = it.toIntOrNull()?.coerceIn(2000, 100000) ?: 20000)) }
+                                    onValueChange = { onUpdate(profile.copy(maxOutputChars = it.toIntOrNull()?.coerceIn(2000, 100000) ?: 15000)) }
                                 )
                             }
                             Text(
-                                "約 ${(profile.maxOutputChars / 1000.0).let { String.format("%.1f", it) }} 万文字",
+                                "約 ${(profile.maxOutputChars / 10000.0).let { String.format("%.1f", it) }} 万文字",
                                 color = AppColors.accentTealLight,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold

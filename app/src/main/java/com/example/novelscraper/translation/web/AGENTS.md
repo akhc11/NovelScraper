@@ -1,52 +1,40 @@
-# Web翻訳機能 専用開発ルール (translation/web 直下)
+# web翻訳 — 専用ルール
 
-## 対象スコープ
-本ルールは `translation/web/` 配下の全ファイルおよび関連コンポーネントを対象とする：
-- タスク・制御: `BaseWebTranslationTask.kt`, `TranslationQueueManager.kt`, `LiveTranslateScriptBuilder.kt`
-- ストラテジ・解析: `WebTranslationStrategy.kt`, `TextChunker.kt`, `TranslationFileStore.kt`
-- 関連UI: `TranslationPanel.kt`
+対象：`translation/web/`配下（`BaseWebTranslationTask`・`TranslationQueueManager`・`LiveTranslateScriptBuilder`・`WebTranslationStrategy`・`TextChunker`・`TranslationFileStore`）＋`TranslationPanel`。
+設計図は境界変更時のみ：`docs/archify/web-translation.workflow.json`。
 
----
+## Trap 1. Google入力はCtrl+V再現シーケンスを崩さない（Ask first）
 
-## 0. アーキテクチャ設計図 (作業前必読)
-- Web翻訳機能の全体パイプライン、Ctrl+V模倣IPC、およびDOM監視・保存データフローは [`docs/archify/web-translation.workflow.json`](../../../../../../../../../docs/archify/web-translation.workflow.json)（HTML可視化: [`docs/archify/web-translation.workflow.html`](../../../../../../../../../docs/archify/web-translation.workflow.html)）に定義されている。
-- Web翻訳改修時は、必ず作業前に上記設計図を確認し、コンポーネント間の責務境界やデータフローを把握すること。
+`textarea.value = text`の単純代入はBot判定→簡易エンジン落ちで品質劣化する。Google経路の貼り付けは下記順序を保つ。変える場合は理由＋品質比較を先に示す：
 
----
+```js
+textarea.focus(); textarea.select();
+textarea.dispatchEvent(new ClipboardEvent('paste', { clipboardData }));
+textarea.dispatchEvent(new InputEvent('input', { inputType: 'insertFromPaste' }));
+textarea.dispatchEvent(new Event('change'));
+```
 
-## 1. Google翻訳における手動操作再現ロジックの死守（翻訳品質維持）
+## Trap 2. バックグラウンドは独立WebViewを使う
 
-### 「プログラム入力」判定の回避
-- Google翻訳は `textarea.value = text` のような単純な代入を行うとBot判定され、簡易エンジンへフォールバックし翻訳品質が大幅に低下する。
-- そのため、**手動 Ctrl+V 貼り付けと同一のブラウザイベントシーケンスを絶対に維持・改変禁止**とする：
-  1. `textarea.focus()` → `textarea.select()` で全選択
-  2. `ClipboardEvent('paste', { clipboardData })` を発火（Ctrl+Vと同一）
-  3. `InputEvent('input', { inputType: 'insertFromPaste' })` を発火（ユーザー貼り付け認識）
-  4. `Event('change')` を発火
-- このシーケンスを `textarea.value` のみへの代入に簡略化してはならない。
+```kotlin
+// NG: UIのWebView流用（Activity破棄で翻訳が死ぬ）
+// OK: アプリコンテキストで独立させる
+WebView(context.applicationContext)
+```
+`BaseWebTranslationTask`派生は上記で動作させる。
 
----
+## Conventions
 
-## 2. バックグラウンド実行アーキテクチャ
+- サービス固有DOM・セレクタは`WebTranslationStrategy.kt`に集約。新規対応サービス追加時はAsk first
+- 分割上限・チャンク閾値は`TextChunker`・各Strategyの定数が正本。本ファイルに数値を複写しない
 
-- **独立インスタンスの維持**:
-  - 翻訳タスク（`BaseWebTranslationTask` 派生）は、UIのライフサイクル凍結や Activity 破棄による中断を防ぐため、必ず `WebView(context.applicationContext)` による**独立バックグラウンドインスタンス**で動作させること。
-  - メインスレッドのUI WebViewを流用してはならない。
+## Commands
 
----
+```powershell
+.\gradlew :app:testDebugUnitTest --tests "com.example.novelscraper.TextChunkerTest" --tests "com.example.novelscraper.LiveTranslateScriptBuilderTest"
+```
 
-## 3. Web翻訳ストラテジ保守 (Google / DeepL / Papago)
+## Definition of Done
 
-- 各Webサービス固有のDOM構造、入力・結果取得セレクタは `WebTranslationStrategy.kt` に集約すること。
-- テキスト分割（`TextChunker`）の文字数制限（各サービスの許容上限）を遵守すること。
-
----
-
-## 4. 完了の定義 (DoD)
-- 関連ユニットテスト（`TextChunkerTest`, `LiveTranslateScriptBuilderTest` 等）が全て合格すること。
-- 実機にて対象サービス（Google / DeepL / Papago）でのバックグラウンド翻訳および結果保存が正常に行われることを確認すること。
-- **アーキテクチャ・設計図の同期 (Archify)**:
-  - Web翻訳のパイプライン、DOM抽出、チャンク処理、保存処理に変更を加えた場合は、必ず [`docs/archify/web-translation.workflow.json`](../../../../../../../../../docs/archify/web-translation.workflow.json) を同期更新し、以下のコマンドで検証（Showcase合格）・HTML生成を行うこと：
-    ```bash
-    node .agents/skills/archify/bin/archify.mjs deliver workflow docs/archify/web-translation.workflow.json docs/archify/web-translation.workflow.html --quality showcase
-    ```
+- 常時：上記focusedテストが全件パス
+- パイプライン・DOM抽出・チャンク・保存処理を変えた時のみ：フルテスト＋実機（変更したサービスのみ）＋該当Archify JSON/HTML同期

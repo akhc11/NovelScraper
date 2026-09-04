@@ -1115,4 +1115,23 @@ class LlmPipelineTest {
         assertEquals(30L, wait(30))
         assertEquals(com.example.novelscraper.translation.llm.api.LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES, 2)
     }
+
+    @Test
+    fun testInputSizeEstimateKb_MatchesThreshold() {
+        // 画面表示の目安値と実効閾値が同一計算（単一管理点）であること
+        val config = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig()
+        val profile = com.example.novelscraper.translation.llm.engine.ModelProfile(
+            modelName = "gemini-3.5-flash",
+            maxOutputChars = 20000
+        )
+        val (zhKb, koKb, enKb) = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig.inputSizeEstimateKb(20000)
+        assertEquals(config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, profile) / 1024, zhKb)
+        assertEquals(config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, profile) / 1024, koKb)
+        assertEquals(config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, profile) / 1024, enKb)
+        // 既定15000字: 中 約27KB / 韓 約39KB / 英 約26KB
+        val (zh15, ko15, en15) = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig.inputSizeEstimateKb(15000)
+        assertEquals(27, zh15)
+        assertEquals(39, ko15)
+        assertEquals(26, en15)
+    }
 }

@@ -210,7 +210,7 @@ object NovelDictionaryGenerator {
     }
 
     /**
-     * 指定されたパート数・サンプリングモードに基づいて辞書抽出対象ファイルを選定する。
+     * 指定されたファイル数・サンプリングモードに基づいて辞書抽出対象ファイルを選定する。
      */
     fun selectSampleFiles(
         allFiles: List<DocumentFile>,

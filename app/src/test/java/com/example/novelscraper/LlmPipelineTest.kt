@@ -774,18 +774,46 @@ class LlmPipelineTest {
     }
 
     @Test
-    fun testOpenAiReasoningPayload_QwenIsolation() {
-        // qwen系はトップレベル reasoning_effort=none、reasoning JSONなし
-        val (qwenReasoning, qwenEffort) =
-            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("qwen/qwen-72b", "high", null)
-        assertNull(qwenReasoning)
-        assertEquals("none", qwenEffort)
+    fun testOpenAiReasoningPayload_TopLevelIsolation() {
+        // Groq方式（トップレベルnone）は effort があっても reasoning JSON を作らない
+        val (topReasoning, topEffort) =
+            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("high", null, topLevelNone = true)
+        assertNull(topReasoning)
+        assertEquals("none", topEffort)
 
         // 通常モデルは effort JSON を組み立てる
         val (reasoning, effort) =
-            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("deepseek-v4", "high", null)
+            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("high", null)
         assertNotNull(reasoning)
         assertEquals("high", effort)
+
+        // 明示の reasoning.enabled は方式に関わらず透過する
+        val (explicit, _) =
+            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("high", false, topLevelNone = true)
+        assertNotNull(explicit)
+    }
+
+    @Test
+    fun testProviderHandlers_Mapping() {
+        fun handlerFor(provider: com.example.novelscraper.translation.llm.engine.LlmProvider) =
+            com.example.novelscraper.translation.llm.api.handlerFor(provider)
+        val config = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig()
+
+        assertTrue(handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.GEMINI).managesKeyRotation(config))
+        assertFalse(handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.OPENROUTER).managesKeyRotation(config))
+        assertFalse(handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.GROQ).managesKeyRotation(config))
+
+        val noRotation = config.copy(geminiRotationEnabled = false)
+        assertFalse(handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.GEMINI).managesKeyRotation(noRotation))
+
+        assertEquals(
+            com.example.novelscraper.translation.llm.api.ReasoningStyle.TOP_LEVEL_NONE,
+            handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.GROQ).reasoningStyle()
+        )
+        assertEquals(
+            com.example.novelscraper.translation.llm.api.ReasoningStyle.STANDARD,
+            handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.OPENROUTER).reasoningStyle()
+        )
     }
 
     @Test

@@ -5,6 +5,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.llm.api.LlmApiResult
 import com.example.novelscraper.translation.llm.api.LlmRequestRunner
 import com.example.novelscraper.translation.llm.api.LlmRetryPolicy
+import com.example.novelscraper.translation.llm.api.handlerFor
 import com.example.novelscraper.translation.llm.engine.LlmProvider
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.llm.engine.ModelProfile
@@ -183,7 +184,7 @@ object LargeFileTranslator {
                     // 分間制限疑いの429は同モデル再試行を優先し、即時のモデル切替を避ける
                     var sameModelQuotaRetries = 0
                     var retryCount = 0
-                    val maxRetryCount = if (profile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
+                    val maxRetryCount = if (handlerFor(profile.provider).managesKeyRotation(config)) {
                         (config.geminiApiKeys.size * profiles.size).coerceAtLeast(MAX_RETRIES)
                     } else MAX_RETRIES
 
@@ -225,7 +226,7 @@ object LargeFileTranslator {
                             is LlmApiResult.QuotaExceeded -> {
                                 sawOtherFailure = true
                                 onLog("    ⏳ $chunkName: Quota制限検知 (${apiResult.message.take(200)})")
-                                if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled &&
+                                if (handlerFor(targetProfile.provider).managesKeyRotation(config) &&
                                     !ApiKeyPoolManager.isDailyQuotaExceeded(apiResult.message) &&
                                     sameModelQuotaRetries < LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES
                                 ) {
@@ -236,7 +237,7 @@ object LargeFileTranslator {
                                     retryCount++
                                     continue
                                 }
-                                if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
+                                if (handlerFor(targetProfile.provider).managesKeyRotation(config)) {
                                     val advanced = rotationManager.advanceRotation(apiResult.message) { onLog("      $it") }
                                     if (!advanced) {
                                         return false

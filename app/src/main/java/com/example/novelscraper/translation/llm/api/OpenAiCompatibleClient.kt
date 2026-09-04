@@ -23,7 +23,8 @@ object OpenAiCompatibleClient {
         providerOrder: List<String>? = null,
         providerAllowFallbacks: Boolean? = null,
         reasoningEffort: String? = null,
-        reasoningEnabled: Boolean? = null
+        reasoningEnabled: Boolean? = null,
+        topLevelReasoningNone: Boolean = false
     ): LlmApiResult = withContext(Dispatchers.IO) {
         try {
             val provider = if (!providerOrder.isNullOrEmpty()) {
@@ -33,7 +34,8 @@ object OpenAiCompatibleClient {
                 )
             } else null
 
-            val (reasoning, finalReasoningEffort) = reasoningPayload(model, reasoningEffort, reasoningEnabled)
+            val (reasoning, finalReasoningEffort) =
+                reasoningPayload(reasoningEffort, reasoningEnabled, topLevelReasoningNone)
 
             val reqBodyObj = OpenAiChatRequest(
                 model = model,
@@ -143,26 +145,26 @@ object OpenAiCompatibleClient {
     }
 
     /**
-     * モデル別の推論パラメータ組立。
-     * Groqのqwen系はトップレベルに reasoning_effort: "none" を送る仕様のため、
-     * ベンダー分岐はこの関数内に隔離し、呼び出し側に漏らさない。
+     * 推論パラメータ組立（モデル名ではなく呼び出し側指定の方式に従う）。
+     * Groq系はトップレベルに reasoning_effort を送る仕様のため、
+     * 方式判定は handler 側で行い、モデル名の接頭辞判定はしない。
      * @return reasoning JSON とトップレベル reasoning_effort のペア
      */
     fun reasoningPayload(
-        model: String,
         reasoningEffort: String?,
-        reasoningEnabled: Boolean?
+        reasoningEnabled: Boolean?,
+        topLevelNone: Boolean = false
     ): Pair<kotlinx.serialization.json.JsonElement?, String?> {
         val reasoning = when {
             reasoningEnabled != null -> {
                 LlmApiClient.json.parseToJsonElement("""{"enabled":$reasoningEnabled}""")
             }
-            reasoningEffort != null && reasoningEffort != "none" && !model.startsWith("qwen/") -> {
+            reasoningEffort != null && reasoningEffort != "none" && !topLevelNone -> {
                 LlmApiClient.json.parseToJsonElement("""{"effort":"$reasoningEffort"}""")
             }
             else -> null
         }
-        val finalReasoningEffort = if (model.startsWith("qwen/")) "none" else reasoningEffort
+        val finalReasoningEffort = if (topLevelNone) "none" else reasoningEffort
         return reasoning to finalReasoningEffort
     }
 }

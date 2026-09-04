@@ -6,6 +6,7 @@ import android.widget.Toast
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.llm.api.LlmApiResult
 import com.example.novelscraper.translation.llm.api.ConfigErrorKind
+import com.example.novelscraper.translation.llm.api.handlerFor
 import com.example.novelscraper.translation.llm.api.LlmRequestRunner
 import com.example.novelscraper.translation.llm.api.LlmRetryPolicy
 import com.example.novelscraper.translation.common.NovelPhysicalSplitter
@@ -784,7 +785,7 @@ class LlmTranslationEngine(
 
                 // --- 3. ネットワークリトライループ ---
                 var retry = 0
-                val maxRetryCount = if (profile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
+                val maxRetryCount = if (handlerFor(profile.provider).managesKeyRotation(config)) {
                     rotationManager.poolCapacity.coerceAtLeast(3)
                 } else 3
 
@@ -845,7 +846,7 @@ class LlmTranslationEngine(
                         }
                         is LlmApiResult.QuotaExceeded -> {
                             batchSawOtherFailure = true
-                            if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled &&
+                            if (handlerFor(targetProfile.provider).managesKeyRotation(config) &&
                                 !ApiKeyPoolManager.isDailyQuotaExceeded(apiResult.message) &&
                                 sameModelQuotaRetries < LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES
                             ) {
@@ -856,7 +857,7 @@ class LlmTranslationEngine(
                                 retry++
                                 continue
                             }
-                            if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
+                            if (handlerFor(targetProfile.provider).managesKeyRotation(config)) {
                                 val advanced = rotationManager.advanceRotation(apiResult.message) { addLog("[W#$workerId]  $it") }
                                 if (!advanced) return BatchOutcome(0, 0)
                                 retry++
@@ -1122,7 +1123,7 @@ class LlmTranslationEngine(
 
                 // --- 3. ネットワークリトライループ ---
                 var retry = 0
-                val maxRetryCount = if (profile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
+                val maxRetryCount = if (handlerFor(profile.provider).managesKeyRotation(config)) {
                     rotationManager.poolCapacity.coerceAtLeast(3)
                 } else 3
 
@@ -1154,7 +1155,7 @@ class LlmTranslationEngine(
                         }
                         is LlmApiResult.QuotaExceeded -> {
                             sawOtherFailure = true
-                            if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled &&
+                            if (handlerFor(targetProfile.provider).managesKeyRotation(config) &&
                                 !ApiKeyPoolManager.isDailyQuotaExceeded(apiResult.message) &&
                                 sameModelQuotaRetries < LlmRetryPolicy.MAX_SAME_MODEL_QUOTA_RETRIES
                             ) {
@@ -1165,7 +1166,7 @@ class LlmTranslationEngine(
                                 retry++
                                 continue
                             }
-                            if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
+                            if (handlerFor(targetProfile.provider).managesKeyRotation(config)) {
                                 val advanced = rotationManager.advanceRotation(apiResult.message) { addLog("[W#$workerId]  $it") }
                                 if (!advanced) {
                                     return false // ワーカー終了

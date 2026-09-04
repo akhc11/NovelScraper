@@ -5,6 +5,7 @@ import com.example.novelscraper.translation.llm.api.model.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonElement
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -20,7 +21,9 @@ object GeminiApiClient {
         temperature: Double? = null,
         thinkingLevel: String? = null,
         thinkingBudget: Int? = null,
-        maxOutputTokens: Int? = 65536
+        maxOutputTokens: Int? = 65536,
+        responseMimeType: String? = null,
+        responseSchema: JsonElement? = null
     ): LlmApiResult = withContext(Dispatchers.IO) {
         try {
             // thinkingBudget と thinkingLevel の排他制御 (Google API仕様: 同時指定は400エラー)
@@ -31,11 +34,15 @@ object GeminiApiClient {
             }
 
             // Gemini 3.x Flash など temperature 非対応モデルでは temperature を送らない
-            val genConfig = if (temperature != null || thinkingConfig != null || maxOutputTokens != null) {
+            val genConfig = if (temperature != null || thinkingConfig != null || maxOutputTokens != null ||
+                responseMimeType != null || responseSchema != null
+            ) {
                 GeminiGenerationConfig(
                     temperature = temperature,
                     maxOutputTokens = maxOutputTokens,
-                    thinkingConfig = thinkingConfig
+                    thinkingConfig = thinkingConfig,
+                    responseMimeType = responseMimeType,
+                    responseSchema = responseSchema
                 )
             } else null
 

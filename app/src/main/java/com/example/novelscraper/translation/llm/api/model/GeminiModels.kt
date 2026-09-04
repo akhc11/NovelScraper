@@ -2,6 +2,7 @@ package com.example.novelscraper.translation.llm.api.model
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 
 @Serializable
 data class GeminiRequest(
@@ -35,7 +36,9 @@ data class GeminiGenerationConfig(
     val topP: Double? = null,
     val topK: Int? = null,
     val maxOutputTokens: Int? = null,
-    val thinkingConfig: GeminiThinkingConfig? = null
+    val thinkingConfig: GeminiThinkingConfig? = null,
+    val responseMimeType: String? = null,
+    val responseSchema: JsonElement? = null
 )
 
 @Serializable

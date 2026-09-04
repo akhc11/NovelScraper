@@ -107,27 +107,186 @@ class LlmPipelineTest {
             "file2.txt" to "第2話の文章です。"
         )
 
-        val batchInput = BatchTranslator.buildBatchInput(files, enableCompletionMarker = true)
-        assertTrue(batchInput.contains("[SEG:1]"))
-        assertTrue(batchInput.contains("[SEG:2]"))
-        assertTrue(batchInput.contains("[SRC_END]"))
+        val batchInput = BatchTranslator.buildBatchInput(files)
+        assertTrue(batchInput.contains("<doc id=\"1\">"))
+        assertTrue(batchInput.contains("<doc id=\"2\">"))
+        assertTrue(batchInput.contains("</documents>"))
+        assertFalse(batchInput.contains("[SRC_END]"))
 
         val mockResponse = """
-            [SEG:1]
+            <translations>
+            <trans id="1">
             これは第1話の日本語訳です。
-            [SEG:2]
+            </trans>
+            <trans id="2">
             これは第2話の日本語訳です。
-            [SRC_END]
+            </trans>
+            </translations>
         """.trimIndent()
 
-        val stripped = CompletionMarkerHelper.checkAndStripMarker(mockResponse, true)
-        assertNotNull(stripped)
+        assertTrue(CompletionMarkerHelper.checkBatchCompletion(mockResponse, true))
 
-        val parsed = BatchTranslator.parseBatchResponse(stripped!!, 2)
+        val parsed = BatchTranslator.parseBatchResponse(mockResponse, 2)
         assertNotNull(parsed)
         assertEquals(2, parsed!!.size)
         assertEquals("これは第1話の日本語訳です。", parsed[1])
         assertEquals("これは第2話の日本語訳です。", parsed[2])
+    }
+
+    @Test
+    fun testBatchTranslator_XmlParsing_Variations() {
+        val response = """
+            <TRANSLATIONS>
+            <trans id="１">
+            全角数字IDの訳文です。
+            </trans>
+            <trans id=2>
+            クォートなしIDの訳文です。
+            </trans>
+            <TRANS ID = "3" >
+            大文字タグの訳文です。
+            </TRANS>
+            </TRANSLATIONS>
+        """.trimIndent()
+
+        val parsed = BatchTranslator.parseBatchResponse(response, 3)
+        assertNotNull(parsed)
+        assertEquals(3, parsed!!.size)
+        assertEquals("全角数字IDの訳文です。", parsed[1])
+        assertEquals("クォートなしIDの訳文です。", parsed[2])
+        assertEquals("大文字タグの訳文です。", parsed[3])
+    }
+
+    @Test
+    fun testBatchTranslator_PartialSalvage() {
+        // id=2 が欠落しても 1 と 3 は回収できること（出現順の割当て直しはしない）
+        val response = """
+            <translations>
+            <trans id="1">
+            第1話の訳文です。
+            </trans>
+            <trans id="3">
+            第3話の訳文です。
+            </trans>
+            </translations>
+        """.trimIndent()
+
+        val parsed = BatchTranslator.parseBatchResponse(response, 3)
+        assertNotNull(parsed)
+        assertEquals(2, parsed!!.size)
+        assertEquals("第1話の訳文です。", parsed[1])
+        assertNull(parsed[2])
+        assertEquals("第3話の訳文です。", parsed[3])
+    }
+
+    @Test
+    fun testBatchTranslator_TruncatedResponse() {
+        // id=2 の途中で途絶しても、完成している id=1 を救出できること
+        // （閉じたセグメントが末尾400文字にあれば完走扱いで部分回収へ進む）
+        val response = """
+            <translations>
+            <trans id="1">
+            第1話の訳文です。
+            </trans>
+            <trans id="2">
+            第2話の訳文の途中ま
+        """.trimIndent()
+
+        assertTrue(CompletionMarkerHelper.checkBatchCompletion(response, true))
+
+        val parsed = BatchTranslator.parseBatchResponse(response, 2)
+        assertNotNull(parsed)
+        assertEquals(1, parsed!!.size)
+        assertEquals("第1話の訳文です。", parsed[1])
+
+        // 閉じタグが一つもない途絶は完走失敗 → 次のプロンプトへ回す
+        val earlyCutoff = "<translations>\n<trans id=\"1\">\n第1話の訳文の途中ま"
+        assertFalse(CompletionMarkerHelper.checkBatchCompletion(earlyCutoff, true))
+        assertNull(BatchTranslator.parseBatchResponse(earlyCutoff, 2))
+    }
+
+    @Test
+    fun testBatchTranslator_ContentEscaping() {
+        // 原文に構造タグ酷似文字列が含まれても誤分割しないこと
+        val files = listOf(
+            "file1.txt" to "彼は<trans id=\"9\">という札を見た。",
+            "file2.txt" to "通常の第2話の文章です。"
+        )
+        val batchInput = BatchTranslator.buildBatchInput(files)
+        assertFalse(batchInput.contains("<trans id=\"9\">"))
+        assertTrue(batchInput.contains("＜trans"))
+
+        // 無関係な `<` は温存されること
+        val mathText = BatchTranslator.escapeStructuralTags("a<b の比較と<transformer>という語")
+        assertTrue(mathText.contains("a<b"))
+        assertTrue(mathText.contains("<transformer>"))
+    }
+
+    @Test
+    fun testBatchTranslator_JsonParsing() {
+        val jsonResponse = """
+            {"translations": [{"id": 1, "ja": "第1話の訳文です。"}, {"id": 2, "ja": "第2話の訳文です。"}]}
+        """.trimIndent()
+
+        val parsed = BatchTranslator.parseBatchResponse(jsonResponse, 2)
+        assertNotNull(parsed)
+        assertEquals(2, parsed!!.size)
+        assertEquals("第1話の訳文です。", parsed[1])
+        assertEquals("第2話の訳文です。", parsed[2])
+
+        // 壊れたJSON（途絶）は null になること
+        val brokenJson = """{"translations": [{"id": 1, "ja": "途中ま"""
+        assertNull(BatchTranslator.parseJsonResponse(brokenJson))
+
+        // id欠落の要素は飛ばし、正常分だけ返すこと
+        val partialJson = """{"translations": [{"id": 1, "ja": "第1話。"}, {"ja": "IDなし。"}]}"""
+        val partial = BatchTranslator.parseJsonResponse(partialJson)
+        assertNotNull(partial)
+        assertEquals(1, partial!!.size)
+    }
+
+    @Test
+    fun testBatchTranslator_JsonSchemaShape() {
+        val schema = BatchTranslator.buildBatchJsonSchema()
+        val obj = schema.toString()
+        assertTrue(obj.contains("translations"))
+        assertTrue(obj.contains("\"id\""))
+        assertTrue(obj.contains("\"ja\""))
+    }
+
+    @Test
+    fun testCompletionMarkerHelper_BatchVsLargeFile() {
+        // バッチ完走判定は閉じタグで行い、大ファイルの [SRC_END] と干渉しないこと
+        assertTrue(CompletionMarkerHelper.checkBatchCompletion("<translations><trans id=\"1\">訳</trans></translations>", true))
+        assertTrue(CompletionMarkerHelper.checkBatchCompletion("```\n<translations>\n<trans id=\"1\">\n訳\n</trans>\n</translations>\n```", true))
+        assertFalse(CompletionMarkerHelper.checkBatchCompletion("<translations><trans id=\"1\">訳", true))
+        assertFalse(CompletionMarkerHelper.checkBatchCompletion("", true))
+        // 無効化時は常に true
+        assertTrue(CompletionMarkerHelper.checkBatchCompletion("anything", false))
+
+        // 大ファイル用 [SRC_END] 検証は従来通り
+        assertNotNull(CompletionMarkerHelper.checkAndStripMarker("訳文。\n[SRC_END]", true))
+        assertNull(CompletionMarkerHelper.checkAndStripMarker("訳文。", true))
+    }
+
+    @Test
+    fun testPromptBuilder_BatchXmlAndJson() {
+        val xmlPrompt = com.example.novelscraper.translation.llm.prompt.PromptBuilder.buildBatchPrompt(
+            promptNumber = 1,
+            fileCount = 2
+        )
+        assertTrue(xmlPrompt.contains("<translations>"))
+        assertTrue(xmlPrompt.contains("<trans id=\"1\">"))
+        assertFalse(xmlPrompt.contains("[SRC_END]"))
+        assertFalse(xmlPrompt.contains("[SEG:1]"))
+
+        val jsonPrompt = com.example.novelscraper.translation.llm.prompt.PromptBuilder.buildBatchPrompt(
+            promptNumber = 1,
+            fileCount = 2,
+            jsonMode = true
+        )
+        assertTrue(jsonPrompt.contains("\"translations\""))
+        assertFalse(jsonPrompt.contains("[SRC_END]"))
     }
 
     @Test

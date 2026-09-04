@@ -1426,6 +1426,12 @@ private fun ModelProfileCard(
                             color = AppColors.textTertiary,
                             fontSize = 8.sp
                         )
+                        val (zhKb, koKb, enKb) = LlmTranslationConfig.inputSizeEstimateKb(profile.maxOutputChars)
+                        Text(
+                            "※入力目安: 中 約${zhKb}KB / 韓 約${koKb}KB / 英 約${enKb}KB",
+                            color = AppColors.textTertiary,
+                            fontSize = 8.sp
+                        )
                     }
                 }
             }
@@ -1533,12 +1539,12 @@ private fun AddModelSelectionDialog(
                         Text("Google AI Studio (Gemini):", color = AppColors.accentTealLight, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.height(4.dp))
                         listOf(
-                            PresetModelItem("Gemini 3.5 Flash (標準・安定)", ModelProfile(modelName = "gemini-3.5-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium", splitThresholdBytes = 50000, chunkSizeBytes = 45000, batchMaxBytes = 45000)),
-                            PresetModelItem("Gemini 3.6 Flash (最新Flash)", ModelProfile(modelName = "gemini-3.6-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium", splitThresholdBytes = 50000, chunkSizeBytes = 45000, batchMaxBytes = 45000)),
-                            PresetModelItem("Gemini 3.7 Flash (最上位Flash)", ModelProfile(modelName = "gemini-3.7-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium", splitThresholdBytes = 50000, chunkSizeBytes = 45000, batchMaxBytes = 45000)),
-                            PresetModelItem("Gemini 3.1 Flash Lite (高速・軽量)", ModelProfile(modelName = "gemini-3.1-flash-lite", provider = LlmProvider.GEMINI, thinkingLevel = "medium", temperature = 1.0, splitThresholdBytes = 50000, chunkSizeBytes = 45000, batchMaxBytes = 45000)),
-                            PresetModelItem("Gemini 3.5 Flash Lite (最新Lite)", ModelProfile(modelName = "gemini-3.5-flash-lite", provider = LlmProvider.GEMINI, thinkingLevel = "medium", temperature = 1.0, splitThresholdBytes = 50000, chunkSizeBytes = 45000, batchMaxBytes = 45000)),
-                            PresetModelItem("Gemma 4 31B (辞書・高品質)", ModelProfile(modelName = "gemma-4-31b-it", provider = LlmProvider.GEMINI, thinkingLevel = "medium", temperature = 1.0, splitThresholdBytes = 6000, chunkSizeBytes = 4000, batchMaxBytes = 6000))
+                            PresetModelItem("Gemini 3.5 Flash (標準・安定)", ModelProfile(modelName = "gemini-3.5-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium")),
+                            PresetModelItem("Gemini 3.6 Flash (最新Flash)", ModelProfile(modelName = "gemini-3.6-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium")),
+                            PresetModelItem("Gemini 3.7 Flash (最上位Flash)", ModelProfile(modelName = "gemini-3.7-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium")),
+                            PresetModelItem("Gemini 3.1 Flash Lite (高速・軽量)", ModelProfile(modelName = "gemini-3.1-flash-lite", provider = LlmProvider.GEMINI, thinkingLevel = "medium", temperature = 1.0)),
+                            PresetModelItem("Gemini 3.5 Flash Lite (最新Lite)", ModelProfile(modelName = "gemini-3.5-flash-lite", provider = LlmProvider.GEMINI, thinkingLevel = "medium", temperature = 1.0)),
+                            PresetModelItem("Gemma 4 31B (辞書・高品質)", ModelProfile(modelName = "gemma-4-31b-it", provider = LlmProvider.GEMINI, thinkingLevel = "medium", temperature = 1.0))
                         ).forEach { item ->
                             PresetModelButton(label = item.label, onClick = { onAdd(item.profile) })
                             Spacer(modifier = Modifier.height(4.dp))
@@ -1788,7 +1794,7 @@ private fun BatchSplitExplanationDialog(
                             Text("📦 小ファイルの場合：バッチ翻訳（まとめて送信）", color = Color(0xFF64B5F6), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "短いチャプターを1話ずつ送ると、API待機時間や1分あたりのリクエスト制限（RPM 15回等）に引っかかります。そのため、バッチ枠（約32〜49KB）に収まる範囲で最大10話を自動で1つに束ねて翻訳します。",
+                                text = "短いチャプターを1話ずつ送ると、API待機時間や1分あたりのリクエスト制限（RPM 15回等）に引っかかります。そのため、目標出力文字数から自動計算されるバッチ枠に収まる範囲で最大3話を自動で1つに束ねて翻訳します。",
                                 color = AppColors.textSecondary,
                                 fontSize = 10.sp,
                                 lineHeight = 14.sp
@@ -1807,7 +1813,7 @@ private fun BatchSplitExplanationDialog(
                                     text = "【バッチ翻訳の流れ】\n" +
                                             "📄 第1話 (5KB) ┐\n" +
                                             "📄 第2話 (8KB) ┼─> 📦 1リクエストに結合 ─> 🤖 AI (LLM)\n" +
-                                            "📄 第3話 (6KB) ┘    [SEG:1]...[SEG:3]...          │\n" +
+                                             "📄 第3話 (6KB) ┘    <trans id=\"1\">...<trans id=\"3\">...          │\n" +
                                             "                                                  ▼\n" +
                                             "✅ 応答を各ファイルに自動分解・個別保存！ ◀───────┘",
                                     color = Color(0xFF90CAF9),

@@ -33,9 +33,6 @@ data class ModelProfile(
     val thinkingLevel: String = "medium", // minimal, low, medium, high
     val thinkingBudget: Int? = null,     // 0=思考OFF, -1=動的, 正数=トークン数
     val temperature: Double? = null,     // null時はAPIに送信しない
-    val splitThresholdBytes: Int = 50000,
-    val chunkSizeBytes: Int = 45000,
-    val batchMaxBytes: Int = 45000,
     val promptOrder: List<Int> = listOf(1, 1),
     val useCustomPromptOrder: Boolean = false, // trueなら一括設定や言語自動選択に上書きされず、このモデル固有のpromptOrderを絶対優先
     val reasoningEffort: String = "none", // OpenRouter用 (none, low, medium, high)
@@ -74,9 +71,6 @@ data class LlmTranslationConfig(
             provider = LlmProvider.GEMINI,
             thinkingLevel = "medium",
             temperature = null,
-            splitThresholdBytes = 50000,
-            chunkSizeBytes = 45000,
-            batchMaxBytes = 45000,
             promptOrder = listOf(1, 1)
         ),
         ModelProfile(
@@ -84,9 +78,6 @@ data class LlmTranslationConfig(
             provider = LlmProvider.GEMINI,
             thinkingLevel = "medium",
             temperature = null,
-            splitThresholdBytes = 50000,
-            chunkSizeBytes = 45000,
-            batchMaxBytes = 45000,
             promptOrder = listOf(1, 1)
         ),
         ModelProfile(
@@ -94,9 +85,6 @@ data class LlmTranslationConfig(
             provider = LlmProvider.GEMINI,
             thinkingLevel = "medium",
             temperature = null,
-            splitThresholdBytes = 50000,
-            chunkSizeBytes = 45000,
-            batchMaxBytes = 45000,
             promptOrder = listOf(1, 1)
         ),
         ModelProfile(
@@ -104,9 +92,6 @@ data class LlmTranslationConfig(
             provider = LlmProvider.GEMINI,
             thinkingLevel = "medium",
             temperature = 1.0,
-            splitThresholdBytes = 50000,
-            chunkSizeBytes = 45000,
-            batchMaxBytes = 45000,
             promptOrder = listOf(1, 1)
         ),
         ModelProfile(
@@ -114,9 +99,6 @@ data class LlmTranslationConfig(
             provider = LlmProvider.GEMINI,
             thinkingLevel = "medium",
             temperature = 1.0,
-            splitThresholdBytes = 50000,
-            chunkSizeBytes = 45000,
-            batchMaxBytes = 45000,
             promptOrder = listOf(1, 1)
         )
     ),
@@ -136,9 +118,6 @@ data class LlmTranslationConfig(
     val groqModel: String = "llama-3.3-70b-versatile",
     val selectedPromptNumber: Int = 1,
     val fallbackPromptNumbers: List<Int> = listOf(1, 1),
-    val splitThresholdBytes: Int = 13000,
-    val chunkSizeBytes: Int = 12000,
-    val batchMaxBytes: Int = 12000,
 
     val customPrompts: Map<Int, String> = emptyMap(),
     val outputSubDir: String = "翻訳完了_LLM",
@@ -266,18 +245,7 @@ data class LlmTranslationConfig(
      */
     fun getEffectiveSplitThreshold(sourceLang: SourceLanguage, profile: ModelProfile): Int {
         val targetChars = profile.maxOutputChars.coerceIn(2000, 100000)
-
-        val inputBytes = when (sourceLang) {
-            // 中国語: 漢字1文字=3B, 日本語への文字膨張率 約1.6倍 ➔ 目標20,000字で約37.5KB
-            SourceLanguage.ZH -> (targetChars * 3.0 / 1.6).toInt()
-            // 韓国語: ハングル1文字=3B, 日本語への文字膨張率 約1.1倍 ➔ 目標20,000字で約54.5KB
-            SourceLanguage.KO -> (targetChars * 3.0 / 1.1).toInt()
-            // 英語: 1文字=1B, 1単語≒5Bで日本語約2.8文字 ➔ 目標20,000字で約35.7KB (約7,142単語)
-            SourceLanguage.EN -> (targetChars / 2.8 * 5.0).toInt()
-            SourceLanguage.JA -> targetChars * 3
-        }
-
-        return inputBytes.coerceAtLeast(4000)
+        return splitThresholdBytesFor(sourceLang, targetChars)
     }
 
     /**
@@ -290,7 +258,7 @@ data class LlmTranslationConfig(
 
     /**
      * 検出言語とプロファイルの目標出力文字数に応じた実効バッチサイズ（バイト）を取得
-     * - 小ファイルを [SEG:N] でまとめて翻訳する最大合計バイト数
+     * - 小ファイルを `<doc id="N">` でまとめて翻訳する最大合計バイト数
      */
     fun getEffectiveBatchSize(sourceLang: SourceLanguage, profile: ModelProfile): Int {
         val threshold = getEffectiveSplitThreshold(sourceLang, profile)
@@ -321,5 +289,35 @@ data class LlmTranslationConfig(
         const val DEFAULT_DICT_GEMINI_MODEL = "gemini-3.1-flash-lite"
         const val DEFAULT_DICT_OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
         const val DEFAULT_DICT_GROQ_MODEL = "llama-3.3-70b-versatile"
+
+        /**
+         * 目標日本語出力文字数から言語別の実効入力分割閾値（バイト）を逆算する単一管理点。
+         * getEffectiveSplitThreshold / inputSizeEstimateKb はここに一本化し、二重定義を禁止する。
+         */
+        fun splitThresholdBytesFor(sourceLang: SourceLanguage, targetChars: Int): Int {
+            val inputBytes = when (sourceLang) {
+                // 中国語: 漢字1文字=3B, 日本語への文字膨張率 約1.6倍 ➔ 目標20,000字で約37.5KB
+                SourceLanguage.ZH -> (targetChars * 3.0 / 1.6).toInt()
+                // 韓国語: ハングル1文字=3B, 日本語への文字膨張率 約1.1倍 ➔ 目標20,000字で約54.5KB
+                SourceLanguage.KO -> (targetChars * 3.0 / 1.1).toInt()
+                // 英語: 1文字=1B, 1単語≒5Bで日本語約2.8文字 ➔ 目標20,000字で約35.7KB (約7,142単語)
+                SourceLanguage.EN -> (targetChars / 2.8 * 5.0).toInt()
+                SourceLanguage.JA -> targetChars * 3
+            }
+
+            return inputBytes.coerceAtLeast(4000)
+        }
+
+        /**
+         * 設定画面表示用：目標出力文字数から言語別の入力目安KB（中/韓/英）を返す。
+         */
+        fun inputSizeEstimateKb(maxOutputChars: Int): Triple<Int, Int, Int> {
+            val chars = maxOutputChars.coerceIn(2000, 100000)
+            return Triple(
+                splitThresholdBytesFor(SourceLanguage.ZH, chars) / 1024,
+                splitThresholdBytesFor(SourceLanguage.KO, chars) / 1024,
+                splitThresholdBytesFor(SourceLanguage.EN, chars) / 1024
+            )
+        }
     }
 }

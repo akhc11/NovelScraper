@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.novelscraper.MainUiState
 import com.example.novelscraper.TranslationEngine
+import com.example.novelscraper.translation.web.*
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.llm.ui.LlmTranslationPanel
 import com.example.novelscraper.ui.theme.AppColors

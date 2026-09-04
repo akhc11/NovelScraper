@@ -1,6 +1,7 @@
 package com.example.novelscraper.translation.llm.engine
 
 import com.example.novelscraper.translation.llm.pipeline.SourceLanguage
+import com.example.novelscraper.translation.llm.pipeline.TranslationQualityValidator
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -183,15 +184,15 @@ data class LlmTranslationConfig(
     val autoPromptOrderChinese: List<Int> = listOf(1, 1),
     val autoPromptOrderEnglish: List<Int> = listOf(2, 7),
 
-    // 言語別 品質検証サイズ比設定 (min %, max %)
-    val sizeRatioZhMin: Int = 102,
-    val sizeRatioZhMax: Int = 200,
-    val sizeRatioKoMin: Int = 102,
-    val sizeRatioKoMax: Int = 150,
-    val sizeRatioEnMin: Int = 105,
-    val sizeRatioEnMax: Int = 220, // 小説向け適正デフォルト (220%)
-    val sizeRatioJaMin: Int = 100,
-    val sizeRatioJaMax: Int = 200
+    // 言語別 品質検証サイズ比設定 (min %, max %)。既定値は TranslationQualityValidator の単一管理点を参照。
+    val sizeRatioZhMin: Int = TranslationQualityValidator.ZH_MIN_RATIO,
+    val sizeRatioZhMax: Int = TranslationQualityValidator.ZH_MAX_RATIO,
+    val sizeRatioKoMin: Int = TranslationQualityValidator.KO_MIN_RATIO,
+    val sizeRatioKoMax: Int = TranslationQualityValidator.KO_MAX_RATIO,
+    val sizeRatioEnMin: Int = TranslationQualityValidator.EN_MIN_RATIO,
+    val sizeRatioEnMax: Int = TranslationQualityValidator.EN_MAX_RATIO,
+    val sizeRatioJaMin: Int = TranslationQualityValidator.JA_MIN_RATIO,
+    val sizeRatioJaMax: Int = TranslationQualityValidator.JA_MAX_RATIO
 ) {
     /**
      * 言語別の実効サイズ比範囲 (min %, max %) を取得

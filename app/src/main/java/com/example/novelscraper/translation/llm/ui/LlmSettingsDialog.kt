@@ -461,9 +461,12 @@ fun LlmSettingsDialog(
                                             }
                                         },
                                         onDelete = {
-                                            modelProfiles.removeAt(index)
-                                            if (expandedModelId == profile.id) {
-                                                expandedModelId = modelProfiles.firstOrNull()?.id
+                                            // 最低1件は残す (0件保存→開始不能の防止)
+                                            if (modelProfiles.size > 1) {
+                                                modelProfiles.removeAt(index)
+                                                if (expandedModelId == profile.id) {
+                                                    expandedModelId = modelProfiles.firstOrNull()?.id
+                                                }
                                             }
                                         },
                                         onShowBatchSplitHelp = { showBatchSplitHelpDialog = true }
@@ -482,6 +485,13 @@ fun LlmSettingsDialog(
 
                             Text("Google AI Studio (Gemini) APIキープール (1行1キー / 複数可):", color = AppColors.textSecondary, fontSize = 10.sp)
                             BasicInputArea(value = geminiKeysText, onValueChange = { geminiKeysText = it }, minLines = 2)
+                            TextButton(
+                                onClick = {
+                                    geminiKeysText = LlmTranslationConfig().geminiApiKeys.joinToString("\n")
+                                }
+                            ) {
+                                Text("同梱値にリセット", color = AppColors.accentTealLight, fontSize = 10.sp)
+                            }
 
                             Spacer(modifier = Modifier.height(4.dp))
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -770,9 +780,9 @@ fun LlmSettingsDialog(
                                         BasicInputArea(value = dictTotalPartsText, onValueChange = { dictTotalPartsText = it })
                                     }
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text("1回の送信上限サイズ (KB):", color = AppColors.textSecondary, fontSize = 10.sp)
+                                        Text("1回の送信上限サイズ (KB / 上限200):", color = AppColors.textSecondary, fontSize = 10.sp)
                                         BasicInputArea(value = dictBatchMaxKbText, onValueChange = { dictBatchMaxKbText = it })
-                                        Text("※独立キーで1並列なら500KB可 / 5並列なら100KB推奨", color = AppColors.textTertiary, fontSize = 8.sp)
+                                        Text("※エンジン上限200KB (5並列なら100KB〜200KB推奨)", color = AppColors.textTertiary, fontSize = 8.sp)
                                     }
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
@@ -893,7 +903,7 @@ fun LlmSettingsDialog(
                         onClick = {
                             val keys = geminiKeysText.lines().map { it.trim() }.filter { it.isNotBlank() }
                             val newConfig = currentConfig.copy(
-                                geminiApiKeys = keys.ifEmpty { currentConfig.geminiApiKeys },
+                                geminiApiKeys = keys,
                                 geminiRotationEnabled = geminiRotationEnabled,
                                 geminiCooldownSec = geminiCooldownSecText.toIntOrNull() ?: 15,
                                 openRouterApiKey = openRouterKey.trim(),
@@ -927,7 +937,7 @@ fun LlmSettingsDialog(
                                 dictGroqMergeModel = dictGroqMergeModel.trim(),
                                 dictSampleMode = dictSampleMode,
                                 dictTotalParts = dictTotalPartsText.toIntOrNull()?.coerceAtLeast(0) ?: 100,
-                                dictBatchMaxBytes = ((dictBatchMaxKbText.toIntOrNull() ?: 50) * 1000).coerceIn(4000, 1000000),
+                                dictBatchMaxBytes = ((dictBatchMaxKbText.toIntOrNull() ?: 50) * 1000).coerceIn(4000, 200000),
                                 dictWorkerCount = dictWorkerCountText.toIntOrNull()?.coerceIn(1, 30) ?: 6,
                                 dictConcurrencyPerWorker = dictConcurrencyText.toIntOrNull()?.coerceIn(1, 10) ?: 5,
                                 dictParallelCount = ((dictWorkerCountText.toIntOrNull() ?: 6) * (dictConcurrencyText.toIntOrNull() ?: 5)).coerceIn(1, 30),
@@ -986,7 +996,10 @@ fun LlmSettingsDialog(
                 Button(
                     onClick = {
                         val parsed = newOrderText.split(",").mapNotNull { it.trim().toIntOrNull() }
-                        if (parsed.isNotEmpty() && newLabel.isNotBlank()) {
+                        // 1-7は内蔵プロンプト、8以上はカスタム本文の登録が必須
+                        val allKnown = parsed.isNotEmpty() &&
+                                parsed.all { it in 1..7 || customPromptsMap[it]?.isNotBlank() == true }
+                        if (allKnown && newLabel.isNotBlank()) {
                             promptPresets.add(PromptOrderPreset(label = newLabel.trim(), order = parsed))
                             showAddPresetDialog = false
                         }

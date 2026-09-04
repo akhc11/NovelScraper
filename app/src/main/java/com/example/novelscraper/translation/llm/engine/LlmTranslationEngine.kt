@@ -4,10 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.widget.Toast
 import androidx.documentfile.provider.DocumentFile
-import com.example.novelscraper.translation.llm.api.GeminiApiClient
-import com.example.novelscraper.translation.llm.api.LlmApiClient
 import com.example.novelscraper.translation.llm.api.LlmApiResult
-import com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient
+import com.example.novelscraper.translation.llm.api.LlmRequestRunner
 import com.example.novelscraper.translation.common.NovelPhysicalSplitter
 import com.example.novelscraper.translation.llm.pipeline.*
 import com.example.novelscraper.translation.llm.prompt.PromptBuilder
@@ -42,7 +40,6 @@ class LlmTranslationEngine(
 
     private var currentJob: Job? = null
     private var isStopRequested = false
-    private val fileClaimManager = FileClaimManager()
 
     var config: LlmTranslationConfig = LlmTranslationConfig()
         private set
@@ -65,6 +62,7 @@ class LlmTranslationEngine(
             _engineState.update { it.copy(
                 isTranslating = true,
                 statusText = "翻訳開始準備中...",
+                chunkProgress = 0 to 0,
                 logs = emptyList()
             ) }
             val workerCount = config.parallelWorkers.coerceIn(1, 6)
@@ -129,7 +127,6 @@ class LlmTranslationEngine(
             } catch (e: Exception) {
                 addLog("❌ 予期せぬエラー: ${e.message}")
             } finally {
-                fileClaimManager.clear()
                 keyPoolManager.reset()
                 _engineState.update { it.copy(
                     isTranslating = false,
@@ -189,10 +186,21 @@ class LlmTranslationEngine(
             return
         }
 
-        // SAF O(1) 高速化: 出力ディレクトリの既存ファイル名を1回の listFiles でキャッシュ (フリーズ根絶)
-        val existingOutputNames = Collections.synchronizedSet(
-            outputDir.listFiles().mapNotNull { it.name }.toMutableSet()
-        )
+        // SAF O(1) 高速化: 出力ディレクトリを1回の listFiles で走査し、名前とサイズをキャッシュ。
+        // サイズ0の .txt は破損とみなしてキャッシュに入れない (未翻訳扱いで次回再処理)。
+        val existingOutputNames = Collections.synchronizedSet(mutableSetOf<String>())
+        var zeroByteCount = 0
+        for (outDoc in outputDir.listFiles()) {
+            val outName = outDoc.name ?: continue
+            if (outDoc.isFile && outName.endsWith(".txt") && outDoc.length() == 0L) {
+                zeroByteCount++
+                continue
+            }
+            existingOutputNames.add(outName)
+        }
+        if (zeroByteCount > 0) {
+            addLog("⚠️ サイズ0の出力 $zeroByteCount 件は未翻訳扱いで再処理します")
+        }
 
         // 言語判定 (キャッシュ .lang_cache を確認、無ければ先頭ファイルで判定して保存)
         val langCacheDoc = if (existingOutputNames.contains(".lang_cache")) outputDir.findFile(".lang_cache") else null
@@ -214,8 +222,11 @@ class LlmTranslationEngine(
             addLog("🔤 言語検出: ${detected.displayName} [${langResult.reason}]")
             val newCacheDoc = outputDir.findFile(".lang_cache") ?: outputDir.createFile("text/plain", ".lang_cache")
             if (newCacheDoc != null) {
-                saveFileContent(newCacheDoc, detected.name)
-                existingOutputNames.add(".lang_cache")
+                if (saveFileContent(newCacheDoc, detected.name)) {
+                    existingOutputNames.add(".lang_cache")
+                } else {
+                    addLog("⚠️ 言語キャッシュの保存に失敗 (次回再検出します)")
+                }
             }
             detected
         }
@@ -302,14 +313,13 @@ class LlmTranslationEngine(
         val completedCounter = AtomicInteger(0)
         val folderProcessedCounter = AtomicInteger(0)
 
-        // 翻訳済みファイルの事前カウント (O(1) メモリ照合)
-        val pendingFiles = mutableListOf<DocumentFile>()
+        // 翻訳済みファイルの事前カウント (O(1) メモリ照合)。
+        // 作業ディレクトリ (.parts_) が残る大ファイルはレジューム優先で未完了扱い。
         for (f in files) {
             val fname = f.name ?: continue
-            if (existingOutputNames.contains(fname) || existingOutputNames.contains("$fname.failed")) {
+            val hasWorkDir = existingOutputNames.contains(".parts_${fname}")
+            if (!hasWorkDir && (existingOutputNames.contains(fname) || existingOutputNames.contains("$fname.failed"))) {
                 completedCounter.incrementAndGet()
-            } else {
-                pendingFiles.add(f)
             }
         }
 
@@ -320,9 +330,11 @@ class LlmTranslationEngine(
         val requestedWorkerCount = config.parallelWorkers.coerceIn(1, 6)
         val profiles = config.modelProfiles.ifEmpty { listOf(ModelProfile(modelName = "gemini-3.5-flash")) }
 
-        try {
-            // 各ワーカーを起動 (1ワーカー1キー専有)
-            coroutineScope {
+        // 排他制御はジョブ単位で生成 (停止→即再開のレースを根絶)
+        val fileClaimManager = FileClaimManager()
+
+        // 各ワーカーを起動 (1ワーカー1キー専有)
+        coroutineScope {
                 val workerJobs = mutableListOf<Deferred<Unit>>()
 
                 for (wId in 1..requestedWorkerCount) {
@@ -354,6 +366,7 @@ class LlmTranslationEngine(
                             runWorker(
                                 workerId = wId,
                                 folderKey = folderKey,
+                                fileClaimManager = fileClaimManager,
                                 allFiles = files,
                                 outputDir = outputDir,
                                 existingOutputNames = existingOutputNames,
@@ -373,14 +386,12 @@ class LlmTranslationEngine(
 
                 workerJobs.awaitAll()
             }
-        } finally {
-            fileClaimManager.releaseFolder(folderKey)
-        }
     }
 
     private suspend fun runWorker(
         workerId: Int,
         folderKey: String,
+        fileClaimManager: FileClaimManager,
         allFiles: List<DocumentFile>,
         outputDir: DocumentFile,
         existingOutputNames: MutableSet<String>,
@@ -392,7 +403,13 @@ class LlmTranslationEngine(
         rotationManager: LlmRotationManager
     ) {
         val profiles = config.modelProfiles.ifEmpty { listOf(ModelProfile(modelName = "gemini-3.5-flash")) }
-        val primaryProfile = profiles.first()
+
+        // 直前原文末尾のスライディングキャッシュ (1件分のみ保持)
+        var cachedTailName: String? = null
+        var cachedTailText: String? = null
+
+        // DocumentFile の線形 indexOf を避けるための URI→位置マップ
+        val fileIndexByUri = allFiles.mapIndexed { index, doc -> doc.uri.toString() to index }.toMap()
 
         for (fileDoc in allFiles) {
             if (isStopRequested || !currentCoroutineContext().isActive || rotationManager.isExhausted) break
@@ -404,8 +421,11 @@ class LlmTranslationEngine(
 
             val fileName = fileDoc.name ?: continue
 
+            // 作業ディレクトリ (.parts_) が残る大ファイルはレジューム優先でスキップしない
+            val hasResumeWork = existingOutputNames.contains(".parts_${fileName}")
+
             // 翻訳済みまたは失敗保持ならスキップ (O(1) キャッシュ照合)
-            if (existingOutputNames.contains(fileName) || existingOutputNames.contains("$fileName.failed")) {
+            if (!hasResumeWork && (existingOutputNames.contains(fileName) || existingOutputNames.contains("$fileName.failed"))) {
                 continue
             }
 
@@ -414,16 +434,25 @@ class LlmTranslationEngine(
                 continue
             }
 
-            val rawContent = readFileContent(fileDoc) ?: continue
+            val rawContent = readFileContent(fileDoc, fileName)
+            if (rawContent == null) {
+                addLog("[W#$workerId] ⚠️ $fileName 読み取り失敗 → クレーム解放して次へ")
+                fileClaimManager.releaseFile(folderKey, fileName)
+                continue
+            }
             val content = TextCleanser.cleanse(rawContent)
 
             // 空白・0バイトファイルの即時スキップ
             if (content.isBlank()) {
                 val outFile = outputDir.findFile(fileName) ?: outputDir.createFile("text/plain", fileName)
                 if (outFile != null) {
-                    saveFileContent(outFile, "")
-                    existingOutputNames.add(fileName)
+                    if (saveFileContent(outFile, "")) {
+                        existingOutputNames.add(fileName)
+                    } else {
+                        addLog("[W#$workerId] ❌ $fileName 空ファイル出力の保存に失敗")
+                    }
                 }
+                fileClaimManager.releaseFile(folderKey, fileName)
                 addLog("[W#$workerId] ⏭ $fileName (空ファイルのためスキップ)")
                 val done = completedCounter.incrementAndGet()
                 folderProcessedCounter.incrementAndGet()
@@ -436,15 +465,23 @@ class LlmTranslationEngine(
 
             val fsize = content.toByteArray(Charsets.UTF_8).size
 
-            // 直前ファイルの原文末尾コンテキストを取得 (未訳の生テキストから直接抽出)
+            // 直前ファイルの原文末尾コンテキスト (直前1件分のみスライディング保持。再読み込みなし)
             val prevSourceTail = if (config.enablePrevSrcContext) {
-                val fileIdx = allFiles.indexOf(fileDoc)
+                val fileIdx = fileIndexByUri[fileDoc.uri.toString()] ?: -1
                 if (fileIdx > 0) {
                     val prevFile = allFiles[fileIdx - 1]
-                    val prevRaw = readFileContent(prevFile)
-                    if (prevRaw != null) {
-                        TextCleanser.cleanse(prevRaw).lines().takeLast(config.prevSrcContextLines).joinToString("\n")
-                    } else null
+                    val prevName = prevFile.name ?: ""
+                    if (cachedTailName == prevName) {
+                        cachedTailText
+                    } else {
+                        val prevRaw = readFileContent(prevFile, prevName)
+                        val tail = prevRaw?.let {
+                            TextCleanser.cleanse(it).lines().takeLast(config.prevSrcContextLines).joinToString("\n")
+                        }
+                        cachedTailName = prevName
+                        cachedTailText = tail
+                        tail
+                    }
                 } else null
             } else null
 
@@ -454,162 +491,179 @@ class LlmTranslationEngine(
             val effectiveBatchSize = config.getEffectiveBatchSize(sourceLang, activeProfile)
 
             if (workDir != null || fsize > effectiveSplitThreshold) {
-                // 大ファイル: 分割チャンク翻訳 (レジューム対応)
-                addLog("[W#$workerId] $fileName (大ファイル: ${fsize}B [閾値:${effectiveSplitThreshold}B] / 専有キー[${rotationManager.getCurrentKeyIndex() + 1}])")
-                val success = LargeFileTranslator.translateLargeFile(
-                    context = context,
-                    fileName = fileName,
-                    fileContent = content,
-                    outputDir = outputDir,
-                    config = config,
-                    rotationManager = rotationManager,
-                    sourceLang = sourceLang,
-                    dictMap = novelDict?.characters,
-                    dictStyle = novelDict?.style,
-                    dictGenders = novelDict?.genders,
-                    prevSourceTail = prevSourceTail,
-                    isStopRequested = { isStopRequested },
-                    onLog = { addLog("[W#$workerId] $it") }
-                )
-
-                if (success) {
-                    existingOutputNames.add(fileName)
-                } else {
-                    // ユーザー中止時は .failed を作成せず、次回レジューム可能に保持
-                    if (!isStopRequested && currentCoroutineContext().isActive) {
-                        val failedFileName = "$fileName.failed"
-                        val failedFile = outputDir.findFile(failedFileName) ?: outputDir.createFile("text/plain", failedFileName)
-                        if (failedFile != null) {
-                            saveFileContent(failedFile, content)
-                            existingOutputNames.add(failedFileName)
-                            addLog("[W#$workerId] ❌ $fileName 全ドライバー失敗 → .failed 保存")
-                        }
-                    }
-                }
-
-                val done = completedCounter.incrementAndGet()
-                folderProcessedCounter.incrementAndGet()
-                _engineState.update { it.copy(
-                    progress = done to totalCount,
-                    currentFileName = fileName
-                ) }
-            } else {
-                // 小ファイル: 後続の小ファイルをバッチ上限 (effectiveBatchSize) まで束ねる
-                val batchItems = mutableListOf<Pair<DocumentFile, String>>()
-                batchItems.add(fileDoc to content)
-                var currentBatchBytes = fsize
-
-                val currentIdx = allFiles.indexOf(fileDoc)
-                if (currentIdx >= 0) {
-                    for (nextIdx in (currentIdx + 1) until allFiles.size) {
-                        if (batchItems.size >= 10) break // 1バッチ最大10ファイル
-                        val nextDoc = allFiles[nextIdx]
-                        val nextName = nextDoc.name ?: continue
-                        if (existingOutputNames.contains(nextName) || existingOutputNames.contains("$nextName.failed")) continue
-                        val nextWorkDir = outputDir.findFile(".parts_${nextName}")
-                        if (nextWorkDir != null) continue
-
-                        // 排他クレーム試行
-                        if (!fileClaimManager.tryClaimFile(folderKey, nextName)) continue
-
-                        val nextRaw = readFileContent(nextDoc) ?: continue
-                        val nextClean = TextCleanser.cleanse(nextRaw)
-                        if (nextClean.isBlank()) {
-                            val outF = outputDir.findFile(nextName) ?: outputDir.createFile("text/plain", nextName)
-                            if (outF != null) saveFileContent(outF, "")
-                            existingOutputNames.add(nextName)
-                            completedCounter.incrementAndGet()
-                            folderProcessedCounter.incrementAndGet()
-                            continue
-                        }
-
-                        val nextBytes = nextClean.toByteArray(Charsets.UTF_8).size
-                        if (nextBytes > effectiveSplitThreshold || (currentBatchBytes + nextBytes) > effectiveBatchSize) {
-                            // 大ファイルまたはバッチ上限超過: 今回のバッチには含めない
-                            break
-                        }
-
-                        batchItems.add(nextDoc to nextClean)
-                        currentBatchBytes += nextBytes
-                    }
-                }
-
-                if (batchItems.size > 1) {
-                    // 2件以上: まとめてバッチ翻訳実行！
-                    val batchNames = batchItems.map { it.first.name ?: "" }
-                    addLog("[W#$workerId] 📦 バッチ翻訳開始 (${batchItems.size}ファイル / 計:${currentBatchBytes}B / 枠:${effectiveBatchSize}B)")
-                    val batchSuccess = translateBatchFiles(
-                        batchItems = batchItems,
+                try {
+                    // 大ファイル: 分割チャンク翻訳 (レジューム対応)。
+                    // 親直下に .failed を作らない (.parts_ + chunk_N.failed が中断シグナル)。
+                    addLog("[W#$workerId] $fileName (大ファイル: ${fsize}B [閾値:${effectiveSplitThreshold}B] / 専有キー[${rotationManager.getCurrentKeyIndex() + 1}])")
+                    val success = LargeFileTranslator.translateLargeFile(
+                        context = context,
+                        fileName = fileName,
+                        fileContent = content,
                         outputDir = outputDir,
-                        existingOutputNames = existingOutputNames,
+                        config = config,
                         rotationManager = rotationManager,
                         sourceLang = sourceLang,
-                        novelDict = novelDict,
+                        dictMap = novelDict?.characters,
+                        dictStyle = novelDict?.style,
+                        dictGenders = novelDict?.genders,
                         prevSourceTail = prevSourceTail,
-                        workerId = workerId
-                    )
-
-                    if (batchSuccess) {
-                        val done = completedCounter.addAndGet(batchItems.size)
-                        folderProcessedCounter.addAndGet(batchItems.size)
-                        _engineState.update { it.copy(
-                            progress = done to totalCount,
-                            currentFileName = batchNames.last()
-                        ) }
-                    } else {
-                        // バッチ失敗時は各ファイルを単体翻訳へフォールバック (フェイルセーフ)
-                        addLog("[W#$workerId] ⚠️ バッチ翻訳失敗 → 各ファイルを単体翻訳へフォールバック")
-                        for (item in batchItems) {
-                            if (isStopRequested || !currentCoroutineContext().isActive) break
-                            val singleSuccess = translateSingleFile(
-                                fileDoc = item.first,
-                                content = item.second,
-                                outputDir = outputDir,
-                                existingOutputNames = existingOutputNames,
-                                rotationManager = rotationManager,
-                                sourceLang = sourceLang,
-                                novelDict = novelDict,
-                                prevSourceTail = prevSourceTail,
-                                workerId = workerId
-                            )
-                            if (singleSuccess) {
-                                existingOutputNames.add(item.first.name ?: "")
-                            }
-                            val done = completedCounter.incrementAndGet()
-                            folderProcessedCounter.incrementAndGet()
-                            _engineState.update { it.copy(
-                                progress = done to totalCount,
-                                currentFileName = item.first.name ?: ""
-                            ) }
-
-                            if (config.requestDelaySec > 0) {
-                                delay(config.requestDelaySec * 1000L)
-                            }
+                        isStopRequested = { isStopRequested },
+                        onLog = { addLog("[W#$workerId] $it") },
+                        onChunkProgress = { done, total ->
+                            _engineState.update { it.copy(chunkProgress = done to total) }
                         }
-                    }
-                } else {
-                    // 1件のみ: 単体翻訳
-                    addLog("[W#$workerId] $fileName (単体処理: ${fsize}B / 専有キー[${rotationManager.getCurrentKeyIndex() + 1}])")
-                    val success = translateSingleFile(
-                        fileDoc = fileDoc,
-                        content = content,
-                        outputDir = outputDir,
-                        existingOutputNames = existingOutputNames,
-                        rotationManager = rotationManager,
-                        sourceLang = sourceLang,
-                        novelDict = novelDict,
-                        prevSourceTail = prevSourceTail,
-                        workerId = workerId
                     )
+
                     if (success) {
                         existingOutputNames.add(fileName)
+                        existingOutputNames.remove(".parts_${fileName}")
+                    } else {
+                        if (!isStopRequested && currentCoroutineContext().isActive) {
+                            addLog("[W#$workerId] ❌ $fileName 分割翻訳未完了 → .parts_残存のため次回レジューム")
+                        }
                     }
+
                     val done = completedCounter.incrementAndGet()
                     folderProcessedCounter.incrementAndGet()
                     _engineState.update { it.copy(
                         progress = done to totalCount,
-                        currentFileName = fileName
+                        currentFileName = fileName,
+                        chunkProgress = 0 to 0
                     ) }
+                } finally {
+                    fileClaimManager.releaseFile(folderKey, fileName)
+                }
+            } else {
+                val batchItems = mutableListOf<Pair<DocumentFile, String>>()
+                batchItems.add(fileDoc to content)
+                var currentBatchBytes = fsize
+
+                try {
+                    val currentIdx = fileIndexByUri[fileDoc.uri.toString()] ?: -1
+                    if (currentIdx >= 0) {
+                        for (nextIdx in (currentIdx + 1) until allFiles.size) {
+                            if (batchItems.size >= 10) break // 1バッチ最大10ファイル
+                            val nextDoc = allFiles[nextIdx]
+                            val nextName = nextDoc.name ?: continue
+                            if (existingOutputNames.contains(nextName) || existingOutputNames.contains("$nextName.failed")) continue
+                            val nextWorkDir = outputDir.findFile(".parts_${nextName}")
+                            if (nextWorkDir != null) continue
+
+                            // 排他クレーム試行
+                            if (!fileClaimManager.tryClaimFile(folderKey, nextName)) continue
+
+                            val nextRaw = readFileContent(nextDoc, nextName)
+                            if (nextRaw == null) {
+                                addLog("[W#$workerId] ⚠️ $nextName 読み取り失敗 → クレーム解放して次へ")
+                                fileClaimManager.releaseFile(folderKey, nextName)
+                                continue
+                            }
+                            val nextClean = TextCleanser.cleanse(nextRaw)
+                            if (nextClean.isBlank()) {
+                                val outF = outputDir.findFile(nextName) ?: outputDir.createFile("text/plain", nextName)
+                                if (outF != null && saveFileContent(outF, "")) {
+                                    existingOutputNames.add(nextName)
+                                }
+                                completedCounter.incrementAndGet()
+                                folderProcessedCounter.incrementAndGet()
+                                fileClaimManager.releaseFile(folderKey, nextName)
+                                continue
+                            }
+
+                            val nextBytes = nextClean.toByteArray(Charsets.UTF_8).size
+                            if (nextBytes > effectiveSplitThreshold || (currentBatchBytes + nextBytes) > effectiveBatchSize) {
+                                // 大ファイルまたはバッチ上限超過: 今回のバッチには含めない (クレーム解放)
+                                fileClaimManager.releaseFile(folderKey, nextName)
+                                break
+                            }
+
+                            batchItems.add(nextDoc to nextClean)
+                            currentBatchBytes += nextBytes
+                        }
+                    }
+
+                    if (batchItems.size > 1) {
+                        // 2件以上: まとめてバッチ翻訳実行！
+                        val batchNames = batchItems.map { it.first.name ?: "" }
+                        addLog("[W#$workerId] 📦 バッチ翻訳開始 (${batchItems.size}ファイル / 計:${currentBatchBytes}B / 枠:${effectiveBatchSize}B)")
+                        val batchSuccess = translateBatchFiles(
+                            batchItems = batchItems,
+                            outputDir = outputDir,
+                            existingOutputNames = existingOutputNames,
+                            rotationManager = rotationManager,
+                            sourceLang = sourceLang,
+                            novelDict = novelDict,
+                            prevSourceTail = prevSourceTail,
+                            workerId = workerId
+                        )
+
+                        if (batchSuccess) {
+                            val done = completedCounter.addAndGet(batchItems.size)
+                            folderProcessedCounter.addAndGet(batchItems.size)
+                            _engineState.update { it.copy(
+                                progress = done to totalCount,
+                                currentFileName = batchNames.last()
+                            ) }
+                        } else {
+                            // バッチ失敗時は各ファイルを単体翻訳へフォールバック (フェイルセーフ)
+                            addLog("[W#$workerId] ⚠️ バッチ翻訳失敗 → 各ファイルを単体翻訳へフォールバック")
+                            for (item in batchItems) {
+                                if (isStopRequested || !currentCoroutineContext().isActive) break
+                                val singleSuccess = translateSingleFile(
+                                    fileDoc = item.first,
+                                    content = item.second,
+                                    outputDir = outputDir,
+                                    existingOutputNames = existingOutputNames,
+                                    rotationManager = rotationManager,
+                                    sourceLang = sourceLang,
+                                    novelDict = novelDict,
+                                    prevSourceTail = prevSourceTail,
+                                    workerId = workerId
+                                )
+                                if (singleSuccess) {
+                                    existingOutputNames.add(item.first.name ?: "")
+                                }
+                                val done = completedCounter.incrementAndGet()
+                                folderProcessedCounter.incrementAndGet()
+                                _engineState.update { it.copy(
+                                    progress = done to totalCount,
+                                    currentFileName = item.first.name ?: ""
+                                ) }
+
+                                if (config.requestDelaySec > 0) {
+                                    delay(config.requestDelaySec * 1000L)
+                                }
+                            }
+                        }
+                    } else {
+                        // 1件のみ: 単体翻訳
+                        addLog("[W#$workerId] $fileName (単体処理: ${fsize}B / 専有キー[${rotationManager.getCurrentKeyIndex() + 1}])")
+                        val success = translateSingleFile(
+                            fileDoc = fileDoc,
+                            content = content,
+                            outputDir = outputDir,
+                            existingOutputNames = existingOutputNames,
+                            rotationManager = rotationManager,
+                            sourceLang = sourceLang,
+                            novelDict = novelDict,
+                            prevSourceTail = prevSourceTail,
+                            workerId = workerId
+                        )
+                        if (success) {
+                            existingOutputNames.add(fileName)
+                        }
+                        val done = completedCounter.incrementAndGet()
+                        folderProcessedCounter.incrementAndGet()
+                        _engineState.update { it.copy(
+                            progress = done to totalCount,
+                            currentFileName = fileName
+                        ) }
+                    }
+                } finally {
+                    // バッチ採用分のクレームを確実に解放 (例外・キャンセル時も安全)
+                    for (item in batchItems) {
+                        fileClaimManager.releaseFile(folderKey, item.first.name ?: "")
+                    }
                 }
 
                 if (config.requestDelaySec > 0) {
@@ -740,19 +794,22 @@ class LlmTranslationEngine(
         }
 
         if (parsedSegments != null) {
+            var allSaved = true
             for ((idx, item) in batchItems.withIndex()) {
                 val segNum = idx + 1
                 val fname = item.first.name ?: "file_$segNum.txt"
                 val rawSeg = parsedSegments[segNum] ?: ""
                 val cleanSeg = TranslationQualityValidator.stripPreamble(rawSeg)
                 val outFile = outputDir.findFile(fname) ?: outputDir.createFile("text/plain", fname)
-                if (outFile != null) {
-                    saveFileContent(outFile, cleanSeg)
+                if (outFile != null && saveFileContent(outFile, cleanSeg)) {
                     existingOutputNames.add(fname)
                     addLog("[W#$workerId] ✅ $fname (バッチ保存)")
+                } else {
+                    addLog("[W#$workerId] ❌ $fname バッチ保存失敗 → 単体フォールバックへ")
+                    allSaved = false
                 }
             }
-            return true
+            return allSaved
         }
 
         return false
@@ -869,21 +926,22 @@ class LlmTranslationEngine(
 
         if (translatedText != null) {
             val outFile = outputDir.findFile(fileName) ?: outputDir.createFile("text/plain", fileName)
-            if (outFile != null) {
-                saveFileContent(outFile, translatedText)
+            if (outFile != null && saveFileContent(outFile, translatedText)) {
                 existingOutputNames.add(fileName)
                 addLog("[W#$workerId] ✅ $fileName")
                 return true
             }
+            addLog("[W#$workerId] ❌ $fileName 翻訳結果の保存失敗 → 未完了のまま保持")
         } else {
             // 中断された場合は .failed を作成せず次回再開可能に保持
             if (!isStopRequested && currentCoroutineContext().isActive) {
                 val failedFileName = "$fileName.failed"
                 val failedFile = outputDir.findFile(failedFileName) ?: outputDir.createFile("text/plain", failedFileName)
-                if (failedFile != null) {
-                    saveFileContent(failedFile, content)
+                if (failedFile != null && saveFileContent(failedFile, content)) {
                     existingOutputNames.add(failedFileName)
                     addLog("[W#$workerId] ❌ $fileName (全ドライバー全プロンプト失敗) → .failed")
+                } else {
+                    addLog("[W#$workerId] ❌ $fileName .failed の保存失敗 → 未完了のまま保持")
                 }
             }
         }
@@ -896,62 +954,25 @@ class LlmTranslationEngine(
         sourceText: String,
         rotationManager: LlmRotationManager
     ): LlmApiResult {
-        return when (profile.provider) {
-            LlmProvider.GEMINI -> {
-                val key = if (config.geminiRotationEnabled) rotationManager.getCurrentKey() else config.geminiApiKeys.firstOrNull() ?: ""
-                GeminiApiClient.generateContent(
-                    apiKey = key,
-                    model = profile.modelName,
-                    prompt = prompt,
-                    sourceText = sourceText,
-                    temperature = profile.temperature,
-                    thinkingLevel = profile.thinkingLevel,
-                    thinkingBudget = profile.thinkingBudget
-                )
-            }
-            LlmProvider.OPENROUTER -> {
-                OpenAiCompatibleClient.chatCompletion(
-                    apiKey = config.openRouterApiKey,
-                    model = profile.modelName,
-                    endpoint = config.openRouterEndpoint,
-                    prompt = prompt,
-                    sourceText = sourceText,
-                    temperature = profile.temperature ?: 0.5,
-                    topP = profile.topP ?: 0.9,
-                    repetitionPenalty = profile.repetitionPenalty ?: 1.05,
-                    providerOrder = profile.providerOrder,
-                    providerAllowFallbacks = profile.providerAllowFallbacks,
-                    reasoningEffort = profile.reasoningEffort,
-                    reasoningEnabled = profile.reasoningEnabled
-                )
-            }
-            LlmProvider.GROQ -> {
-                OpenAiCompatibleClient.chatCompletion(
-                    apiKey = config.groqApiKey,
-                    model = profile.modelName,
-                    endpoint = config.groqEndpoint,
-                    prompt = prompt,
-                    sourceText = sourceText,
-                    temperature = profile.temperature ?: 0.5
-                )
-            }
-        }
+        return LlmRequestRunner.callForProfile(config, rotationManager, profile, prompt, sourceText)
     }
 
-    private fun readFileContent(doc: DocumentFile): String? {
+    private fun readFileContent(doc: DocumentFile, fileName: String = ""): String? {
         return try {
             context.contentResolver.openInputStream(doc.uri)?.use { stream ->
                 TextCharsetDetector.readTextAutoDetect(stream)
             }
         } catch (e: Exception) {
+            addLog("⚠️ ${fileName.ifBlank { doc.name ?: "不明" }} 読み取り例外: ${e.message}")
             null
         }
     }
 
     private fun saveFileContent(doc: DocumentFile, content: String): Boolean {
         return try {
-            context.contentResolver.openOutputStream(doc.uri, "wt")?.use { stream ->
-                stream.write(content.toByteArray(Charsets.UTF_8))
+            val stream = context.contentResolver.openOutputStream(doc.uri, "wt") ?: return false
+            stream.use { s ->
+                s.write(content.toByteArray(Charsets.UTF_8))
             }
             true
         } catch (e: Exception) {

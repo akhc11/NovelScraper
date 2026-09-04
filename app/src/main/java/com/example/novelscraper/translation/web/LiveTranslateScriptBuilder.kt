@@ -1,4 +1,4 @@
-package com.example.novelscraper
+package com.example.novelscraper.translation.web
 
 object LiveTranslateScriptBuilder {
 

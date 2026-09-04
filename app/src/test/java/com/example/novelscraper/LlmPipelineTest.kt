@@ -166,12 +166,88 @@ class LlmPipelineTest {
 
     @Test
     fun testTranslationQualityValidator_SimplifiedChineseDirectDetection() {
-        // 日本語文の中に中国語簡体字（这、们、话等）が3文字以上混入しているケース
-        val src = "他站了起来，拿起了那把剑。这是一个关于测试的句子。"
-        val mixedText = "彼は立ち上がり、その剣を手にした。这是一个关于测试の文です。"
-        val res = TranslationQualityValidator.validate(src, mixedText, SourceLanguage.ZH)
+        // かなを含まない純粋な中国語残留は失敗 (漢字単体では落とさない)
+        val src = "他在旅途中遇到了很多朋友。王国的命运掌握在他的手中。勇者为了拯救世界踏上了漫长的旅程。"
+        val pureResidual = "他站了起来，拿起了那把剑。这是一个关于测试的句子。主角从普通的少年成长为救世主。"
+        val res = TranslationQualityValidator.validate(src, pureResidual, SourceLanguage.ZH)
+        assertTrue(res is QualityValidationResult.Failure)
+        assertTrue((res as QualityValidationResult.Failure).reason.contains("中国語"))
+
+        // かなを十分含む日本語訳は常用漢字 (昨/座/治/医等) が混じっても成功
+        val japaneseWithJoyoKanji = "昨日の座席で治療を受けた後、病院の医師に相談して油を買いに行き、馬に乗って姿を消した紫の龍を見た。"
+        val okRes = TranslationQualityValidator.validate(src, japaneseWithJoyoKanji, SourceLanguage.ZH)
+        assertTrue(okRes is QualityValidationResult.Success)
+    }
+
+    @Test
+    fun testTranslationQualityValidator_PureSimplifiedKanaGate() {
+        val src = "他在旅途中遇到了很多朋友。王国的命运掌握在他的手中。勇者为了拯救世界踏上了漫长的旅程。"
+        // 純粋簡体字が多く、かなが極端に少ない混在文は失敗 (かな率ゲート)
+        val lowKanaMixed = "这是关于冒险的故事。听说他买了书，还发现了问题。长话短说，为了荣誉而战。の"
+        val failRes = TranslationQualityValidator.validate(src, lowKanaMixed, SourceLanguage.ZH)
+        assertTrue(failRes is QualityValidationResult.Failure)
+        assertTrue((failRes as QualityValidationResult.Failure).reason.contains("簡体字"))
+
+        // 同じく純粋簡体字を含んでも、かなが十分あれば素通りする
+        val kanaRichMixed = "这是关于冒险的故事说话们现过。彼は立ち上がり、その剣を手にして戦いました。主角は勇者です。"
+        assertTrue(TranslationQualityValidator.validate(src, kanaRichMixed, SourceLanguage.ZH) is QualityValidationResult.Success)
+    }
+
+    @Test
+    fun testTranslationQualityValidator_WebNovelFrequentChars() {
+        val src = "他在旅途中遇到了很多朋友。王国的命运掌握在他的手中。勇者为了拯救世界踏上了漫长的旅程。"
+        // 剑, 长, 气 が混入し、かな率が極端に低い文章
+        val webNovelResidual = "飞剑破空而出，长老深吸一口真气。长剑凌厉，剑气纵横。长话短说，剑法通神。の"
+        val res = TranslationQualityValidator.validate(src, webNovelResidual, SourceLanguage.ZH)
         assertTrue(res is QualityValidationResult.Failure)
         assertTrue((res as QualityValidationResult.Failure).reason.contains("簡体字"))
+    }
+
+    @Test
+    fun testTranslationQualityValidator_CodeFenceAndPostambleStripping() {
+        // コードフェンス包みは剥離される
+        val fenced = "```\nこれは翻訳された日本語の本文です。\n```"
+        assertEquals("これは翻訳された日本語の本文です。", TranslationQualityValidator.stripPreamble(fenced))
+
+        // 末尾の後口上は除去される
+        val withPostamble = "これは翻訳された日本語の本文です。\n以上です。"
+        assertEquals("これは翻訳された日本語の本文です。", TranslationQualityValidator.stripPreamble(withPostamble))
+
+        // 中国語の前口上は除去される
+        val zhPreamble = "以下是翻译：\nこれは翻訳された日本語の本文です。"
+        assertEquals("これは翻訳された日本語の本文です。", TranslationQualityValidator.stripPreamble(zhPreamble))
+
+        // 英語の前口上 + 空行挟みも除去される
+        val enPreamble = "\nHere is the translation:\nこれは翻訳された日本語の本文です。"
+        assertEquals("これは翻訳された日本語の本文です。", TranslationQualityValidator.stripPreamble(enPreamble))
+    }
+
+    @Test
+    fun testTranslationQualityValidator_LineLossDetection() {
+        // 30行の原文が3行に潰れたら改行消失で失敗
+        val src = (1..30).joinToString("\n") { "原文の第${it}行目です。" }
+        val collapsed = "訳文1行目。\n訳文2行目。\n訳文3行目。"
+        val res = TranslationQualityValidator.validate(src, collapsed, SourceLanguage.ZH)
+        assertTrue(res is QualityValidationResult.Failure)
+        assertTrue((res as QualityValidationResult.Failure).reason.contains("改行"))
+
+        // 行数とサイズ比が保たれていれば成功 (約158%でZH上限200%以内)
+        val kept = (1..30).joinToString("\n") { "訳文の第${it}行目です。物語が続く。" }
+        assertTrue(TranslationQualityValidator.validate(src, kept, SourceLanguage.ZH) is QualityValidationResult.Success)
+    }
+
+    @Test
+    fun testTranslationQualityValidator_EnBoundary220() {
+        // EN 220% 境界の確認 (220% が正規)
+        val englishSrc = "The cold winter wind blew fiercely across the empty frozen lake as the lonely traveler walked slowly towards the distant warm light flickering inside the small wooden cabin in the deep snow."
+        val srcBytes = englishSrc.toByteArray(Charsets.UTF_8).size
+        assertTrue(srcBytes >= 150)
+
+        // 210% 程度の良訳は成功
+        val normalJapanese = "凍てつく湖を激しい冬の風が吹き抜ける中、孤独な旅人は深い雪の中に佇む小さな木造小屋の窓から漏れる、遠くのかすかな暖かい光に向かってゆっくりと歩を進めていた。"
+        val ratio = normalJapanese.toByteArray(Charsets.UTF_8).size * 100 / srcBytes
+        assertTrue(ratio <= 220)
+        assertTrue(TranslationQualityValidator.validate(englishSrc, normalJapanese, SourceLanguage.EN) is QualityValidationResult.Success)
     }
 
     @Test
@@ -389,7 +465,7 @@ class LlmPipelineTest {
     }
 
     @Test
-    fun testFileClaimManager_ConcurrentClaims() = kotlinx.coroutines.runBlocking {
+    fun testFileClaimManager_ConcurrentClaims() {
         val manager = FileClaimManager()
         val claim1 = manager.tryClaimFile("FolderA", "file1.txt")
         val claim2 = manager.tryClaimFile("FolderA", "file1.txt")
@@ -399,9 +475,19 @@ class LlmPipelineTest {
         assertFalse(claim2) // 重複クレームは拒否
         assertTrue(claim3)
 
-        manager.clear()
-        val claimAfterClear = manager.tryClaimFile("FolderA", "file1.txt")
-        assertTrue(claimAfterClear)
+        // 解放後は再取得可能 (読み失敗・バッチbreak時のリーク防止)
+        manager.releaseFile("FolderA", "file1.txt")
+        val claimAfterRelease = manager.tryClaimFile("FolderA", "file1.txt")
+        assertTrue(claimAfterRelease)
+
+        // withClaim は二重取得を拒否し、block 終了後に自動解放する
+        val (secondOk, _) = manager.withClaim("FolderA", "file1.txt") { "x" }
+        assertFalse(secondOk)
+        manager.releaseFile("FolderA", "file1.txt")
+        val (ok, value) = manager.withClaim("FolderA", "file1.txt") { "done" }
+        assertTrue(ok)
+        assertEquals("done", value)
+        assertTrue(manager.tryClaimFile("FolderA", "file1.txt"))
     }
 
     @Test
@@ -496,6 +582,49 @@ class LlmPipelineTest {
         // 上限30ガード
         val cappedConfig = defaultConfig.copy(dictWorkerCount = 10, dictConcurrencyPerWorker = 10)
         assertEquals(30, cappedConfig.getEffectiveDictParallelCount())
+    }
+
+    @Test
+    fun testOpenAiRequest_OmitsNullTemperature() {
+        // temperature=null は JSON から省略される (推論モデル400防止)
+        val omitted = com.example.novelscraper.translation.llm.api.LlmApiClient.json.encodeToString(
+            com.example.novelscraper.translation.llm.api.model.OpenAiChatRequest.serializer(),
+            com.example.novelscraper.translation.llm.api.model.OpenAiChatRequest(
+                model = "o1",
+                messages = listOf(
+                    com.example.novelscraper.translation.llm.api.model.OpenAiMessage(role = "system", content = "p")
+                ),
+                temperature = null
+            )
+        )
+        assertFalse(omitted.contains("temperature"))
+
+        val present = com.example.novelscraper.translation.llm.api.LlmApiClient.json.encodeToString(
+            com.example.novelscraper.translation.llm.api.model.OpenAiChatRequest.serializer(),
+            com.example.novelscraper.translation.llm.api.model.OpenAiChatRequest(
+                model = "x",
+                messages = listOf(
+                    com.example.novelscraper.translation.llm.api.model.OpenAiMessage(role = "system", content = "p")
+                ),
+                temperature = 0.7
+            )
+        )
+        assertTrue(present.contains("temperature"))
+    }
+
+    @Test
+    fun testOpenAiReasoningPayload_QwenIsolation() {
+        // qwen系はトップレベル reasoning_effort=none、reasoning JSONなし
+        val (qwenReasoning, qwenEffort) =
+            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("qwen/qwen-72b", "high", null)
+        assertNull(qwenReasoning)
+        assertEquals("none", qwenEffort)
+
+        // 通常モデルは effort JSON を組み立てる
+        val (reasoning, effort) =
+            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("deepseek-v4", "high", null)
+        assertNotNull(reasoning)
+        assertEquals("high", effort)
     }
 
     @Test

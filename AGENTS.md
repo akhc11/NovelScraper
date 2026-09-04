@@ -1,117 +1,103 @@
+# NovelScraper2 開発遵守事項（全体共通）
+
+## 0. プロジェクト構造と機能別ルールマップ (パターンA: 階層型)
+本プロジェクトは機能ごとに独立した開発ルールを採用している。作業対象の機能に応じて各専用ルールを遵守すること：
+
+```
 NovelScraper2/
-├── AGENTS.md                    ← 全体ルール（LLM 翻訳は例外あり。§10 参照）
-├── app/src/main/java/com/example/novelscraper/translation/llm/AGENTS.md ← LLM 作業時はこちらを最優先
-├── graphify-out/                ← 構造マップ（前回設定済み）
-└── docs/
-    ├── handoff.md                ← 進捗報告（直近・主要）
-    └── history/                  ← 過去の仕様書・機能別進捗（歴史的記録）
+├── AGENTS.md                                              ← 全体共通規約（本ファイル）
+├── graphify-out/                                          ← 構造マップ（コミット時自動更新）
+├── docs/
+│   ├── handoff_*.md                                       ← 進捗報告・引き継ぎ
+│   └── archify/                                           ← 【機能別アーキテクチャ設計図 (Showcase品質)】
+│       ├── scraper.workflow.json / .html                  ← スクレイピング設計図
+│       ├── web-translation.workflow.json / .html          ← Web翻訳設計図
+│       └── llm-translation.workflow.json / .html          ← LLM翻訳設計図
+└── app/src/main/java/com/example/novelscraper/
+    ├── scraper/AGENTS.md                                  ← 【スクレイピング機能】専用ルール
+    └── translation/
+        ├── web/AGENTS.md                                  ← 【Web翻訳（Google/DeepL/Papago）】専用ルール
+        └── llm/AGENTS.md                                  ← 【LLM翻訳】専用ルール
+```
 
+### 機能別ルールの適用先と設計図
+| 機能カテゴリ | 対象コンポーネント例 | 参照ルールファイル | 対応 Archify 設計図 (事前必読) |
+| :--- | :--- | :--- | :--- |
+| **全体共通** | ビルド環境, DB/Prefs/File 基盤, DoD | 本ファイル (`AGENTS.md`) | 各機能のダイアグラム |
+| **スクレイピング** | `scraper/` 配下, `InspectElementDialog`, `SettingsPanel` 等 | [`scraper/AGENTS.md`](app/src/main/java/com/example/novelscraper/scraper/AGENTS.md) | [`docs/archify/scraper.workflow.json`](docs/archify/scraper.workflow.json) |
+| **Web翻訳** | `translation/web/` 配下, `TranslationPanel` 等 | [`translation/web/AGENTS.md`](app/src/main/java/com/example/novelscraper/translation/web/AGENTS.md) | [`docs/archify/web-translation.workflow.json`](docs/archify/web-translation.workflow.json) |
+| **LLM翻訳** | `translation/llm/` 配下, `translation/common/NovelPhysicalSplitter.kt` | [`translation/llm/AGENTS.md`](app/src/main/java/com/example/novelscraper/translation/llm/AGENTS.md) | [`docs/archify/llm-translation.workflow.json`](docs/archify/llm-translation.workflow.json) |
 
-# NovelScraper2 開発遵守事項（絶対遵守）
+---
 
-## 0. 作業前作業後の鉄則
-- **作業開始前**: `graphify-out/GRAPH_REPORT.md` を読んでから作業すること
-- **作業中・作業終了前の進捗記録 (handoffの分離管理)**:
+## 1. 作業前後の鉄則
+- **構造・データフロー把握**:
+  - 対象機能のパイプライン・責務境界・メインフローは必ず事前に対象の **Archify 設計図 (`docs/archify/*.workflow.json`)** を読み込んで把握すること。
+  - プロジェクト全体のクラス間依存関係の確認が必要な場合は `graphify-out/GRAPH_REPORT.md` を参照すること。
+- **進捗管理 (`docs/`)**:
   - 進捗報告やプランは `docs/` 配下の handoff ファイルに記載・更新すること。
-  - **【絶対遵守】別種・別機能の実装時の分離:** 直前の実装と全く異なる種類・機能の実装を行う場合（例: ダークモードの実装とURL共有の実装のように系統が異なる場合）、既存の `docs/handoff.md` を上書きして過去の記録を消してはならない。`docs/handoff2.md` や `docs/handoff_<機能名>.md` のようにファイルを分けて作成・記録すること。
-  - **完了後の整理:** 実装やプランが完了した handoff ファイル（`handoff_<機能名>.md` 等）は、すみやかに `docs/history/` フォルダへ移動し、ルートの `docs/` フォルダを常にクリーンに保つこと。
+  - **別種・別機能の実装時の分離**: 直前の実装と異なる機能（例: スクレイピング改修とLLM改修など）を行う場合、既存の handoff を上書きせず `docs/handoff_<機能名>.md` に分離すること。
+  - **完了後の整理**: 完了した handoff ファイルは `docs/history/` フォルダへ移動し、ルートの `docs/` をクリーンに保つこと。
 
+---
 
-## 1. 修正時の鉄則
-- **機能の削除禁止:** 構文エラーの修正や文字化けの修復時に、既存のロジック（特にJS抽出や表示項目）を簡略化したり削除したりしないこと。
-- **PowerShell `-replace` の使用禁止:** PowerShell の `-replace` は日本語やマルチバイト文字を含むソースコードの構文を壊すため、ファイル編集には使用しないこと。正規のファイル編集ツール（`replace_file_content` / `write_to_file` / エディタ等）を使用すること。
-- **エンコーディング:** 日本語が含まれるファイルは必ず .NET の UTF8 (BOMなし) を使用するか、Unicodeエスケープを使用すること。
+## 2. AIによるコーディングの原則（根本治療・推測排除）
+- **【最重要】対症療法の絶対禁止**:
+  - 表面的な `if` 文追加、フラグの継ぎ接ぎ、タイマーの場当たり的延長、例外の握りつぶし等で「その場しのぎのパッチを当てること」を厳禁とする。
+  - 不具合発生時は、必ずデータフロー・責務の不一致を特定し、根本的な設計修正（根本治療）を行うこと。
+- **【最重要】推測・安易な思い込みによるコード生成の絶対禁止**:
+  - 「たぶんこう動くだろう」という推測でコードを生成することを厳禁とする。必ず関連コード全体を読み込み、技術的根拠を明確にしてから設計・実装すること。
+- **シンプルで堅牢なコード設計 (KISS原則)**:
+  - **エラーハンドリング**: ネットワークI/O、JSONパース、DataStore読み書き等のエラー発生箇所には適切な例外処理を施しクラッシュを防ぐ。
+  - **非同期処理の安全性**: 重い処理は必ず `Dispatchers.IO` で実行し、ライフサイクルに連動したコルーチンスコープを利用する。
+  - **不要な複雑化の回避**: 過剰な共通化や不要なライブラリ導入を避け、標準ライブラリでシンプルに完結させる。
 
-## 2. UI/UX の維持・インスペクター仕様
-- **デバッグツール (Eruda):** フローティングボタン（歯車）は常にCSSおよびAPIで非表示にし、アプリのスパナボタンでのみトグルさせること。
-- **スクレイピング開始:** FABは廃止。ヘッダーの「再生ボタン」を常に維持し、エンジンに接続すること。
-- **インスペクター (虫眼鏡) & JavaScriptInterface:**
-  - Android WebView の `@JavascriptInterface` メソッドは、JavaScript 側で `typeof` 判定を行ってはならない（`typeof === 'function'` は Android の仕様上 false になるため、必ず直接呼び出すこと）。
-  - OFF時には必ず `removeEventListener` でイベントリスナーを完全破棄し、ゾンビ化を防ぐこと。
-- **お気に入り (星マーク):** タップでお気に入り追加、250ms長押しでお気に入り一覧を開閉する。
+---
 
-## 3. テスト解析 (Test Run) の表示項目
-テスト結果ダイアログには以下の項目を「必ず」含めること。
-1. 作品名 (folderName)
-2. チャプター番号 (chapter) - URL推測ロジックも含む
-3. タイトル (title)
-4. 次ページURL (nextUrl)
-5. 本文 (content) - 先頭200文字程度を表示
+## 3. 編集・エンコーディングの鉄則
+- **PowerShell `-replace` の使用禁止**: 日本語やマルチバイト文字を含む構文を壊すため、ファイル編集ツール（`replace_file_content` / `write_to_file` / エディタ等）を使用すること。
+- **エンコーディング**: 日本語が含まれるファイルは必ず UTF-8 (BOMなし) を使用すること。
+- **既存機能・外部仕様の無断削除禁止**: 既存の機能仕様・外部インターフェースを勝手に削らないこと（内部の安全なリファクタリング・不要コード除去は除く）。
 
-## 4. 自動プリセット (autoUrl)
-- `ScrapingViewModel` の `setCurrentUrl` 内での自動チェックロジックを破壊しないこと。
-- `SettingsPanel` の一番下の入力欄を常に維持すること。
+---
 
-## 5. AIによるコーディングの原則（対症療法の絶対禁止・根本治療・推測排除）
-- **【最重要】対症療法（対症パッチ・表面的なifガード・場当たり的修正）の絶対禁止:**
-  - 不具合や競合が発生した際に、表面的な `if` 文の追加、フラグの継ぎ接ぎ、タイマー/ディレイの延長、例外の握りつぶし等で**「その場しのぎのパッチを当てること」を厳禁**とする。
-  - 不具合が発生した場合は、必ず**「なぜその状態が発生したのか」というデータフロー・責務の不一致・設計の破綻を根本から特定**し、不要な結合を断ち切る「根本的な設計修正（根本治療）」を行うこと。
-  - 「バグの上にバグ（ガード）を重ねる」行為はコードを腐敗させるため一切認めない。
-- **【最重要】推測・安易な思い込みによるコード生成の絶対禁止:**
-  - 「たぶんこう動くだろう」「パラメータを足せば解決するだろう」という**浅い推測や思い込みでコードを生成することは厳禁**とする。
-  - 実装・修正前に必ず、関連する既存コード全体を読み込み、技術的根拠を明確にしてから設計・実装すること。特にスクレイピング・WebView 関連のコードを修正する場合は、Chromium/Android OSのネイティブ仕様、CSSメディアクエリ、HTTPヘッダー・UA判定、DOM展開フローも網羅的に確認すること。
-  - 表面的な見かけ（縮小ズームで済ませる等）で妥協せず、機能の本来の目的を満たしているかを徹底的に検証すること。
-- **シンプルで堅牢なコード設計:** 
-  - **エラーハンドリングの徹底:** ネットワークI/O、JSONパース（Kotlinx Serialization）、DataStore読み書き等のエラーが発生しうる箇所には、適切な例外処理（`try-catch`や`runCatching`）を施し、アプリがクラッシュしないようにすること。
-  - **非同期処理の安全性:** UIスレッドのブロックを防ぐため、重い処理（ファイル操作、ネットワーク、HTML解析など）は適切なディスパッチャ（`Dispatchers.IO`）を指定したコルーチンで実行すること。また、メモリリークやクラッシュを防ぐため、`viewModelScope` や `lifecycleScope` などの適切なCoroutineScopeを利用し、ライフサイクルに連動させること。
-  - **非推奨（Deprecated）APIの排除:** 現在のターゲットSDK（API 35）に適したAPIを使用し、Android 14/15で動作しない古いAPIや非推奨のメソッドは使用しないこと。
-  - **不要な複雑化の回避:** KISS原則（Keep It Simple, Stupid）に従い、過剰な共通化や不要なライブラリ導入を避け、既存の標準ライブラリ（Compose, DataStore, Serialization）で完結するシンプルで堅牢なコードを目指すこと。
+## 4. プロジェクト基盤仕様
+- **ファイル保存 (`FileRepository`)**: `saveChapter` は `suspend` 関数であり、必ず `withContext(Dispatchers.IO)` 上で非同期実行される。
+- **設定・履歴管理 (`PreferencesRepository`)**:
+  - 履歴項目の最大件数は `MAX_HISTORY_SIZE = 100` に制限し、閲覧日時順で古いものから自動剪定される。
+  - DataStore の全 JSON 更新では、デコード失敗時に既存データを保護（上書き中断）するガードを維持すること。
+- **構造ナレッジグラフ (`Graphify`)**:
+  - プロジェクト構造マップは `graphify-out/` 内に保持されている。git commit 時に post-commit フックで自動更新される。
 
-## 6. パフォーマンス・非同期処理の実装仕様 (最適化済み)
-- **ファイル保存 (`FileRepository`):** `saveChapter` は `suspend` 関数であり、必ず `withContext(Dispatchers.IO)` 上で非同期実行される。本文テキストの先頭へのヘッダー（タイトル）付加は行わず、抽出された本文データをそのまま保存すること。
-- **設定・履歴管理 (`PreferencesRepository`):**
-  - 履歴項目の最大件数は `MAX_HISTORY_SIZE = 100` に制限し、閲覧日時（`timestamp`）順で古いものから自動的に剪定（Prune）される。
-  - DataStore の全 JSON 更新（`updateHistory`, `updatePresets`, `updateFavorites`）では、デコード失敗時に既存データを保護（上書き中断）するガードが機能している。
-- **WebView 初期化スクリプト (`ScrapingTask` / `CloudflareDetector`):**
-  - `onPageFinished` 時の Turnstile 対策クリックと人間的スクロール模倣は、`CloudflareDetector.buildPageLoadInitJs()` を通じて単一の `evaluateJavascript` 呼び出しに集約（IPC通信を1回に維持）すること。個別に `evaluateJavascript` を複数回呼び出さないこと。
-- **本文文字数判定 (`ScrapingStateMachine`):** 本文過少（`MIN_CONTENT_LENGTH`）によるリトライおよびエラー停止判定は廃止。本文が空・空白のみの場合は `(本文なし)` を自動補完し、次ページURL（`nextUrl`）が存在する限り止まらずに保存して即時進行すること。
-- **構造ナレッジグラフ (`Graphify`):**
-  - プロジェクト構造マップは `graphify-out/` 内に最新のデータが保持されている（`GRAPH_REPORT.md`, `graph.json`）。
-  - グラフは git commit 時に post-commit フックで自動更新されるため、手動での `graphify .` 実行は不要。
-  - フックが機能していない疑いがある場合のみ `graphify hook status` で確認すること。
+---
 
-## 7. Google翻訳における手動操作再現ロジックの死守（翻訳品質維持の絶対条件）
-- **「プログラム入力」判定の回避:**
-  - Google翻訳は `textarea.value = text` のような単純な値代入を行うと「プログラム入力（Bot/スクリプト）」と判定し、翻訳の質が大幅に低下（簡易エンジンへのフォールバック等）する。
-  - そのため、**ユーザーが手動で Ctrl+V 貼り付けした時と100%同一のブラウザイベントシーケンスを絶対に維持・改変禁止**とする：
-    1. `textarea.focus()` → `textarea.select()` で全選択
-    2. `ClipboardEvent('paste', { clipboardData })` を発火（Ctrl+Vと同一）
-    3. `InputEvent('input', { inputType: 'insertFromPaste' })` を発火（ブラウザがユーザー貼り付けと認識）
-    4. `Event('change')` を発火
-  - このイベントシーケンスを簡略化したり `textarea.value` のみへの変更に戻すことは厳禁。
-- **バックグラウンド実行アーキテクチャ:**
-  - 翻訳タスク（`TranslationTask`）は、画面UIのライフサイクル凍結を回避するため、`ScrapingTask` と同様に `WebView(context.applicationContext)` による独立バックグラウンドインスタンスで動作させる。
-
-## 8. 実機テスト＆ビルド環境の標準手順
-- **環境設定（PowerShell必須）:**
-  - **JDK 21 固定（必須）:** Android Studio 同梱 JBR は JDK 25 に更新されており、Gradle 8.13 / AGP 8.6.1 / Kotlin 2.0.21 の組み合わせでは起動に失敗する（`IllegalArgumentException: 25.0.2`）。必ず JDK 21 を使用すること：
+## 5. 実機テスト＆ビルド環境の標準手順
+- **環境設定（PowerShell必須）**:
+  - **JDK 21 固定（必須）**: Gradle 8.13 / AGP 8.6.1 / Kotlin 2.0.21 のため必ず JDK 21 を使用すること：
     ```powershell
     $env:JAVA_TOOL_OPTIONS = "-Dfile.encoding=UTF-8"
     $env:JAVA_HOME = "C:\Users\asan6\.jdks\ms-21.0.12.1"
     $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
     ```
-  - **デーモン停止:** JDK を切り替えた直後や「25.0.2」系エラーが出るときは、ビルド前に `.\gradlew --stop` を実行して旧デーモン（JDK 25）を破棄すること。
-  - 日本語パスの文字化け・Gradle文字コードエラー防止のため、Gradle コマンド実行前に必ず上記を設定すること。
+  - **デーモン停止**: JDK 切替時やエラー時はビルド前に `.\gradlew --stop` を実行。
   - ADB パス: `C:\Users\asan6\AppData\Local\Android\Sdk\platform-tools\adb.exe`
-- **実機インストール＆完全再起動コマンド:**
+- **実機インストール＆再起動コマンド**:
   ```powershell
-  # ビルド＆インストール
   .\gradlew installDebug
-
-  # ログクリア＆アプリ再起動
   $adb = "C:\Users\asan6\AppData\Local\Android\Sdk\platform-tools\adb.exe"
   & $adb logcat -c
   & $adb shell am force-stop com.example.novelscraper
   & $adb shell am start -n com.example.novelscraper/.MainActivity
   ```
 
-## 9. 完了の定義（Definition of Done）
-- 変更したファイルに関連するテストが存在する場合は実行し、パスすることを確認する
-- 変更した関数・クラスが他の場所から呼び出されていないか `graphify-out/graph.json` で確認する
-- 「完了しました」と報告する前に、上記2点をチェックしたことを明記する
+---
 
-## 10. LLM 翻訳作業の適用範囲（例外規定）
-- `translation/llm/` 配下と `translation/common/NovelPhysicalSplitter.kt` を触る際は、本ファイルより `translation/llm/AGENTS.md` を最優先する。
-- LLM 作業では §2・§3・§4・§6 の WebView/Scraper 部分・§7 を適用外とする。
-- §1「機能の削除禁止」は外部仕様（フォルダ構成・3経路・設定永続化・`.failed` 手動運用・ハードコードキー維持）に限定し、内部テーブル・閾値・分岐の削除・刷新を許可する。§1「PowerShell `-replace` 禁止」「エンコーディング」は全作業で適用する。
-- §5「対症療法の絶対禁止」は、無言継続（`?: continue`・`catch → null`・保存戻り値無視）を指す。理由付き Failure＋ログ＋テストを伴う境界ガードは許可する。「技術的根拠を明確に」は「対象ファイル実読＋テスト＋実機確認」と読み替える。
+## 6. 完了の定義 (Definition of Done)
+- 変更したファイルに関連するテストが存在する場合は実行し、全件パスすることを確認する。
+- 変更した関数・クラスの影響範囲を確認する。
+- **アーキテクチャ・設計図の同期 (Archify)**:
+  - システム構成、IPC、パイプライン、データフローの変更を伴う改修を行った場合は、必ず `docs/archify/` 配下の該当設計図（JSON）を同期更新し、以下のコマンドで Showcase 品質検証および HTML 再生成を行うこと：
+    ```bash
+    node .agents/skills/archify/bin/archify.mjs deliver workflow docs/archify/<対象機能>.workflow.json docs/archify/<対象機能>.workflow.html --quality showcase
+    ```
+- 報告前に上記をチェックしたことを明記する。

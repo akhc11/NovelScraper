@@ -1,5 +1,6 @@
 package com.example.novelscraper
 
+import com.example.novelscraper.scraper.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.*

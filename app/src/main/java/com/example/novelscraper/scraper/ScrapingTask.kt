@@ -1,4 +1,6 @@
-package com.example.novelscraper
+package com.example.novelscraper.scraper
+
+import com.example.novelscraper.WebViewHelper
 
 import android.content.Context
 import android.util.Log

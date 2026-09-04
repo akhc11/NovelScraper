@@ -2,9 +2,8 @@ package com.example.novelscraper.translation.llm.pipeline
 
 import android.content.Context
 import androidx.documentfile.provider.DocumentFile
-import com.example.novelscraper.translation.llm.api.GeminiApiClient
 import com.example.novelscraper.translation.llm.api.LlmApiResult
-import com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient
+import com.example.novelscraper.translation.llm.api.LlmRequestRunner
 import com.example.novelscraper.translation.llm.engine.LlmProvider
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.llm.engine.ModelProfile
@@ -36,7 +35,8 @@ object LargeFileTranslator {
         dictGenders: Map<String, String>? = null,
         prevSourceTail: String? = null,
         isStopRequested: () -> Boolean = { false },
-        onLog: (String) -> Unit = {}
+        onLog: (String) -> Unit = {},
+        onChunkProgress: (Int, Int) -> Unit = { _, _ -> }
     ): Boolean {
         val profiles = config.modelProfiles.ifEmpty { listOf(ModelProfile(modelName = "gemini-3.5-flash")) }
         val activeProfile = rotationManager.getCurrentProfile()
@@ -69,9 +69,22 @@ object LargeFileTranslator {
             )
             if (chunks.isEmpty()) return false
 
+            var createdChunks = 0
             for (chunkPair in chunks) {
-                val chunkDoc = inDir.createFile("text/plain", chunkPair.first) ?: continue
-                writeDocContent(context, chunkDoc, chunkPair.second)
+                val chunkDoc = inDir.createFile("text/plain", chunkPair.first)
+                if (chunkDoc == null) {
+                    onLog("❌ $fileName : チャンクファイル作成失敗 (${chunkPair.first})")
+                    continue
+                }
+                if (writeDocContent(context, chunkDoc, chunkPair.second)) {
+                    createdChunks++
+                } else {
+                    onLog("❌ $fileName : チャンク書き込み失敗 (${chunkPair.first})")
+                }
+            }
+            if (createdChunks != chunks.size) {
+                onLog("❌ $fileName : チャンク生成不全 (${createdChunks}/${chunks.size}) → 次回再試行")
+                return false
             }
         }
 
@@ -90,6 +103,7 @@ object LargeFileTranslator {
         onLog("✂️ $fileName (${fileContent.toByteArray(Charsets.UTF_8).size}B) 分割翻訳 ${if (isResume) "再開" else "開始"} (全${total}チャンク, 枠:${chunkSize}B)")
 
         var prevTranslatedSummary = ""
+        var outNames = outDir.listFiles().mapNotNull { it.name }.toMutableSet()
 
         for ((index, chunkDoc) in chunkDocs.withIndex()) {
             if (isStopRequested() || !currentCoroutineContext().isActive) {
@@ -100,8 +114,8 @@ object LargeFileTranslator {
             val partNum = index + 1
             val chunkName = chunkDoc.name ?: "chunk_${String.format("%04d", partNum)}"
 
-            val outChunk = outDir.findFile(chunkName)
-            val outChunkFailed = outDir.findFile("$chunkName.failed")
+            val outChunk = if (outNames.contains(chunkName)) outDir.findFile(chunkName) else null
+            val outChunkFailed = if (outNames.contains("$chunkName.failed")) outDir.findFile("$chunkName.failed") else null
 
             // [翻訳済みスキップ]
             if (outChunk != null) {
@@ -109,6 +123,7 @@ object LargeFileTranslator {
                 if (savedText.isNotBlank()) {
                     onLog("  ✅ [${partNum}/${total}] $chunkName (翻訳済 / スキップ)")
                     prevTranslatedSummary = savedText.lines().takeLast(20).joinToString("\n")
+                    onChunkProgress(partNum, total)
                     continue
                 }
             }
@@ -119,7 +134,11 @@ object LargeFileTranslator {
                 return false
             }
 
-            val chunkText = readDocContent(context, chunkDoc) ?: continue
+            val chunkText = readDocContent(context, chunkDoc)
+            if (chunkText == null) {
+                onLog("❌ $chunkName : チャンク読み取り失敗 → 作業保持して次回再試行")
+                return false
+            }
             val chunkPrevSrcTail = if (partNum == 1) prevSourceTail else null
 
             var chunkTranslatedText: String? = null
@@ -167,46 +186,13 @@ object LargeFileTranslator {
 
                         onLog("  📦 [${partNum}/${total}] $chunkName (${targetProfile.modelName} / P$promptNum / 試行:${retryCount + 1})")
 
-                        val apiResult = when (targetProfile.provider) {
-                            LlmProvider.GEMINI -> {
-                                val key = if (config.geminiRotationEnabled) rotationManager.getCurrentKey() else config.geminiApiKeys.firstOrNull() ?: ""
-                                GeminiApiClient.generateContent(
-                                    apiKey = key,
-                                    model = targetProfile.modelName,
-                                    prompt = prompt,
-                                    sourceText = preparedSource,
-                                    temperature = targetProfile.temperature,
-                                    thinkingLevel = targetProfile.thinkingLevel,
-                                    thinkingBudget = targetProfile.thinkingBudget
-                                )
-                            }
-                            LlmProvider.OPENROUTER -> {
-                                OpenAiCompatibleClient.chatCompletion(
-                                    apiKey = config.openRouterApiKey,
-                                    model = targetProfile.modelName,
-                                    endpoint = config.openRouterEndpoint,
-                                    prompt = prompt,
-                                    sourceText = preparedSource,
-                                    temperature = targetProfile.temperature ?: 0.5,
-                                    topP = targetProfile.topP ?: 0.9,
-                                    repetitionPenalty = targetProfile.repetitionPenalty ?: 1.05,
-                                    providerOrder = targetProfile.providerOrder,
-                                    providerAllowFallbacks = targetProfile.providerAllowFallbacks,
-                                    reasoningEffort = targetProfile.reasoningEffort,
-                                    reasoningEnabled = targetProfile.reasoningEnabled
-                                )
-                            }
-                            LlmProvider.GROQ -> {
-                                OpenAiCompatibleClient.chatCompletion(
-                                    apiKey = config.groqApiKey,
-                                    model = targetProfile.modelName,
-                                    endpoint = config.groqEndpoint,
-                                    prompt = prompt,
-                                    sourceText = preparedSource,
-                                    temperature = targetProfile.temperature ?: 0.5
-                                )
-                            }
-                        }
+                        val apiResult = LlmRequestRunner.callForProfile(
+                            config = config,
+                            rotationManager = rotationManager,
+                            profile = targetProfile,
+                            prompt = prompt,
+                            sourceText = preparedSource
+                        )
 
                         when (apiResult) {
                             is LlmApiResult.Success -> {
@@ -266,20 +252,25 @@ object LargeFileTranslator {
 
             if (chunkTranslatedText != null) {
                 val savedChunk = outDir.findFile(chunkName) ?: outDir.createFile("text/plain", chunkName)
-                if (savedChunk != null) {
-                    writeDocContent(context, savedChunk, chunkTranslatedText)
+                if (savedChunk != null && writeDocContent(context, savedChunk, chunkTranslatedText)) {
+                    outNames.add(chunkName)
+                    onLog("  ✅ [${partNum}/${total}] $chunkName (保存完了)")
+                    prevTranslatedSummary = chunkTranslatedText.lines().takeLast(20).joinToString("\n")
+
+                    onChunkProgress(partNum, total)
+                } else {
+                    onLog("❌ $chunkName : チャンク保存失敗 → 作業保持して次回再試行")
+                    return false
                 }
-                onLog("  ✅ [${partNum}/${total}] $chunkName (保存完了)")
-                prevTranslatedSummary = chunkTranslatedText.lines().takeLast(20).joinToString("\n")
             } else {
                 // 中断された場合は .failed を作成せず、作業状態を保持して次回再開できるようにする
                 if (isStopRequested() || !currentCoroutineContext().isActive) {
                     onLog("🛑 $chunkName : 停止要求により中断 (中間状態保持)")
                     return false
                 }
-                val failedChunk = outDir.createFile("text/plain", "$chunkName.failed")
-                if (failedChunk != null) {
-                    writeDocContent(context, failedChunk, chunkText)
+                val failedChunk = outDir.findFile("$chunkName.failed") ?: outDir.createFile("text/plain", "$chunkName.failed")
+                if (failedChunk != null && writeDocContent(context, failedChunk, chunkText)) {
+                    outNames.add("$chunkName.failed")
                 }
                 onLog("❌ $chunkName : 全ドライバー失敗 → $chunkName.failed を保存して停止")
                 return false
@@ -295,10 +286,11 @@ object LargeFileTranslator {
             return false
         }
 
-        // 全チャンク揃ったか確認
+        // 全チャンク揃ったか確認 (SAF IPC連打を防ぐためマップ化)
+        val outDocMap = outDir.listFiles().associateBy { it.name }
         val allDone = chunkDocs.all { doc ->
             val cName = doc.name ?: return@all false
-            val cOut = outDir.findFile(cName)
+            val cOut = outDocMap[cName]
             cOut != null && (readDocContent(context, cOut)?.isNotBlank() == true)
         }
 
@@ -311,7 +303,7 @@ object LargeFileTranslator {
         val combinedSb = StringBuilder()
         for (doc in chunkDocs) {
             val cName = doc.name ?: continue
-            val cOut = outDir.findFile(cName) ?: continue
+            val cOut = outDocMap[cName] ?: continue
             val text = readDocContent(context, cOut) ?: continue
             if (combinedSb.isNotEmpty()) {
                 // チャンク境界の余分な空行増殖を防止: 前のテキスト末尾の改行と重複しないよう調整
@@ -323,13 +315,29 @@ object LargeFileTranslator {
 
         val finalOutFile = outputDir.findFile(fileName) ?: outputDir.createFile("text/plain", fileName)
         if (finalOutFile != null) {
-            writeDocContent(context, finalOutFile, combinedSb.toString())
-            onLog("✨ $fileName : 全 ${total} チャンクの分割結合完了")
-            workDir.delete()
-            return true
+            if (writeDocContent(context, finalOutFile, combinedSb.toString())) {
+                onLog("✨ $fileName : 全 ${total} チャンクの分割結合完了")
+                deleteDirectoryRecursively(workDir)
+                return true
+            }
+            onLog("❌ $fileName : 結合結果の保存失敗 → チャンクデータを保全して終了")
+            return false
         }
 
         return false
+    }
+
+    private fun deleteDirectoryRecursively(dir: DocumentFile) {
+        try {
+            dir.listFiles().forEach { child ->
+                if (child.isDirectory) {
+                    deleteDirectoryRecursively(child)
+                } else {
+                    child.delete()
+                }
+            }
+            dir.delete()
+        } catch (_: Exception) {}
     }
 
     private fun readDocContent(context: Context, doc: DocumentFile): String? {
@@ -344,8 +352,9 @@ object LargeFileTranslator {
 
     private fun writeDocContent(context: Context, doc: DocumentFile, content: String): Boolean {
         return try {
-            context.contentResolver.openOutputStream(doc.uri, "wt")?.use { stream ->
-                stream.write(content.toByteArray(Charsets.UTF_8))
+            val stream = context.contentResolver.openOutputStream(doc.uri, "wt") ?: return false
+            stream.use { s ->
+                s.write(content.toByteArray(Charsets.UTF_8))
             }
             true
         } catch (e: Exception) {

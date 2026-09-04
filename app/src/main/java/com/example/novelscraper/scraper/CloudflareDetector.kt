@@ -1,4 +1,6 @@
-package com.example.novelscraper
+package com.example.novelscraper.scraper
+
+import com.example.novelscraper.WebViewHelper
 
 /**
  * Cloudflare / Turnstile 検出・生体模倣ロジックを集約。

@@ -61,9 +61,9 @@ object GeminiApiClient {
                 .build()
 
             val call = LlmApiClient.httpClient.newCall(request)
-            val response = call.awaitResponse()
-            val code = response.code
-            val bodyString = response.body?.string() ?: ""
+            val (code, bodyString) = call.awaitResponse().use { response ->
+                response.code to (response.body?.string() ?: "")
+            }
 
             when (code) {
                 200 -> {

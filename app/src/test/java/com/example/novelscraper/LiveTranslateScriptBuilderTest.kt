@@ -1,5 +1,6 @@
 package com.example.novelscraper
 
+import com.example.novelscraper.translation.web.*
 import org.junit.Assert.assertTrue
 import org.junit.Test
 

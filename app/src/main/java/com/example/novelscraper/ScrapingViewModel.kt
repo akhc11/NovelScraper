@@ -5,6 +5,8 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.novelscraper.scraper.*
+import com.example.novelscraper.translation.web.*
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*

@@ -21,7 +21,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.novelscraper.HistoryItem
-import com.example.novelscraper.ScrapingTask
+import com.example.novelscraper.scraper.ScrapingTask
 import com.example.novelscraper.ui.theme.AppColors
 
 @Composable

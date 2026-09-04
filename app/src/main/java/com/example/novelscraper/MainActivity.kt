@@ -22,6 +22,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.example.novelscraper.scraper.*
+import com.example.novelscraper.translation.web.*
 import com.example.novelscraper.ui.MainScreen
 import com.example.novelscraper.ui.MainScreenCallbacks
 import com.example.novelscraper.ui.theme.NovelScraperTheme

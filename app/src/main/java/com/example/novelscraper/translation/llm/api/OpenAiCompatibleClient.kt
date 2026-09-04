@@ -33,18 +33,7 @@ object OpenAiCompatibleClient {
                 )
             } else null
 
-            val reasoning = when {
-                reasoningEnabled != null -> {
-                    LlmApiClient.json.parseToJsonElement("""{"enabled":$reasoningEnabled}""")
-                }
-                reasoningEffort != null && reasoningEffort != "none" && !model.startsWith("qwen/") -> {
-                    LlmApiClient.json.parseToJsonElement("""{"effort":"$reasoningEffort"}""")
-                }
-                else -> null
-            }
-
-            // Groqのqwen系はトップレベルに reasoning_effort: "none" を送る仕様
-            val finalReasoningEffort = if (model.startsWith("qwen/")) "none" else reasoningEffort
+            val (reasoning, finalReasoningEffort) = reasoningPayload(model, reasoningEffort, reasoningEnabled)
 
             val reqBodyObj = OpenAiChatRequest(
                 model = model,
@@ -73,9 +62,9 @@ object OpenAiCompatibleClient {
                 .build()
 
             val call = LlmApiClient.httpClient.newCall(request)
-            val response = call.awaitResponse()
-            val code = response.code
-            val bodyString = response.body?.string() ?: ""
+            val (code, bodyString) = call.awaitResponse().use { response ->
+                response.code to (response.body?.string() ?: "")
+            }
 
             when (code) {
                 200 -> {
@@ -118,5 +107,29 @@ object OpenAiCompatibleClient {
                 message = "通信例外: ${e.message ?: e.javaClass.simpleName}"
             )
         }
+    }
+
+    /**
+     * モデル別の推論パラメータ組立。
+     * Groqのqwen系はトップレベルに reasoning_effort: "none" を送る仕様のため、
+     * ベンダー分岐はこの関数内に隔離し、呼び出し側に漏らさない。
+     * @return reasoning JSON とトップレベル reasoning_effort のペア
+     */
+    fun reasoningPayload(
+        model: String,
+        reasoningEffort: String?,
+        reasoningEnabled: Boolean?
+    ): Pair<kotlinx.serialization.json.JsonElement?, String?> {
+        val reasoning = when {
+            reasoningEnabled != null -> {
+                LlmApiClient.json.parseToJsonElement("""{"enabled":$reasoningEnabled}""")
+            }
+            reasoningEffort != null && reasoningEffort != "none" && !model.startsWith("qwen/") -> {
+                LlmApiClient.json.parseToJsonElement("""{"effort":"$reasoningEffort"}""")
+            }
+            else -> null
+        }
+        val finalReasoningEffort = if (model.startsWith("qwen/")) "none" else reasoningEffort
+        return reasoning to finalReasoningEffort
     }
 }

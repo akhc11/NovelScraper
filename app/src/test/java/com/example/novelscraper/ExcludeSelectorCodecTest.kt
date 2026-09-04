@@ -1,5 +1,6 @@
 package com.example.novelscraper
 
+import com.example.novelscraper.scraper.*
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

@@ -1,4 +1,4 @@
-package com.example.novelscraper
+package com.example.novelscraper.scraper
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString

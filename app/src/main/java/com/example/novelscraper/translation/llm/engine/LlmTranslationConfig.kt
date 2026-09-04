@@ -178,7 +178,7 @@ data class LlmTranslationConfig(
 
     val parallelWorkers: Int = 3, // 本文翻訳並列ワーカー数 (1〜6)
     val filesPerFolder: Int = 0,   // 0=無制限, >0=フォルダあたり上限
-    val requestDelaySec: Int = 30,
+    val requestDelaySec: Int = 10,
 
     // 言語連動プロンプト自動選択 (成人向け等の手動選択を保護するためデフォルトOFF)
     val enableAutoPromptOrder: Boolean = false,

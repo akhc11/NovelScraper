@@ -15,8 +15,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -53,7 +58,8 @@ fun HeaderToolbar(
     onToggleDarkModeClick: () -> Unit = {},
     onToggleLiveTranslateClick: () -> Unit = {},
     onStartScrapingClick: () -> Unit = {},
-    onTestRunClick: () -> Unit = {}
+    onTestRunClick: () -> Unit = {},
+    onSearchTextQueryClick: () -> Unit = {}
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
@@ -211,6 +217,23 @@ fun HeaderToolbar(
                         )
 
                         HorizontalDivider(color = Color.DarkGray)
+
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "テキストから要素を検索",
+                                    color = AppColors.accentTealLight,
+                                    fontSize = 13.sp
+                                )
+                            },
+                            onClick = {
+                                onSearchTextQueryClick()
+                                menuExpanded = false
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Search, contentDescription = null, tint = AppColors.accentTealLight, modifier = Modifier.size(18.dp))
+                            }
+                        )
 
                         DropdownMenuItem(
                             text = {

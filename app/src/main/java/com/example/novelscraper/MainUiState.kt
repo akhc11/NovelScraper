@@ -29,6 +29,7 @@ sealed interface ActiveDialog {
     data class SavePreset(val defaultName: String, val currentUrl: String) : ActiveDialog
     data class InspectElement(val selector: String) : ActiveDialog
     data object LlmSettings : ActiveDialog
+    data object TextQuerySearch : ActiveDialog
 }
 
 /**
@@ -39,7 +40,7 @@ sealed interface UiEvent {
     data class NavigateToUrl(val url: String) : UiEvent
 }
 
-enum class TranslationEngine { GOOGLE, DEEPL, LLM_API }
+enum class TranslationEngine { GOOGLE, DEEPL, PAPAGO, LLM_API }
 
 @Serializable
 data class ExcludeCandidate(
@@ -95,11 +96,14 @@ data class MainUiState(
     // Webサイト即時翻訳 (インプレースDOM翻訳) 状態
     val isLiveTranslating: Boolean = false,
     val isLiveTranslated: Boolean = false,
+    val isWebSplitEnabled: Boolean = false,
+    val webSplitSizeChars: Int = 8000,
     
     // 翻訳関連の状態（エンジンごとに独立管理）
     val activeTranslationEngine: TranslationEngine = TranslationEngine.GOOGLE,
     val googleTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "1-3", fileDelay = "1-2"),
     val deeplTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "3-8", fileDelay = "2-5"),
+    val papagoTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "3-8", fileDelay = "2-5", sourceLang = "ko"),
     val llmTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "2", fileDelay = "2"),
     val llmEngineLiveState: LlmEngineState = LlmEngineState()
 ) {
@@ -113,9 +117,10 @@ data class MainUiState(
         get() = when (activeTranslationEngine) {
             TranslationEngine.GOOGLE -> googleTranslationState
             TranslationEngine.DEEPL -> deeplTranslationState
+            TranslationEngine.PAPAGO -> papagoTranslationState
             TranslationEngine.LLM_API -> llmTranslationState
         }
 
     val isAnyTranslating: Boolean
-        get() = googleTranslationState.isTranslating || deeplTranslationState.isTranslating || llmEngineLiveState.isTranslating
+        get() = googleTranslationState.isTranslating || deeplTranslationState.isTranslating || papagoTranslationState.isTranslating || llmEngineLiveState.isTranslating
 }

@@ -1,5 +1,8 @@
 package com.example.novelscraper
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -32,6 +35,7 @@ import kotlinx.serialization.json.Json
 class NovelScraperBridge(
     private val onInspect: (String) -> Unit,
     private val onApply: (String, String) -> Unit,
+    private val onCopy: (String) -> Unit,
     private val onRemove: (String) -> Unit,
     private val onStatusUpdate: (String) -> Unit
 ) {
@@ -43,6 +47,11 @@ class NovelScraperBridge(
     @JavascriptInterface
     fun onApplyCandidate(target: String, selector: String) {
         onApply(target, selector)
+    }
+
+    @JavascriptInterface
+    fun onCopySelector(selector: String) {
+        onCopy(selector)
     }
 
     @JavascriptInterface
@@ -177,8 +186,11 @@ class MainActivity : ComponentActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.presets.collect { presets ->
                     if (viewModel.uiState.value.currentPresetName.isEmpty() && presets.containsKey("初期設定(小説家になろう)")) {
-                        presets["初期設定(小説家になろう)"]?.let {
-                            viewModel.applyPresetState("初期設定(小説家になろう)", it)
+                        // 既に手動で設定が入力されている場合は初期設定で上書きしない
+                        if (viewModel.uiState.value.currentConfig == ScraperConfig()) {
+                            presets["初期設定(小説家になろう)"]?.let {
+                                viewModel.applyPresetState("初期設定(小説家になろう)", it)
+                            }
                         }
                     }
                 }
@@ -205,11 +217,34 @@ class MainActivity : ComponentActivity() {
                 mainHandler.post {
                     if (!isFinishing && !isDestroyed) {
                         try {
-                            val field = SelectorField.valueOf(target.uppercase())
+                            val field = when (target.lowercase().trim()) {
+                                "body" -> SelectorField.BODY
+                                "title" -> SelectorField.TITLE
+                                "next" -> SelectorField.NEXT
+                                "folder" -> SelectorField.FOLDER
+                                "folder_link", "folderlink" -> SelectorField.FOLDER_LINK
+                                "chapter" -> SelectorField.CHAPTER
+                                "exclude" -> SelectorField.EXCLUDE
+                                else -> SelectorField.valueOf(target.uppercase().trim())
+                            }
                             viewModel.applySelectorToConfig(field, selector)
                             Toast.makeText(this@MainActivity, "${field.displayName}に反映しました", Toast.LENGTH_SHORT).show()
                         } catch (e: Exception) {
                             Toast.makeText(this@MainActivity, "適用失敗: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            },
+            onCopy = { selector ->
+                mainHandler.post {
+                    if (!isFinishing && !isDestroyed) {
+                        try {
+                            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("CSS Selector", selector)
+                            clipboard.setPrimaryClip(clip)
+                            Toast.makeText(this@MainActivity, "セレクタをコピーしました", Toast.LENGTH_SHORT).show()
+                        } catch (e: Exception) {
+                            Toast.makeText(this@MainActivity, "コピー失敗: ${e.message}", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }

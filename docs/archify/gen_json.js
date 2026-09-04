@@ -1,0 +1,101 @@
+﻿const fs = require('fs');
+const spec = {
+  schema_version: 2,
+  diagram_type: 'workflow',
+  meta: {
+    title: 'LLM Translation Engine Pipeline',
+    animation: 'trace',
+    visual_preset: 'signal-flow',
+    quality_profile: 'showcase',
+    views: [
+      {
+        id: 'batch-path',
+        label: 'Batch translation',
+        focus: ['raw_folder', 'prep_pipe', 'orchestrator', 'claim_manager', 'batch_translator', 'llm_cloud', 'quality_validator', 'storage'],
+        note: 'Standard high-throughput batch translation flow for small chapter files.'
+      },
+      {
+        id: 'chunk-path',
+        label: 'Large file chunking',
+        focus: ['claim_manager', 'chunk_translator', 'llm_cloud', 'quality_validator', 'storage'],
+        note: 'Split and sequential chunk translation for huge novel files.'
+      },
+      {
+        id: 'resilience-path',
+        label: 'Key management',
+        focus: ['orchestrator', 'rotation_manager', 'llm_cloud'],
+        note: '1 worker 1 exclusive key allocation and 429 quota handling.'
+      }
+    ]
+  },
+  lanes: [
+    { id: 'input_lane', label: 'Input & Prep' },
+    { id: 'engine_lane', label: 'Orchestrator & Key Pool' },
+    { id: 'exec_lane', label: 'Pipeline Execution' },
+    { id: 'cloud_lane', label: 'LLM Cloud Service' },
+    { id: 'save_lane', label: 'Validation & Output' }
+  ],
+  phases: [
+    { id: 'intake', label: 'Preprocessing', fromCol: 0, toCol: 1 },
+    { id: 'dispatch', label: 'Worker Dispatch', fromCol: 2, toCol: 3, variant: 'emphasis' },
+    { id: 'inference', label: 'Translation & Output', fromCol: 4, toCol: 5, variant: 'dashed' }
+  ],
+  mainPath: [
+    'raw_folder',
+    'prep_pipe',
+    'orchestrator',
+    'claim_manager',
+    'batch_translator',
+    'llm_cloud',
+    'quality_validator',
+    'storage'
+  ],
+  nodes: [
+    { id: 'raw_folder', lane: 'input_lane', col: 0, type: 'external', label: 'Raw Novel Folder', sublabel: 'DocumentFile SAF', width: 140 },
+    { id: 'prep_pipe', lane: 'input_lane', col: 1, type: 'frontend', label: 'Charset & Cleanse', sublabel: 'UTF8/GBK/EUC-KR', width: 140 },
+    { id: 'dict_gen', lane: 'input_lane', col: 2, type: 'database', label: 'Novel Dictionary', sublabel: 'Named Entity Cache', tag: 'optional', width: 140 },
+    { id: 'orchestrator', lane: 'engine_lane', col: 2, type: 'backend', label: 'LlmTranslationEngine', sublabel: '1-6 Workers Pool', tag: 'core', width: 140 },
+    { id: 'rotation_manager', lane: 'engine_lane', col: 1, type: 'security', label: 'ApiKeyPoolManager', sublabel: '1 Worker 1 Key / 429', tag: 'resilience', width: 140 },
+    { id: 'claim_manager', lane: 'engine_lane', col: 3, type: 'messagebus', label: 'FileClaimManager', sublabel: 'Exclusive Claiming', width: 140 },
+    { id: 'batch_translator', lane: 'exec_lane', col: 3, type: 'messagebus', label: 'BatchTranslator', sublabel: 'Up to 10 Chapters', tag: 'high throughput', width: 140 },
+    { id: 'chunk_translator', lane: 'exec_lane', col: 4, type: 'backend', label: 'LargeFileTranslator', sublabel: '.parts_ Chunks', width: 140 },
+    { id: 'llm_cloud', lane: 'cloud_lane', col: 4, type: 'cloud', label: 'LLM API Service', sublabel: 'Gemini / OpenRouter', width: 140 },
+    { id: 'quality_validator', lane: 'save_lane', col: 4, type: 'security', label: 'Quality Validator', sublabel: 'Marker & Line Checks', tag: 'gate', width: 140 },
+    { id: 'storage', lane: 'save_lane', col: 5, type: 'database', label: 'Saved Novels', sublabel: 'Output Subdirectory', width: 140 }
+  ],
+  edges: [
+    { id: 'e_raw_prep', from: 'raw_folder', to: 'prep_pipe', variant: 'default' },
+    { id: 'e_prep_dict', from: 'prep_pipe', to: 'dict_gen', label: 'sample', variant: 'dashed' },
+    { id: 'e_prep_orch', from: 'prep_pipe', to: 'orchestrator', variant: 'emphasis' },
+    { id: 'e_dict_orch', from: 'dict_gen', to: 'orchestrator', label: 'inject glossary', variant: 'dashed' },
+    { id: 'e_orch_rot', from: 'orchestrator', to: 'rotation_manager', label: 'claim key', variant: 'security' },
+    { id: 'e_orch_claim', from: 'orchestrator', to: 'claim_manager', variant: 'default' },
+    { id: 'e_claim_batch', from: 'claim_manager', to: 'batch_translator', label: 'small files', variant: 'emphasis' },
+    { id: 'e_claim_chunk', from: 'claim_manager', to: 'chunk_translator', label: 'large file', variant: 'default' },
+    { id: 'e_batch_chunk_fb', from: 'batch_translator', to: 'chunk_translator', label: 'fallback', variant: 'dashed' },
+    { id: 'e_batch_llm', from: 'batch_translator', to: 'llm_cloud', label: 'batch request', variant: 'default' },
+    { id: 'e_chunk_llm', from: 'chunk_translator', to: 'llm_cloud', label: 'chunk request', variant: 'default' },
+    { id: 'e_llm_val', from: 'llm_cloud', to: 'quality_validator', variant: 'emphasis' },
+    { id: 'e_val_store', from: 'quality_validator', to: 'storage', label: 'verified', variant: 'emphasis' }
+  ],
+  cards: [
+    {
+      dot: 'cyan',
+      title: 'Dual-Track Execution',
+      items: [
+        'Small files (<= 32-49KB) are bundled up to 10 chapters in one call',
+        'Large files (> threshold) are split at paragraph boundaries into .parts'
+      ]
+    },
+    {
+      dot: 'emerald',
+      title: 'Robustness Guarantees',
+      items: [
+        '1 worker 1 exclusive API key prevents intra-pool 429 collisions',
+        '5-layer validator rejects preambles, truncated tokens, and corrupted text'
+      ]
+    }
+  ]
+};
+fs.writeFileSync('docs/archify/llm-translation.workflow.json', JSON.stringify(spec, null, 2), 'utf8');
+console.log('JSON updated');

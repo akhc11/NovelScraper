@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper
+package com.example.novelscraper
 
 import android.app.Application
 import android.net.Uri
@@ -37,6 +37,10 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     private val _currentStatusText = MutableStateFlow("待機中")
     val currentStatusText: StateFlow<String> = _currentStatusText.asStateFlow()
 
+    // autoUrl の自動適用管理（同一サイト巡回中や検索・ホーム離脱時に、ユーザーの手動編集設定が勝手に上書きされるのを防止）
+    private var lastAppliedAutoUrlDomain: String = ""
+    private var isConfigManuallyEdited: Boolean = false
+
     // 翻訳キューマネージャー
     val translationManager = TranslationQueueManager(application, viewModelScope, repository)
 
@@ -73,6 +77,11 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             }
         }
         viewModelScope.launch {
+            translationManager.papagoState.collect { ps ->
+                _uiState.update { it.copy(papagoTranslationState = ps) }
+            }
+        }
+        viewModelScope.launch {
             translationManager.llmState.collect { ls ->
                 _uiState.update { it.copy(llmTranslationState = ls) }
             }
@@ -81,6 +90,16 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             translationManager.llmEngine.engineState.collect { live ->
                 _uiState.update { it.copy(llmEngineLiveState = live) }
                 syncServiceStatus()
+            }
+        }
+        viewModelScope.launch {
+            translationManager.isWebSplitEnabled.collect { enabled ->
+                _uiState.update { it.copy(isWebSplitEnabled = enabled) }
+            }
+        }
+        viewModelScope.launch {
+            translationManager.webSplitSizeChars.collect { sizeChars ->
+                _uiState.update { it.copy(webSplitSizeChars = sizeChars) }
             }
         }
         translationManager.onActivityChanged = { syncServiceStatus() }
@@ -125,6 +144,10 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     fun showLlmSettingsDialog() {
         _uiState.update { it.copy(activeDialog = ActiveDialog.LlmSettings) }
+    }
+
+    fun showTextQuerySearchDialog() {
+        _uiState.update { it.copy(activeDialog = ActiveDialog.TextQuerySearch) }
     }
 
     fun dismissDialog() {
@@ -199,6 +222,8 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     fun updateStatus() { refreshStatus() }
 
     fun savePreset(name: String, config: ScraperConfig) {
+        lastAppliedAutoUrlDomain = config.autoUrl
+        isConfigManuallyEdited = false
         viewModelScope.launch { repository.updatePresets { it[name] = config } }
     }
 
@@ -206,6 +231,8 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             repository.updatePresets { it.remove(name) }
             if (_uiState.value.currentPresetName == name) {
+                lastAppliedAutoUrlDomain = ""
+                isConfigManuallyEdited = false
                 _uiState.update { it.copy(currentPresetName = "", currentConfig = ScraperConfig()) }
             }
         }
@@ -257,12 +284,31 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         }
         viewModelScope.launch {
             val presetsMap = _presets.value
+            var matchedPreset: Pair<String, ScraperConfig>? = null
             for ((name, config) in presetsMap) {
                 if (config.autoUrl.isNotEmpty() && url.contains(config.autoUrl)) {
-                    _uiState.update { it.copy(currentPresetName = name, currentConfig = config) }
+                    matchedPreset = Pair(name, config)
                     break
                 }
             }
+
+            if (matchedPreset != null) {
+                val (name, config) = matchedPreset
+                // 1. 全く異なる小説サイト（別autoUrlドメイン）へ移動した時のみ、そのサイトのプリセットを自動適用
+                if (lastAppliedAutoUrlDomain != config.autoUrl) {
+                    lastAppliedAutoUrlDomain = config.autoUrl
+                    isConfigManuallyEdited = false
+                    _uiState.update { it.copy(currentPresetName = name, currentConfig = config) }
+                } else {
+                    // 2. 同一サイト内の巡回中:
+                    // ユーザーが手動編集していない場合のみ、万が一未適用の初期プリセットがあれば同期
+                    if (!isConfigManuallyEdited && _uiState.value.currentPresetName != name) {
+                        _uiState.update { it.copy(currentPresetName = name, currentConfig = config) }
+                    }
+                }
+            }
+            // 3. マッチするプリセットがない場合（ホーム画面・Google検索などへの一時的移動）:
+            // lastAppliedAutoUrlDomain や currentConfig、手動編集状態は一切リセットせず100%保護する
         }
     }
 
@@ -306,18 +352,25 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     fun applyPreset(name: String) {
         val config = _presets.value[name] ?: return
+        lastAppliedAutoUrlDomain = config.autoUrl
+        isConfigManuallyEdited = false
         _uiState.update { it.copy(currentPresetName = name, currentConfig = config) }
     }
 
     fun applyPresetState(name: String, config: ScraperConfig) {
+        lastAppliedAutoUrlDomain = config.autoUrl
+        isConfigManuallyEdited = false
         _uiState.update { it.copy(currentPresetName = name, currentConfig = config) }
     }
 
     fun clearPreset() {
+        lastAppliedAutoUrlDomain = ""
+        isConfigManuallyEdited = false
         _uiState.update { it.copy(currentPresetName = "", currentConfig = ScraperConfig()) }
     }
 
     fun updateCurrentConfig(transform: (ScraperConfig) -> ScraperConfig) {
+        isConfigManuallyEdited = true
         _uiState.update {
             val newConfig = transform(it.currentConfig)
             val updatedPresetName = if (it.currentPresetName.isNotEmpty()) {
@@ -329,6 +382,8 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun selectPresetFromList(name: String, config: ScraperConfig) {
+        lastAppliedAutoUrlDomain = config.autoUrl
+        isConfigManuallyEdited = false
         _uiState.update {
             it.copy(
                 currentPresetName = name,
@@ -350,6 +405,8 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     fun selectHistory(item: HistoryItem) {
         val targetUrl = item.nextUrl.ifEmpty { item.url }
+        lastAppliedAutoUrlDomain = item.config.autoUrl
+        isConfigManuallyEdited = false
         _uiState.update {
             it.copy(
                 inputUrl = targetUrl,
@@ -380,6 +437,14 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         translationManager.clearFolders(engine)
     }
 
+    fun toggleWebSplit(enabled: Boolean) {
+        translationManager.toggleWebSplit(enabled)
+    }
+
+    fun updateWebSplitSizeChars(sizeChars: Int) {
+        translationManager.updateWebSplitSizeChars(sizeChars)
+    }
+
     fun updateTranslationDelays(engine: TranslationEngine, chunkDelay: String, fileDelay: String) {
         translationManager.updateDelays(engine, chunkDelay, fileDelay)
     }
@@ -406,8 +471,9 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         val scrapingCount = taskList.size
         val googleState = translationManager.googleState.value
         val deeplState = translationManager.deeplState.value
+        val papagoState = translationManager.papagoState.value
         val llmState = translationManager.llmEngine.engineState.value
-        val isTranslating = googleState.isTranslating || deeplState.isTranslating || llmState.isTranslating
+        val isTranslating = googleState.isTranslating || deeplState.isTranslating || papagoState.isTranslating || llmState.isTranslating
 
         if (scrapingCount > 0 || isTranslating) {
             val statusParts = mutableListOf<String>()
@@ -421,6 +487,10 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             if (deeplState.isTranslating) {
                 val dPrefix = if (deeplState.selectedFolders.size > 1) "[${deeplState.currentFolderIndex + 1}/${deeplState.selectedFolders.size}] " else ""
                 statusParts.add("DeepL: ${dPrefix}${deeplState.progress.first}/${deeplState.progress.second}件")
+            }
+            if (papagoState.isTranslating) {
+                val pPrefix = if (papagoState.selectedFolders.size > 1) "[${papagoState.currentFolderIndex + 1}/${papagoState.selectedFolders.size}] " else ""
+                statusParts.add("Papago: ${pPrefix}${papagoState.progress.first}/${papagoState.progress.second}件")
             }
             if (llmState.isTranslating) {
                 statusParts.add("LLM: ${llmState.progress.first}/${llmState.progress.second}件")
@@ -437,6 +507,17 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun startScraping(targetUrl: String, initialFolderName: String = "(取得中...)") {
+        val isAlreadyRunning = taskList.any { task ->
+            task.isRunning && (
+                task.currentUrl == targetUrl ||
+                (initialFolderName.isNotEmpty() && initialFolderName != "(取得中...)" && task.folderName == initialFolderName)
+            )
+        }
+        if (isAlreadyRunning) {
+            Toast.makeText(getApplication(), "既にスクレイピング実行中です", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         WebViewHelper.clearGoogleTranslateCookies(targetUrl)
         val config = uiState.value.currentConfig
         val newTask = ScrapingTask(
@@ -453,7 +534,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                     removeTask(task)
                 }
                 override fun onSaveResult(folderName: String, title: String, content: String, chapterNum: String) {
-                    viewModelScope.launch(Dispatchers.IO) {
+                    viewModelScope.launch {
                         val success = fileRepository.saveChapter(folderName, title, content, chapterNum)
                         if (!success) {
                             Toast.makeText(getApplication(), "ファイル保存に失敗しました: $title ($chapterNum)", Toast.LENGTH_SHORT).show()

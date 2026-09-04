@@ -2,19 +2,24 @@ package com.example.novelscraper
 
 import android.content.Context
 import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
+import com.example.novelscraper.translation.common.NovelPhysicalSplitter
 import com.example.novelscraper.translation.llm.engine.LlmEngineState
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.llm.engine.LlmTranslationEngine
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Google/DeepL/LLM(AI) 翻訳キューの実行管理（ScrapingViewModel から分離）。
+ * Google/DeepL/Papago/LLM(AI) 翻訳キューの実行管理（ScrapingViewModel から分離）。
  */
 class TranslationQueueManager(
     private val appContext: Context,
@@ -34,9 +39,13 @@ class TranslationQueueManager(
     @Volatile
     private var deeplTask: BaseWebTranslationTask? = null
     @Volatile
+    private var papagoTask: BaseWebTranslationTask? = null
+    @Volatile
     private var googleSessionId: Long = 0L
     @Volatile
     private var deeplSessionId: Long = 0L
+    @Volatile
+    private var papagoSessionId: Long = 0L
 
     val llmEngine: LlmTranslationEngine = LlmTranslationEngine(appContext, scope)
 
@@ -48,10 +57,21 @@ class TranslationQueueManager(
     )
     val deeplState: StateFlow<EngineTranslationState> = _deeplState.asStateFlow()
 
+    private val _papagoState = MutableStateFlow(
+        EngineTranslationState(chunkDelay = "3-8", fileDelay = "2-5", sourceLang = "ko")
+    )
+    val papagoState: StateFlow<EngineTranslationState> = _papagoState.asStateFlow()
+
     private val _llmState = MutableStateFlow(
         EngineTranslationState(chunkDelay = "2", fileDelay = "2")
     )
     val llmState: StateFlow<EngineTranslationState> = _llmState.asStateFlow()
+
+    val isWebSplitEnabled: StateFlow<Boolean> = repository.isWebSplitEnabledFlow
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
+    val webSplitSizeChars: StateFlow<Int> = repository.webSplitSizeCharsFlow
+        .stateIn(scope, SharingStarted.Eagerly, 8000)
 
     init {
         // 待機時間設定の購読（DataStore の保存値を常に反映）
@@ -66,6 +86,12 @@ class TranslationQueueManager(
         }
         scope.launch {
             repository.deeplFileDelayFlow.collect { d -> _deeplState.update { it.copy(fileDelay = d) } }
+        }
+        scope.launch {
+            repository.papagoChunkDelayFlow.collect { d -> _papagoState.update { it.copy(chunkDelay = d) } }
+        }
+        scope.launch {
+            repository.papagoFileDelayFlow.collect { d -> _papagoState.update { it.copy(fileDelay = d) } }
         }
 
         // LLMエンジンの内部ライブ状態を購読して同期
@@ -85,13 +111,26 @@ class TranslationQueueManager(
         }
     }
 
-    // ---- キュー操作 ----
+    // ---- 設定・キュー操作 ----
+
+    fun toggleWebSplit(enabled: Boolean) {
+        scope.launch {
+            repository.saveWebSplitEnabled(enabled)
+        }
+    }
+
+    fun updateWebSplitSizeChars(sizeChars: Int) {
+        scope.launch {
+            repository.saveWebSplitSizeChars(sizeChars)
+        }
+    }
 
     fun updateDelays(engine: TranslationEngine, chunkDelay: String, fileDelay: String) {
         scope.launch {
             when (engine) {
                 TranslationEngine.GOOGLE -> repository.saveGoogleDelays(chunkDelay, fileDelay)
                 TranslationEngine.DEEPL -> repository.saveDeeplDelays(chunkDelay, fileDelay)
+                TranslationEngine.PAPAGO -> repository.savePapagoDelays(chunkDelay, fileDelay)
                 TranslationEngine.LLM_API -> {}
             }
             mutate(engine) { it.copy(chunkDelay = chunkDelay, fileDelay = fileDelay) }
@@ -159,56 +198,175 @@ class TranslationQueueManager(
         if (engineState.isTranslating) return
 
         val currentSessionId = synchronized(taskLock) {
-            if (engine == TranslationEngine.GOOGLE) {
-                ++googleSessionId
-            } else {
-                ++deeplSessionId
+            when (engine) {
+                TranslationEngine.GOOGLE -> ++googleSessionId
+                TranslationEngine.DEEPL -> ++deeplSessionId
+                TranslationEngine.PAPAGO -> ++papagoSessionId
+                TranslationEngine.LLM_API -> 0L
             }
         }
 
-        startNextFolderInQueue(engine, 0, currentSessionId)
+        // 物理分割およびキュー実行を IO スレッドで非同期実行（UIスレッド完全解放・ANR防止）
+        scope.launch(Dispatchers.IO) {
+            val foldersToProcess = engineState.selectedFolders.ifEmpty {
+                engineState.folderUri?.let { listOf(FolderItem(path = it.path ?: "", name = engineState.folderName, uri = it)) } ?: emptyList()
+            }
+
+            // オンデマンド分割の準備: フォルダ直下に生テキストファイルがある場合、ファイル単位のキュー項目として即座に展開 (中身の分割はここでは行わないため 0.05秒で完了)
+            if (isWebSplitEnabled.value) {
+                val newFolderList = mutableListOf<FolderItem>()
+                var foundRawText = false
+
+                for (f in foldersToProcess) {
+                    if (currentSessionId != getActiveSessionId(engine)) return@launch
+                    val fUri = f.uri ?: continue
+                    val doc = resolveDocument(fUri) ?: continue
+                    if (doc.isDirectory) {
+                        val rawFiles = doc.listFiles().filter {
+                            it.isFile && it.name?.endsWith(".txt", ignoreCase = true) == true &&
+                                    it.name?.startsWith("part_", ignoreCase = true) != true
+                        }.sortedBy { it.name }
+
+                        if (rawFiles.isNotEmpty()) {
+                            foundRawText = true
+                            for (rawFile in rawFiles) {
+                                val novelName = rawFile.name?.replace(Regex("""\.[tT][xX][tT]$"""), "") ?: "小説"
+                                newFolderList.add(
+                                    FolderItem(
+                                        path = doc.uri.toString(), // 親フォルダのURI (分割済み出力先用)
+                                        name = novelName,
+                                        uri = rawFile.uri // 生テキストファイルのURI
+                                    )
+                                )
+                            }
+                        } else {
+                            newFolderList.add(f)
+                        }
+                    } else {
+                        newFolderList.add(f)
+                    }
+                }
+
+                if (currentSessionId != getActiveSessionId(engine)) return@launch
+
+                if (foundRawText && newFolderList.isNotEmpty()) {
+                    mutate(engine) {
+                        it.copy(
+                            selectedFolders = newFolderList,
+                            folderUri = newFolderList.first().uri,
+                            folderName = displayName(newFolderList)
+                        )
+                    }
+                    notifyChanged()
+                }
+            }
+
+            if (currentSessionId != getActiveSessionId(engine)) return@launch
+            startNextFolderInQueue(engine, 0, currentSessionId)
+        }
+    }
+
+    private fun resolveDocument(uri: Uri): DocumentFile? {
+        return if (uri.scheme == "file") {
+            val file = File(uri.path ?: return null)
+            if (file.exists()) DocumentFile.fromFile(file) else null
+        } else {
+            DocumentFile.fromTreeUri(appContext, uri) ?: DocumentFile.fromSingleUri(appContext, uri)
+        }
+    }
+
+    private fun getActiveSessionId(engine: TranslationEngine): Long = synchronized(taskLock) {
+        when (engine) {
+            TranslationEngine.GOOGLE -> googleSessionId
+            TranslationEngine.DEEPL -> deeplSessionId
+            TranslationEngine.PAPAGO -> papagoSessionId
+            TranslationEngine.LLM_API -> 0L
+        }
     }
 
     private fun startNextFolderInQueue(engine: TranslationEngine, folderIndex: Int, sessionId: Long) {
-        synchronized(taskLock) {
-            val activeSessionId = if (engine == TranslationEngine.GOOGLE) googleSessionId else deeplSessionId
-            if (sessionId != activeSessionId) return
-        }
+        scope.launch(Dispatchers.IO) {
+            if (sessionId != getActiveSessionId(engine)) return@launch
 
-        val engineState = stateFor(engine)
+            val engineState = stateFor(engine)
 
-        val folders = engineState.selectedFolders.ifEmpty {
-            if (engineState.folderUri != null) {
-                listOf(FolderItem(path = engineState.folderUri.path ?: "", name = engineState.folderName, uri = engineState.folderUri))
-            } else emptyList()
-        }
-
-        if (folders.isEmpty() || folderIndex >= folders.size) {
-            mutate(engine) {
-                it.copy(isTranslating = false, statusText = "全 ${folders.size} フォルダの翻訳が完了しました")
+            val folders = engineState.selectedFolders.ifEmpty {
+                if (engineState.folderUri != null) {
+                    listOf(FolderItem(path = engineState.folderUri.path ?: "", name = engineState.folderName, uri = engineState.folderUri))
+                } else emptyList()
             }
-            val engineName = if (engine == TranslationEngine.GOOGLE) "Google" else "DeepL"
-            onShowMessage?.invoke("[$engineName 翻訳] 全 ${folders.size} フォルダの翻訳が完了しました", true)
+
+            if (folders.isEmpty() || folderIndex >= folders.size) {
+                mutate(engine) {
+                    it.copy(isTranslating = false, statusText = "全 ${folders.size} フォルダの翻訳が完了しました")
+                }
+                val engineName = engineDisplayName(engine)
+                onShowMessage?.invoke("[$engineName 翻訳] 全 ${folders.size} フォルダの翻訳が完了しました", true)
+                notifyChanged()
+                return@launch
+            }
+
+            val currentItem = folders[folderIndex]
+            var targetUri = currentItem.uri ?: Uri.fromFile(File(currentItem.path))
+            val folderProgressPrefix = if (folders.size > 1) "[フォルダ ${folderIndex + 1}/${folders.size}] " else ""
+
+            // オンデマンド物理分割: 対象が生テキストファイルの場合、翻訳直前にこの1ファイルのみを都度分割
+            val currentDoc = currentItem.uri?.let { resolveDocument(it) }
+            if (isWebSplitEnabled.value && currentDoc != null && currentDoc.isFile &&
+                currentDoc.name?.endsWith(".txt", ignoreCase = true) == true &&
+                currentDoc.name?.startsWith("part_", ignoreCase = true) != true
+            ) {
+                val parentUri = runCatching { Uri.parse(currentItem.path) }.getOrNull()
+                val parentDoc = parentUri?.let { resolveDocument(it) } ?: currentDoc.parentFile
+                val splitRootDir = parentDoc?.let { p ->
+                    p.findFile("分割済み") ?: p.createDirectory("分割済み")
+                }
+
+                if (splitRootDir != null) {
+                    mutate(engine) {
+                        it.copy(
+                            currentFolderIndex = folderIndex,
+                            folderName = if (folders.size == 1) currentItem.name else "${currentItem.name} (${folderIndex + 1}/${folders.size})",
+                            isTranslating = true,
+                            statusText = "${folderProgressPrefix}${currentItem.name} を分割中..."
+                        )
+                    }
+                    notifyChanged()
+
+                    val splitFolder = NovelPhysicalSplitter.splitSingleTextFile(
+                        context = appContext,
+                        fileDoc = currentDoc,
+                        splitRootDir = splitRootDir,
+                        splitSizeChars = webSplitSizeChars.value,
+                        onLog = { msg -> onShowMessage?.invoke(msg, false) }
+                    )
+
+                    if (sessionId != getActiveSessionId(engine)) return@launch
+
+                    if (splitFolder != null) {
+                        targetUri = splitFolder.uri
+                    } else {
+                        onShowMessage?.invoke("❌ 分割に失敗しました: ${currentItem.name}", false)
+                        if (folderIndex + 1 < folders.size) {
+                            startNextFolderInQueue(engine, folderIndex + 1, sessionId)
+                        }
+                        return@launch
+                    }
+                }
+            }
+
+            mutate(engine) {
+                it.copy(
+                    currentFolderIndex = folderIndex,
+                    folderUri = targetUri,
+                    folderName = if (folders.size == 1) currentItem.name else "${currentItem.name} (${folderIndex + 1}/${folders.size})",
+                    isTranslating = true,
+                    statusText = "${folderProgressPrefix}${currentItem.name} を開始中...",
+                    progress = Pair(0, 0),
+                    chunkProgress = Pair(0, 0)
+                )
+            }
             notifyChanged()
-            return
-        }
-
-        val currentItem = folders[folderIndex]
-        val targetUri = currentItem.uri ?: Uri.fromFile(File(currentItem.path))
-        val folderProgressPrefix = if (folders.size > 1) "[フォルダ ${folderIndex + 1}/${folders.size}] " else ""
-
-        mutate(engine) {
-            it.copy(
-                currentFolderIndex = folderIndex,
-                folderUri = targetUri,
-                folderName = if (folders.size == 1) currentItem.name else "${currentItem.name} (${folderIndex + 1}/${folders.size})",
-                isTranslating = true,
-                statusText = "${folderProgressPrefix}${currentItem.name} を開始中...",
-                progress = Pair(0, 0),
-                chunkProgress = Pair(0, 0)
-            )
-        }
-        notifyChanged()
 
         val listener = object : BaseWebTranslationTask.TranslationListener {
             override fun onProgress(
@@ -219,10 +377,7 @@ class TranslationQueueManager(
                 totalChunks: Int,
                 statusText: String
             ) {
-                synchronized(taskLock) {
-                    val activeSessionId = if (engine == TranslationEngine.GOOGLE) googleSessionId else deeplSessionId
-                    if (sessionId != activeSessionId) return
-                }
+                if (sessionId != getActiveSessionId(engine)) return
                 mutate(engine) {
                     it.copy(
                         progress = Pair(completedFiles, totalFiles),
@@ -236,9 +391,13 @@ class TranslationQueueManager(
 
             override fun onTaskFinished(success: Boolean, message: String) {
                 val shouldProceed = synchronized(taskLock) {
-                    val activeSessionId = if (engine == TranslationEngine.GOOGLE) googleSessionId else deeplSessionId
-                    if (sessionId == activeSessionId) {
-                        if (engine == TranslationEngine.GOOGLE) googleTask = null else deeplTask = null
+                    if (sessionId == getActiveSessionId(engine)) {
+                        when (engine) {
+                            TranslationEngine.GOOGLE -> googleTask = null
+                            TranslationEngine.DEEPL -> deeplTask = null
+                            TranslationEngine.PAPAGO -> papagoTask = null
+                            TranslationEngine.LLM_API -> {}
+                        }
                         success && stateFor(engine).isTranslating
                     } else {
                         false
@@ -250,7 +409,7 @@ class TranslationQueueManager(
                     mutate(engine) {
                         it.copy(isTranslating = false, statusText = "${folderProgressPrefix}$message")
                     }
-                    val engineName = if (engine == TranslationEngine.GOOGLE) "Google" else "DeepL"
+                    val engineName = engineDisplayName(engine)
                     onShowMessage?.invoke("[$engineName 翻訳] $message", true)
                     notifyChanged()
                 }
@@ -260,6 +419,7 @@ class TranslationQueueManager(
         val strategy: WebTranslationStrategy = when (engine) {
             TranslationEngine.GOOGLE -> GoogleTranslationStrategy()
             TranslationEngine.DEEPL -> DeeplTranslationStrategy()
+            TranslationEngine.PAPAGO -> PapagoTranslationStrategy()
             TranslationEngine.LLM_API -> GoogleTranslationStrategy() // WebTask用フォールバック
         }
 
@@ -275,17 +435,25 @@ class TranslationQueueManager(
         )
 
         synchronized(taskLock) {
-            val activeSessionId = if (engine == TranslationEngine.GOOGLE) googleSessionId else deeplSessionId
-            if (sessionId != activeSessionId) return
-            if (engine == TranslationEngine.GOOGLE) {
-                googleTask?.stop()
-                googleTask = task
-            } else {
-                deeplTask?.stop()
-                deeplTask = task
+            if (sessionId != getActiveSessionId(engine)) return@launch
+            when (engine) {
+                TranslationEngine.GOOGLE -> {
+                    googleTask?.stop()
+                    googleTask = task
+                }
+                TranslationEngine.DEEPL -> {
+                    deeplTask?.stop()
+                    deeplTask = task
+                }
+                TranslationEngine.PAPAGO -> {
+                    papagoTask?.stop()
+                    papagoTask = task
+                }
+                TranslationEngine.LLM_API -> {}
             }
         }
         task.start()
+        }
     }
 
     fun stop(engine: TranslationEngine) {
@@ -313,6 +481,15 @@ class TranslationQueueManager(
                         it.copy(isTranslating = false, statusText = "DeepL翻訳を停止しました")
                     }
                 }
+                TranslationEngine.PAPAGO -> {
+                    papagoSessionId++
+                    val task = papagoTask
+                    papagoTask = null
+                    task?.stop()
+                    _papagoState.update {
+                        it.copy(isTranslating = false, statusText = "Papago翻訳を停止しました")
+                    }
+                }
                 TranslationEngine.LLM_API -> {}
             }
         }
@@ -324,6 +501,7 @@ class TranslationQueueManager(
         synchronized(taskLock) {
             googleSessionId++
             deeplSessionId++
+            papagoSessionId++
 
             val gTask = googleTask
             googleTask = null
@@ -332,15 +510,27 @@ class TranslationQueueManager(
             val dTask = deeplTask
             deeplTask = null
             dTask?.stop()
+
+            val pTask = papagoTask
+            papagoTask = null
+            pTask?.stop()
         }
     }
 
     // ---- 内部ユーティリティ ----
 
+    private fun engineDisplayName(engine: TranslationEngine): String = when (engine) {
+        TranslationEngine.GOOGLE -> "Google"
+        TranslationEngine.DEEPL -> "DeepL"
+        TranslationEngine.PAPAGO -> "Papago"
+        TranslationEngine.LLM_API -> "AI/LLM"
+    }
+
     private fun stateFor(engine: TranslationEngine): EngineTranslationState =
         when (engine) {
             TranslationEngine.GOOGLE -> _googleState.value
             TranslationEngine.DEEPL -> _deeplState.value
+            TranslationEngine.PAPAGO -> _papagoState.value
             TranslationEngine.LLM_API -> _llmState.value
         }
 
@@ -348,6 +538,7 @@ class TranslationQueueManager(
         when (engine) {
             TranslationEngine.GOOGLE -> _googleState.update(f)
             TranslationEngine.DEEPL -> _deeplState.update(f)
+            TranslationEngine.PAPAGO -> _papagoState.update(f)
             TranslationEngine.LLM_API -> _llmState.update(f)
         }
     }

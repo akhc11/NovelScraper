@@ -2,21 +2,24 @@ package com.example.novelscraper.translation.llm.engine
 
 import android.content.Context
 import android.net.Uri
+import android.widget.Toast
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.llm.api.GeminiApiClient
 import com.example.novelscraper.translation.llm.api.LlmApiClient
 import com.example.novelscraper.translation.llm.api.LlmApiResult
 import com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient
+import com.example.novelscraper.translation.common.NovelPhysicalSplitter
 import com.example.novelscraper.translation.llm.pipeline.*
 import com.example.novelscraper.translation.llm.prompt.PromptBuilder
 import com.example.novelscraper.translation.llm.rotation.ApiKeyPoolManager
+import com.example.novelscraper.translation.llm.rotation.KeyClaimResult
 import com.example.novelscraper.translation.llm.rotation.LlmRotationManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.update
+import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 
 data class LlmEngineState(
@@ -49,9 +52,9 @@ class LlmTranslationEngine(
     }
 
     private fun addLog(message: String) {
-        _engineState.value = _engineState.value.copy(
-            logs = (_engineState.value.logs + message).takeLast(200)
-        )
+        _engineState.update { current ->
+            current.copy(logs = (current.logs + message).takeLast(200))
+        }
     }
 
     fun startTranslation(folderUris: List<Uri>, onCompleted: () -> Unit = {}) {
@@ -59,11 +62,11 @@ class LlmTranslationEngine(
         isStopRequested = false
 
         currentJob = coroutineScope.launch(Dispatchers.IO) {
-            _engineState.value = _engineState.value.copy(
+            _engineState.update { it.copy(
                 isTranslating = true,
                 statusText = "翻訳開始準備中...",
                 logs = emptyList()
-            )
+            ) }
             val workerCount = config.parallelWorkers.coerceIn(1, 6)
             addLog("🚀 LLM 翻訳エンジン起動 (並列ワーカー数: ${workerCount} / 登録モデル: ${config.modelProfiles.size}件)")
 
@@ -71,36 +74,56 @@ class LlmTranslationEngine(
 
             try {
                 for ((folderIndex, folderUri) in folderUris.withIndex()) {
-                    if (isStopRequested) break
+                    if (isStopRequested || !isActive) break
 
                     val docFolder = DocumentFile.fromTreeUri(context, folderUri) ?: continue
                     val folderName = docFolder.name ?: "Unknown"
 
                     val outSubDirName = config.outputSubDir.ifBlank { "翻訳完了_LLM" }
-                    _engineState.value = _engineState.value.copy(
+                    _engineState.update { it.copy(
                         currentFolderName = folderName,
                         statusText = "フォルダ処理中: $folderName (${folderIndex + 1}/${folderUris.size})"
-                    )
+                    ) }
                     addLog("----------------------------------------")
                     addLog("📂 フォルダ開始: $folderName")
 
-                    processFolder(docFolder, keyPoolManager)
-
-                    // 物理分割有効時、生成された「分割済み」配下の小説サブフォルダも自動走査
+                    // 物理分割有効時: フォルダ直下に生テキストファイルがあれば1ファイルずつ翻訳直前にオンデマンド分割
                     if (config.enableTextSplit) {
-                        val splitDir = docFolder.findFile("分割済み")
-                        if (splitDir != null && splitDir.isDirectory) {
-                            val subFolders = splitDir.listFiles().filter { it.isDirectory && it.name != outSubDirName }
-                            for (subFolder in subFolders) {
-                                if (isStopRequested) break
-                                addLog("📂 分割済みサブフォルダ開始: ${subFolder.name}")
-                                processFolder(subFolder, keyPoolManager)
+                        val rawFiles = docFolder.listFiles().filter {
+                            it.isFile && it.name?.endsWith(".txt", ignoreCase = true) == true &&
+                                    it.name?.startsWith("part_", ignoreCase = true) != true
+                        }.sortedBy { it.name }
+
+                        if (rawFiles.isNotEmpty()) {
+                            val splitRootDir = docFolder.findFile("分割済み") ?: docFolder.createDirectory("分割済み")
+                            if (splitRootDir != null) {
+                                for ((rawIndex, rawFile) in rawFiles.withIndex()) {
+                                    if (isStopRequested || !isActive) break
+                                    val novelName = rawFile.name?.replace(Regex("""\.[tT][xX][tT]$"""), "") ?: "小説"
+                                    addLog("✂️ [小説 ${rawIndex + 1}/${rawFiles.size}] 翻訳直前分割中: ${rawFile.name}")
+                                    val splitSubFolder = NovelPhysicalSplitter.splitSingleTextFile(
+                                        context = context,
+                                        fileDoc = rawFile,
+                                        splitRootDir = splitRootDir,
+                                        splitSizeChars = config.textSplitSizeChars,
+                                        onLog = { addLog(it) }
+                                    )
+                                    if (splitSubFolder != null && !isStopRequested && isActive) {
+                                        addLog("📂 [小説 ${rawIndex + 1}/${rawFiles.size}] 分割済みサブフォルダ翻訳開始: ${splitSubFolder.name}")
+                                        processFolder(splitSubFolder, keyPoolManager)
+                                    }
+                                }
+                                continue // 生テキストの処理が完了したため、親フォルダ直下の直接翻訳はスキップ
                             }
                         }
                     }
+
+                    processFolder(docFolder, keyPoolManager)
                 }
 
-                addLog("🛑 全フォルダの処理が完了しました")
+                if (!isStopRequested && isActive) {
+                    addLog("🛑 全フォルダの処理が完了しました")
+                }
             } catch (e: CancellationException) {
                 addLog("🛑 ユーザーによる停止")
             } catch (e: Exception) {
@@ -108,11 +131,11 @@ class LlmTranslationEngine(
             } finally {
                 fileClaimManager.clear()
                 keyPoolManager.reset()
-                _engineState.value = _engineState.value.copy(
+                _engineState.update { it.copy(
                     isTranslating = false,
                     statusText = "停止中 / 完了",
                     currentFileName = ""
-                )
+                ) }
                 onCompleted()
             }
         }
@@ -121,10 +144,10 @@ class LlmTranslationEngine(
     fun stopTranslation() {
         isStopRequested = true
         currentJob?.cancel()
-        _engineState.value = _engineState.value.copy(
+        _engineState.update { it.copy(
             isTranslating = false,
             statusText = "停止中..."
-        )
+        ) }
     }
 
     private suspend fun processFolder(
@@ -133,6 +156,7 @@ class LlmTranslationEngine(
     ) {
         val outSubDirName = config.outputSubDir.ifBlank { "翻訳完了_LLM" }
         val folderName = folderDoc.name ?: "Unknown"
+        val folderKey = folderDoc.uri.toString()
 
         // 予約フォルダ自身の再翻訳をガード
         if (folderName == outSubDirName || folderName == "分割済み" || folderName == "翻訳完了") {
@@ -140,14 +164,13 @@ class LlmTranslationEngine(
             return
         }
 
-        // 前処理: 物理分割 (有効時)
+        // 物理分割有効時、親フォルダ直下に「分割済み」が存在する場合は元ファイルの直接翻訳をスキップ
         if (config.enableTextSplit) {
-            TextFilePhysicalSplitter.splitRawNovelFiles(
-                context = context,
-                inputFolderDoc = folderDoc,
-                splitSizeBytes = config.textSplitSizeBytes,
-                onLog = { addLog(it) }
-            )
+            val splitDir = folderDoc.findFile("分割済み")
+            if (splitDir != null && splitDir.isDirectory) {
+                addLog("✂️ 物理分割が有効なため、元ファイルの直接翻訳をスキップし「分割済み」配下のパートファイルを翻訳します")
+                return
+            }
         }
 
         val files = folderDoc.listFiles()
@@ -166,8 +189,13 @@ class LlmTranslationEngine(
             return
         }
 
+        // SAF O(1) 高速化: 出力ディレクトリの既存ファイル名を1回の listFiles でキャッシュ (フリーズ根絶)
+        val existingOutputNames = Collections.synchronizedSet(
+            outputDir.listFiles().mapNotNull { it.name }.toMutableSet()
+        )
+
         // 言語判定 (キャッシュ .lang_cache を確認、無ければ先頭ファイルで判定して保存)
-        val langCacheDoc = outputDir.findFile(".lang_cache")
+        val langCacheDoc = if (existingOutputNames.contains(".lang_cache")) outputDir.findFile(".lang_cache") else null
         val sourceLang: SourceLanguage = if (langCacheDoc != null) {
             val cachedCode = readFileContent(langCacheDoc)?.trim() ?: ""
             when (cachedCode) {
@@ -184,16 +212,17 @@ class LlmTranslationEngine(
             val langResult = LanguageDetector.detect(firstContent)
             val detected = langResult.language
             addLog("🔤 言語検出: ${detected.displayName} [${langResult.reason}]")
-            val newCacheDoc = outputDir.createFile("text/plain", ".lang_cache")
+            val newCacheDoc = outputDir.findFile(".lang_cache") ?: outputDir.createFile("text/plain", ".lang_cache")
             if (newCacheDoc != null) {
                 saveFileContent(newCacheDoc, detected.name)
+                existingOutputNames.add(".lang_cache")
             }
             detected
         }
 
         val primaryProfile = config.modelProfiles.firstOrNull() ?: ModelProfile(modelName = "gemini-3.5-flash")
         val splitThreshold = config.getEffectiveSplitThreshold(sourceLang, primaryProfile)
-        val sizeLog = if (config.enableAutoLanguageSize) " (言語別サイズ自動: ${splitThreshold / 1000}KB)" else " (固定サイズ: ${splitThreshold / 1000}KB)"
+        val sizeLog = " (目標出力: ${primaryProfile.maxOutputChars / 1000}万字 ➔ 入力閾値: ${splitThreshold / 1000}KB)"
         val modelPromptSummaries = config.modelProfiles.mapIndexed { idx, prof ->
             val pOrder = config.getEffectivePromptOrder(sourceLang, prof)
             val tag = if (prof.useCustomPromptOrder) "個別" else "共通"
@@ -217,8 +246,11 @@ class LlmTranslationEngine(
             }
 
             if (novelDict == null) {
-                val dictModel = config.dictModel.ifBlank { "google/gemma-4-31b-it:free" }
                 val dictProvider = config.dictProvider
+                val dictModel = config.getEffectiveDictModel(dictProvider)
+                val mergeModel = config.getEffectiveDictMergeModel(dictProvider)
+                val providerOrder = config.getEffectiveDictProviderOrder()
+                val providerAllowFallbacks = config.getEffectiveDictProviderAllowFallbacks()
 
                 val dictApiKeys = when (dictProvider) {
                     LlmProvider.GEMINI -> config.geminiApiKeys.filter { it.isNotBlank() }.ifEmpty { listOf("") }
@@ -231,8 +263,6 @@ class LlmTranslationEngine(
                     LlmProvider.GROQ -> config.groqEndpoint
                 }
 
-                val mergeModel = config.dictMergeModel.trim().ifBlank { dictModel }
-
                 novelDict = NovelDictionaryGenerator.generate(
                     context = context,
                     folderDoc = folderDoc,
@@ -242,20 +272,28 @@ class LlmTranslationEngine(
                     model = dictModel,
                     mergeModel = mergeModel,
                     endpoint = dictEndpoint,
+                    providerOrder = providerOrder,
+                    providerAllowFallbacks = providerAllowFallbacks,
                     maxBatchBytes = config.dictBatchMaxBytes,
                     maxTotalParts = config.dictTotalParts,
                     sampleMode = config.dictSampleMode,
                     maxTotalScanBytes = config.dictMaxTotalScanBytes,
-                    parallelCount = config.dictParallelCount,
+                    parallelCount = config.getEffectiveDictParallelCount(),
                     requestDelaySec = config.dictRequestDelaySec,
                     cooldown429Sec = config.dict429CooldownSec,
                     onLog = { addLog(it) }
                 )
             }
 
-            // 【根本治療2】辞書生成が有効なのに辞書が未完成の場合、辞書なしでの翻訳強行を完全遮断して安全スキップ
             if (novelDict == null) {
                 addLog("⛔ ${folderDoc.name} : 辞書未完成のため翻訳をスキップ (次回再挑戦)")
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "【翻訳スキップ】API制限等により人名辞書の生成に失敗しました: ${folderDoc.name}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
                 return
             }
         }
@@ -264,78 +302,88 @@ class LlmTranslationEngine(
         val completedCounter = AtomicInteger(0)
         val folderProcessedCounter = AtomicInteger(0)
 
-        // 翻訳済みファイルの事前カウント
+        // 翻訳済みファイルの事前カウント (O(1) メモリ照合)
         val pendingFiles = mutableListOf<DocumentFile>()
         for (f in files) {
             val fname = f.name ?: continue
-            if (outputDir.findFile(fname) != null || outputDir.findFile("$fname.failed") != null) {
+            if (existingOutputNames.contains(fname) || existingOutputNames.contains("$fname.failed")) {
                 completedCounter.incrementAndGet()
             } else {
                 pendingFiles.add(f)
             }
         }
 
-        _engineState.value = _engineState.value.copy(
+        _engineState.update { it.copy(
             progress = completedCounter.get() to totalCount
-        )
+        ) }
 
         val requestedWorkerCount = config.parallelWorkers.coerceIn(1, 6)
         val profiles = config.modelProfiles.ifEmpty { listOf(ModelProfile(modelName = "gemini-3.5-flash")) }
 
-        // 各ワーカーを起動 (1ワーカー1キー専有)
-        coroutineScope {
-            val workerJobs = mutableListOf<Deferred<Unit>>()
+        try {
+            // 各ワーカーを起動 (1ワーカー1キー専有)
+            coroutineScope {
+                val workerJobs = mutableListOf<Deferred<Unit>>()
 
-            for (wId in 1..requestedWorkerCount) {
-                val keyClaim = if (config.geminiRotationEnabled) {
-                    keyPoolManager.claimNewKey()
-                } else {
-                    (0 to (config.geminiApiKeys.firstOrNull() ?: ""))
-                }
+                for (wId in 1..requestedWorkerCount) {
+                    val keyClaim = if (config.geminiRotationEnabled) {
+                        keyPoolManager.claimNewKey()
+                    } else {
+                        (0 to (config.geminiApiKeys.firstOrNull() ?: ""))
+                    }
 
-                if (keyClaim == null) {
-                    addLog("⚠️ [W#$wId] 専有できる未使用 Gemini API キーがないため起動をスキップします")
-                    continue
-                }
+                    if (keyClaim == null) {
+                        addLog("⚠️ [W#$wId] 専有できる未使用 Gemini API キーがないため起動をスキップします")
+                        continue
+                    }
 
-                val (claimedKeyIdx, claimedKey) = keyClaim
-                addLog("🚀 [W#$wId] ワーカー起動 (専有キー[${claimedKeyIdx + 1}/${config.geminiApiKeys.size}])")
+                    val (claimedKeyIdx, claimedKey) = keyClaim
+                    addLog("🚀 [W#$wId] ワーカー起動 (専有キー[${claimedKeyIdx + 1}/${config.geminiApiKeys.size}])")
 
-                val rotationManager = LlmRotationManager(
-                    workerId = wId,
-                    currentKeyIndex = claimedKeyIdx,
-                    currentKey = claimedKey,
-                    profiles = profiles,
-                    keyPoolManager = if (config.geminiRotationEnabled) keyPoolManager else null,
-                    switchCooldownSec = config.geminiCooldownSec
-                )
-
-                val job = async(Dispatchers.IO) {
-                    runWorker(
+                    val rotationManager = LlmRotationManager(
                         workerId = wId,
-                        folderName = folderName,
-                        allFiles = files,
-                        outputDir = outputDir,
-                        sourceLang = sourceLang,
-                        novelDict = novelDict,
-                        completedCounter = completedCounter,
-                        folderProcessedCounter = folderProcessedCounter,
-                        totalCount = totalCount,
-                        rotationManager = rotationManager
+                        currentKeyIndex = claimedKeyIdx,
+                        currentKey = claimedKey,
+                        profiles = profiles,
+                        keyPoolManager = if (config.geminiRotationEnabled) keyPoolManager else null,
+                        switchCooldownSec = config.geminiCooldownSec
                     )
-                }
-                workerJobs.add(job)
-            }
 
-            workerJobs.awaitAll()
+                    val job = async(Dispatchers.IO) {
+                        try {
+                            runWorker(
+                                workerId = wId,
+                                folderKey = folderKey,
+                                allFiles = files,
+                                outputDir = outputDir,
+                                existingOutputNames = existingOutputNames,
+                                sourceLang = sourceLang,
+                                novelDict = novelDict,
+                                completedCounter = completedCounter,
+                                folderProcessedCounter = folderProcessedCounter,
+                                totalCount = totalCount,
+                                rotationManager = rotationManager
+                            )
+                        } finally {
+                            rotationManager.release()
+                        }
+                    }
+                    workerJobs.add(job)
+                }
+
+                workerJobs.awaitAll()
+            }
+        } finally {
+            fileClaimManager.releaseFolder(folderKey)
         }
     }
 
     private suspend fun runWorker(
         workerId: Int,
-        folderName: String,
+        folderKey: String,
         allFiles: List<DocumentFile>,
         outputDir: DocumentFile,
+        existingOutputNames: MutableSet<String>,
         sourceLang: SourceLanguage,
         novelDict: NovelDictionary?,
         completedCounter: AtomicInteger,
@@ -347,7 +395,7 @@ class LlmTranslationEngine(
         val primaryProfile = profiles.first()
 
         for (fileDoc in allFiles) {
-            if (isStopRequested || rotationManager.isExhausted) break
+            if (isStopRequested || !currentCoroutineContext().isActive || rotationManager.isExhausted) break
 
             // フォルダ処理上限チェック
             if (config.filesPerFolder > 0 && folderProcessedCounter.get() >= config.filesPerFolder) {
@@ -356,13 +404,13 @@ class LlmTranslationEngine(
 
             val fileName = fileDoc.name ?: continue
 
-            // 翻訳済みまたは失敗保持ならスキップ
-            if (outputDir.findFile(fileName) != null || outputDir.findFile("$fileName.failed") != null) {
+            // 翻訳済みまたは失敗保持ならスキップ (O(1) キャッシュ照合)
+            if (existingOutputNames.contains(fileName) || existingOutputNames.contains("$fileName.failed")) {
                 continue
             }
 
             // 排他クレーム試行 (他ワーカーが着手中ならスキップ)
-            if (!fileClaimManager.tryClaimFile(folderName, fileName)) {
+            if (!fileClaimManager.tryClaimFile(folderKey, fileName)) {
                 continue
             }
 
@@ -374,14 +422,15 @@ class LlmTranslationEngine(
                 val outFile = outputDir.findFile(fileName) ?: outputDir.createFile("text/plain", fileName)
                 if (outFile != null) {
                     saveFileContent(outFile, "")
+                    existingOutputNames.add(fileName)
                 }
                 addLog("[W#$workerId] ⏭ $fileName (空ファイルのためスキップ)")
                 val done = completedCounter.incrementAndGet()
                 folderProcessedCounter.incrementAndGet()
-                _engineState.value = _engineState.value.copy(
+                _engineState.update { it.copy(
                     progress = done to totalCount,
                     currentFileName = fileName
-                )
+                ) }
                 continue
             }
 
@@ -400,10 +449,12 @@ class LlmTranslationEngine(
             } else null
 
             val workDir = outputDir.findFile(".parts_${fileName}")
-            val effectiveSplitThreshold = config.getEffectiveSplitThreshold(sourceLang, primaryProfile)
+            val activeProfile = rotationManager.getCurrentProfile()
+            val effectiveSplitThreshold = config.getEffectiveSplitThreshold(sourceLang, activeProfile)
+            val effectiveBatchSize = config.getEffectiveBatchSize(sourceLang, activeProfile)
 
             if (workDir != null || fsize > effectiveSplitThreshold) {
-                // 大ファイル: 分割翻訳 (レジューム対応)
+                // 大ファイル: 分割チャンク翻訳 (レジューム対応)
                 addLog("[W#$workerId] $fileName (大ファイル: ${fsize}B [閾値:${effectiveSplitThreshold}B] / 専有キー[${rotationManager.getCurrentKeyIndex() + 1}])")
                 val success = LargeFileTranslator.translateLargeFile(
                     context = context,
@@ -417,48 +468,304 @@ class LlmTranslationEngine(
                     dictStyle = novelDict?.style,
                     dictGenders = novelDict?.genders,
                     prevSourceTail = prevSourceTail,
+                    isStopRequested = { isStopRequested },
                     onLog = { addLog("[W#$workerId] $it") }
                 )
 
-                if (!success) {
-                    val failedFileName = "$fileName.failed"
-                    val failedFile = outputDir.findFile(failedFileName) ?: outputDir.createFile("text/plain", failedFileName)
-                    if (failedFile != null) {
-                        saveFileContent(failedFile, content)
-                        addLog("[W#$workerId] ❌ $fileName 全ドライバー失敗 → .failed 保存")
+                if (success) {
+                    existingOutputNames.add(fileName)
+                } else {
+                    // ユーザー中止時は .failed を作成せず、次回レジューム可能に保持
+                    if (!isStopRequested && currentCoroutineContext().isActive) {
+                        val failedFileName = "$fileName.failed"
+                        val failedFile = outputDir.findFile(failedFileName) ?: outputDir.createFile("text/plain", failedFileName)
+                        if (failedFile != null) {
+                            saveFileContent(failedFile, content)
+                            existingOutputNames.add(failedFileName)
+                            addLog("[W#$workerId] ❌ $fileName 全ドライバー失敗 → .failed 保存")
+                        }
                     }
                 }
-            } else {
-                // 小ファイル: 単体翻訳
-                addLog("[W#$workerId] $fileName (単体処理: ${fsize}B / 専有キー[${rotationManager.getCurrentKeyIndex() + 1}])")
-                translateSingleFile(
-                    fileDoc = fileDoc,
-                    content = content,
-                    outputDir = outputDir,
-                    rotationManager = rotationManager,
-                    sourceLang = sourceLang,
-                    novelDict = novelDict,
-                    prevSourceTail = prevSourceTail,
-                    workerId = workerId
-                )
-            }
 
-            val done = completedCounter.incrementAndGet()
-            folderProcessedCounter.incrementAndGet()
-            _engineState.value = _engineState.value.copy(
-                progress = done to totalCount,
-                currentFileName = fileName
-            )
+                val done = completedCounter.incrementAndGet()
+                folderProcessedCounter.incrementAndGet()
+                _engineState.update { it.copy(
+                    progress = done to totalCount,
+                    currentFileName = fileName
+                ) }
+            } else {
+                // 小ファイル: 後続の小ファイルをバッチ上限 (effectiveBatchSize) まで束ねる
+                val batchItems = mutableListOf<Pair<DocumentFile, String>>()
+                batchItems.add(fileDoc to content)
+                var currentBatchBytes = fsize
+
+                val currentIdx = allFiles.indexOf(fileDoc)
+                if (currentIdx >= 0) {
+                    for (nextIdx in (currentIdx + 1) until allFiles.size) {
+                        if (batchItems.size >= 10) break // 1バッチ最大10ファイル
+                        val nextDoc = allFiles[nextIdx]
+                        val nextName = nextDoc.name ?: continue
+                        if (existingOutputNames.contains(nextName) || existingOutputNames.contains("$nextName.failed")) continue
+                        val nextWorkDir = outputDir.findFile(".parts_${nextName}")
+                        if (nextWorkDir != null) continue
+
+                        // 排他クレーム試行
+                        if (!fileClaimManager.tryClaimFile(folderKey, nextName)) continue
+
+                        val nextRaw = readFileContent(nextDoc) ?: continue
+                        val nextClean = TextCleanser.cleanse(nextRaw)
+                        if (nextClean.isBlank()) {
+                            val outF = outputDir.findFile(nextName) ?: outputDir.createFile("text/plain", nextName)
+                            if (outF != null) saveFileContent(outF, "")
+                            existingOutputNames.add(nextName)
+                            completedCounter.incrementAndGet()
+                            folderProcessedCounter.incrementAndGet()
+                            continue
+                        }
+
+                        val nextBytes = nextClean.toByteArray(Charsets.UTF_8).size
+                        if (nextBytes > effectiveSplitThreshold || (currentBatchBytes + nextBytes) > effectiveBatchSize) {
+                            // 大ファイルまたはバッチ上限超過: 今回のバッチには含めない
+                            break
+                        }
+
+                        batchItems.add(nextDoc to nextClean)
+                        currentBatchBytes += nextBytes
+                    }
+                }
+
+                if (batchItems.size > 1) {
+                    // 2件以上: まとめてバッチ翻訳実行！
+                    val batchNames = batchItems.map { it.first.name ?: "" }
+                    addLog("[W#$workerId] 📦 バッチ翻訳開始 (${batchItems.size}ファイル / 計:${currentBatchBytes}B / 枠:${effectiveBatchSize}B)")
+                    val batchSuccess = translateBatchFiles(
+                        batchItems = batchItems,
+                        outputDir = outputDir,
+                        existingOutputNames = existingOutputNames,
+                        rotationManager = rotationManager,
+                        sourceLang = sourceLang,
+                        novelDict = novelDict,
+                        prevSourceTail = prevSourceTail,
+                        workerId = workerId
+                    )
+
+                    if (batchSuccess) {
+                        val done = completedCounter.addAndGet(batchItems.size)
+                        folderProcessedCounter.addAndGet(batchItems.size)
+                        _engineState.update { it.copy(
+                            progress = done to totalCount,
+                            currentFileName = batchNames.last()
+                        ) }
+                    } else {
+                        // バッチ失敗時は各ファイルを単体翻訳へフォールバック (フェイルセーフ)
+                        addLog("[W#$workerId] ⚠️ バッチ翻訳失敗 → 各ファイルを単体翻訳へフォールバック")
+                        for (item in batchItems) {
+                            if (isStopRequested || !currentCoroutineContext().isActive) break
+                            val singleSuccess = translateSingleFile(
+                                fileDoc = item.first,
+                                content = item.second,
+                                outputDir = outputDir,
+                                existingOutputNames = existingOutputNames,
+                                rotationManager = rotationManager,
+                                sourceLang = sourceLang,
+                                novelDict = novelDict,
+                                prevSourceTail = prevSourceTail,
+                                workerId = workerId
+                            )
+                            if (singleSuccess) {
+                                existingOutputNames.add(item.first.name ?: "")
+                            }
+                            val done = completedCounter.incrementAndGet()
+                            folderProcessedCounter.incrementAndGet()
+                            _engineState.update { it.copy(
+                                progress = done to totalCount,
+                                currentFileName = item.first.name ?: ""
+                            ) }
+
+                            if (config.requestDelaySec > 0) {
+                                delay(config.requestDelaySec * 1000L)
+                            }
+                        }
+                    }
+                } else {
+                    // 1件のみ: 単体翻訳
+                    addLog("[W#$workerId] $fileName (単体処理: ${fsize}B / 専有キー[${rotationManager.getCurrentKeyIndex() + 1}])")
+                    val success = translateSingleFile(
+                        fileDoc = fileDoc,
+                        content = content,
+                        outputDir = outputDir,
+                        existingOutputNames = existingOutputNames,
+                        rotationManager = rotationManager,
+                        sourceLang = sourceLang,
+                        novelDict = novelDict,
+                        prevSourceTail = prevSourceTail,
+                        workerId = workerId
+                    )
+                    if (success) {
+                        existingOutputNames.add(fileName)
+                    }
+                    val done = completedCounter.incrementAndGet()
+                    folderProcessedCounter.incrementAndGet()
+                    _engineState.update { it.copy(
+                        progress = done to totalCount,
+                        currentFileName = fileName
+                    ) }
+                }
+
+                if (config.requestDelaySec > 0) {
+                    delay(config.requestDelaySec * 1000L)
+                }
+            }
         }
     }
 
     /**
-     * 単体ファイル翻訳
+     * 複数小ファイルのバッチ翻訳 ([SEG:N] オーケストレーション)
+     */
+    private suspend fun translateBatchFiles(
+        batchItems: List<Pair<DocumentFile, String>>,
+        outputDir: DocumentFile,
+        existingOutputNames: MutableSet<String>,
+        rotationManager: LlmRotationManager,
+        sourceLang: SourceLanguage,
+        novelDict: NovelDictionary?,
+        prevSourceTail: String?,
+        workerId: Int
+    ): Boolean {
+        val filePairs = batchItems.map { (doc, text) -> (doc.name ?: "file.txt") to text }
+        val combinedInput = BatchTranslator.buildBatchInput(filePairs, config.enableCompletionMarker)
+        val profiles = config.modelProfiles.ifEmpty { listOf(ModelProfile(modelName = "gemini-3.5-flash")) }
+        var parsedSegments: Map<Int, String>? = null
+
+        // --- 1. ドライバーループ ---
+        for ((drvIdx, profile) in profiles.withIndex()) {
+            if (isStopRequested || !currentCoroutineContext().isActive) break
+
+            if (drvIdx > 0) {
+                val prev = profiles[drvIdx - 1]
+                addLog("[W#$workerId] 🔄 バッチ: ${prev.modelName} 全失敗 → ${profile.modelName} (${profile.provider.name}) へフォールバック")
+            }
+
+            val promptList = config.getEffectivePromptOrder(sourceLang, profile).ifEmpty { listOf(1, 1) }
+
+            // --- 2. プロンプトループ ---
+            for (promptNum in promptList) {
+                if (isStopRequested || !currentCoroutineContext().isActive) break
+
+                val prompt = PromptBuilder.buildBatchPrompt(
+                    promptNumber = promptNum,
+                    fileCount = batchItems.size,
+                    customPrompts = config.customPrompts,
+                    previousSourceTail = if (config.enablePrevSrcContext) prevSourceTail else null,
+                    sourceText = combinedInput,
+                    dictionaryStyle = novelDict?.style,
+                    dictionaryMap = novelDict?.characters,
+                    dictionaryGenders = novelDict?.genders,
+                    enableCompletionMarker = config.enableCompletionMarker
+                )
+
+                // --- 3. ネットワークリトライループ ---
+                var retry = 0
+                val maxRetryCount = if (profile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
+                    rotationManager.poolCapacity.coerceAtLeast(3)
+                } else 3
+
+                while (retry < maxRetryCount) {
+                    if (isStopRequested || !currentCoroutineContext().isActive) break
+
+                    val activeProfile = rotationManager.getCurrentProfile()
+                    val targetProfile = if (profile.provider == LlmProvider.GEMINI) activeProfile else profile
+
+                    val apiResult = callApiForProfile(targetProfile, prompt, combinedInput, rotationManager)
+
+                    when (apiResult) {
+                        is LlmApiResult.Success -> {
+                            val markerStripped = CompletionMarkerHelper.checkAndStripMarker(apiResult.text, config.enableCompletionMarker)
+                            if (markerStripped == null) {
+                                addLog("[W#$workerId] ⚠️ バッチ: 完了マーカーなし → 次のプロンプトへ")
+                                break
+                            }
+
+                            val parsed = BatchTranslator.parseBatchResponse(markerStripped, batchItems.size)
+                            if (parsed == null) {
+                                addLog("[W#$workerId] ⚠️ バッチ: セグメント分離失敗 (形式不一致/欠落) → 次のプロンプトへ")
+                                break
+                            }
+
+                            // 各セグメントの品質チェック
+                            val (minRatio, maxRatio) = config.getSizeRatioRange(sourceLang)
+                            var allSegmentsValid = true
+                            for ((idx, item) in batchItems.withIndex()) {
+                                val segNum = idx + 1
+                                val segText = parsed[segNum] ?: ""
+                                val cleanedSeg = TranslationQualityValidator.stripPreamble(segText)
+                                val v = TranslationQualityValidator.validate(item.second, cleanedSeg, sourceLang, minRatio, maxRatio)
+                                if (v is QualityValidationResult.Failure) {
+                                    addLog("[W#$workerId] ⚠️ バッチ[SEG:$segNum]: 品質NG (${v.reason})")
+                                    allSegmentsValid = false
+                                    break
+                                }
+                            }
+
+                            if (allSegmentsValid) {
+                                parsedSegments = parsed
+                                break
+                            } else {
+                                break
+                            }
+                        }
+                        is LlmApiResult.QuotaExceeded -> {
+                            if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
+                                val advanced = rotationManager.advanceRotation(apiResult.message) { addLog("[W#$workerId]  $it") }
+                                if (!advanced) return false
+                                retry++
+                            } else {
+                                delay(5000L)
+                                retry++
+                            }
+                        }
+                        is LlmApiResult.NetworkError -> {
+                            delay(5000L)
+                            retry++
+                        }
+                        is LlmApiResult.QualityError -> break
+                        is LlmApiResult.FatalError -> break
+                    }
+                }
+
+                if (parsedSegments != null) break
+            }
+
+            if (parsedSegments != null) break
+        }
+
+        if (parsedSegments != null) {
+            for ((idx, item) in batchItems.withIndex()) {
+                val segNum = idx + 1
+                val fname = item.first.name ?: "file_$segNum.txt"
+                val rawSeg = parsedSegments[segNum] ?: ""
+                val cleanSeg = TranslationQualityValidator.stripPreamble(rawSeg)
+                val outFile = outputDir.findFile(fname) ?: outputDir.createFile("text/plain", fname)
+                if (outFile != null) {
+                    saveFileContent(outFile, cleanSeg)
+                    existingOutputNames.add(fname)
+                    addLog("[W#$workerId] ✅ $fname (バッチ保存)")
+                }
+            }
+            return true
+        }
+
+        return false
+    }
+
+    /**
+     * 単体ファイル翻訳 (モデルローテーション完全反映 & 中断保護)
      */
     private suspend fun translateSingleFile(
         fileDoc: DocumentFile,
         content: String,
         outputDir: DocumentFile,
+        existingOutputNames: MutableSet<String>,
         rotationManager: LlmRotationManager,
         sourceLang: SourceLanguage,
         novelDict: NovelDictionary?,
@@ -471,6 +778,8 @@ class LlmTranslationEngine(
 
         // --- 1. ドライバーループ ---
         for ((drvIdx, profile) in profiles.withIndex()) {
+            if (isStopRequested || !currentCoroutineContext().isActive) break
+
             if (drvIdx > 0) {
                 val prev = profiles[drvIdx - 1]
                 addLog("[W#$workerId] 🔄 $fileName: ${prev.modelName} 全失敗 → ${profile.modelName} (${profile.provider.name}) へフォールバック")
@@ -480,6 +789,8 @@ class LlmTranslationEngine(
 
             // --- 2. プロンプトループ ---
             for (promptNum in promptList) {
+                if (isStopRequested || !currentCoroutineContext().isActive) break
+
                 val prompt = PromptBuilder.buildPrompt(
                     promptNumber = promptNum,
                     customPrompts = config.customPrompts,
@@ -500,7 +811,12 @@ class LlmTranslationEngine(
                 } else 3
 
                 while (retry < maxRetryCount) {
-                    val apiResult = callApiForProfile(profile, prompt, preparedSource, rotationManager)
+                    if (isStopRequested || !currentCoroutineContext().isActive) break
+
+                    val activeProfile = rotationManager.getCurrentProfile()
+                    val targetProfile = if (profile.provider == LlmProvider.GEMINI) activeProfile else profile
+
+                    val apiResult = callApiForProfile(targetProfile, prompt, preparedSource, rotationManager)
 
                     when (apiResult) {
                         is LlmApiResult.Success -> {
@@ -510,7 +826,8 @@ class LlmTranslationEngine(
                                 break
                             }
                             val cleaned = TranslationQualityValidator.stripPreamble(markerStripped)
-                            val validation = TranslationQualityValidator.validate(content, cleaned, sourceLang)
+                            val (minRatio, maxRatio) = config.getSizeRatioRange(sourceLang)
+                            val validation = TranslationQualityValidator.validate(content, cleaned, sourceLang, minRatio, maxRatio)
                             if (validation is QualityValidationResult.Success) {
                                 translatedText = cleaned
                                 break
@@ -520,8 +837,8 @@ class LlmTranslationEngine(
                             }
                         }
                         is LlmApiResult.QuotaExceeded -> {
-                            if (profile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
-                                val advanced = rotationManager.advanceRotation { addLog("[W#$workerId]  $it") }
+                            if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
+                                val advanced = rotationManager.advanceRotation(apiResult.message) { addLog("[W#$workerId]  $it") }
                                 if (!advanced) {
                                     return false // ワーカー終了
                                 }
@@ -554,15 +871,20 @@ class LlmTranslationEngine(
             val outFile = outputDir.findFile(fileName) ?: outputDir.createFile("text/plain", fileName)
             if (outFile != null) {
                 saveFileContent(outFile, translatedText)
+                existingOutputNames.add(fileName)
                 addLog("[W#$workerId] ✅ $fileName")
                 return true
             }
         } else {
-            val failedFileName = "$fileName.failed"
-            val failedFile = outputDir.findFile(failedFileName) ?: outputDir.createFile("text/plain", failedFileName)
-            if (failedFile != null) {
-                saveFileContent(failedFile, content)
-                addLog("[W#$workerId] ❌ $fileName (全ドライバー全プロンプト失敗) → .failed")
+            // 中断された場合は .failed を作成せず次回再開可能に保持
+            if (!isStopRequested && currentCoroutineContext().isActive) {
+                val failedFileName = "$fileName.failed"
+                val failedFile = outputDir.findFile(failedFileName) ?: outputDir.createFile("text/plain", failedFileName)
+                if (failedFile != null) {
+                    saveFileContent(failedFile, content)
+                    existingOutputNames.add(failedFileName)
+                    addLog("[W#$workerId] ❌ $fileName (全ドライバー全プロンプト失敗) → .failed")
+                }
             }
         }
         return false

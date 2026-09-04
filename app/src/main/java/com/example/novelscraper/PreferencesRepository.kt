@@ -1,13 +1,11 @@
 package com.example.novelscraper
 
 import android.content.Context
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
+import android.net.Uri
+import android.util.Log
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import android.net.Uri
-import android.util.Log
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -20,7 +18,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "novel_scraper_prefs")
+private val Context.dataStore by preferencesDataStore(name = "settings")
 
 @Serializable
 data class HistoryItem(
@@ -46,6 +44,10 @@ class PreferencesRepository(private val context: Context) {
         val GOOGLE_FILE_DELAY = stringPreferencesKey("google_file_delay")
         val DEEPL_CHUNK_DELAY = stringPreferencesKey("deepl_chunk_delay")
         val DEEPL_FILE_DELAY = stringPreferencesKey("deepl_file_delay")
+        val PAPAGO_CHUNK_DELAY = stringPreferencesKey("papago_chunk_delay")
+        val PAPAGO_FILE_DELAY = stringPreferencesKey("papago_file_delay")
+        val WEB_SPLIT_ENABLED = stringPreferencesKey("web_split_enabled")
+        val WEB_SPLIT_SIZE_CHARS = stringPreferencesKey("web_split_size_chars")
         val LLM_CONFIG = stringPreferencesKey("llm_translation_config_v2")
     }
 
@@ -82,6 +84,14 @@ class PreferencesRepository(private val context: Context) {
         .distinctUntilChangedBy { it[PreferencesKeys.DEEPL_FILE_DELAY] }
         .map { it[PreferencesKeys.DEEPL_FILE_DELAY] ?: "2-5" }.flowOn(Dispatchers.IO)
 
+    val papagoChunkDelayFlow: Flow<String> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.PAPAGO_CHUNK_DELAY] }
+        .map { it[PreferencesKeys.PAPAGO_CHUNK_DELAY] ?: "3-8" }.flowOn(Dispatchers.IO)
+
+    val papagoFileDelayFlow: Flow<String> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.PAPAGO_FILE_DELAY] }
+        .map { it[PreferencesKeys.PAPAGO_FILE_DELAY] ?: "2-5" }.flowOn(Dispatchers.IO)
+
     suspend fun saveGoogleDelays(chunkDelay: String, fileDelay: String) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.GOOGLE_CHUNK_DELAY] = chunkDelay
@@ -93,6 +103,35 @@ class PreferencesRepository(private val context: Context) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.DEEPL_CHUNK_DELAY] = chunkDelay
             preferences[PreferencesKeys.DEEPL_FILE_DELAY] = fileDelay
+        }
+    }
+
+    suspend fun savePapagoDelays(chunkDelay: String, fileDelay: String) = withContext(Dispatchers.IO) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.PAPAGO_CHUNK_DELAY] = chunkDelay
+            preferences[PreferencesKeys.PAPAGO_FILE_DELAY] = fileDelay
+        }
+    }
+
+    val isWebSplitEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.WEB_SPLIT_ENABLED] }
+        .map { it[PreferencesKeys.WEB_SPLIT_ENABLED]?.toBoolean() ?: false }
+        .flowOn(Dispatchers.IO)
+
+    suspend fun saveWebSplitEnabled(enabled: Boolean) = withContext(Dispatchers.IO) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.WEB_SPLIT_ENABLED] = enabled.toString()
+        }
+    }
+
+    val webSplitSizeCharsFlow: Flow<Int> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.WEB_SPLIT_SIZE_CHARS] }
+        .map { it[PreferencesKeys.WEB_SPLIT_SIZE_CHARS]?.toIntOrNull() ?: 8000 }
+        .flowOn(Dispatchers.IO)
+
+    suspend fun saveWebSplitSizeChars(sizeChars: Int) = withContext(Dispatchers.IO) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.WEB_SPLIT_SIZE_CHARS] = sizeChars.coerceAtLeast(500).toString()
         }
     }
 

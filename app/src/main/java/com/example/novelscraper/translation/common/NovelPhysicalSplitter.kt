@@ -1,0 +1,229 @@
+package com.example.novelscraper.translation.common
+
+import android.content.Context
+import android.util.Log
+import androidx.documentfile.provider.DocumentFile
+import com.example.novelscraper.translation.llm.pipeline.TextCleanser
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.io.InputStreamReader
+import java.nio.charset.StandardCharsets
+import kotlin.coroutines.coroutineContext
+
+object NovelPhysicalSplitter {
+
+    private const val TAG = "NovelPhysicalSplitter"
+    const val DEFAULT_SPLIT_SIZE_CHARS = 8000 // 目安文字数 (約8,000文字 = 1話相当)
+
+    /**
+     * 単一の生テキストファイル (例: 小説名.txt) を指定文字数ごとに物理分割し、
+     * 「<splitRootDir>/<小説名>/part_XXXX.txt」に出力する。
+     *
+     * 特徴:
+     * - すでに分割済み (フォルダ内に .txt パートが存在) の場合は一切触らず即座に既存フォルダを返す (安全スキップ)。
+     * - 停止ボタン押下 (CancellationException) や例外発生時は、今回新規作成した作りかけフォルダを即座に削除 (即時ロールバック)。
+     * - 1行ストリーミング処理 (メモリ数KB)、文字コード自動判定、有害文字クレンジング。
+     * - coroutineContext.ensureActive() による停止操作時の即時協調キャンセル。
+     *
+     * @return 分割が完了した（または既存の）小説サブフォルダ (DocumentFile)、失敗時は null
+     */
+    suspend fun splitSingleTextFile(
+        context: Context,
+        fileDoc: DocumentFile,
+        splitRootDir: DocumentFile,
+        splitSizeChars: Int = DEFAULT_SPLIT_SIZE_CHARS,
+        onLog: (String) -> Unit = {}
+    ): DocumentFile? = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
+
+        val fileName = fileDoc.name ?: return@withContext null
+        val novelBaseName = fileName.replace(Regex("""\.[tT][xX][tT]$"""), "")
+        val effectiveSplitChars = splitSizeChars.coerceAtLeast(500)
+
+        // 1. 既存データ保護: すでにパートが存在する場合は一切触らず安全にスキップ
+        val existingNovelDir = splitRootDir.findFile(novelBaseName)
+        if (existingNovelDir != null && existingNovelDir.isDirectory) {
+            val existingParts = existingNovelDir.listFiles().filter { it.isFile && it.name?.endsWith(".txt") == true }
+            if (existingParts.isNotEmpty()) {
+                onLog("ℹ️ 物理分割: すでに分割完了しています ($novelBaseName, ${existingParts.size}件)")
+                return@withContext existingNovelDir
+            }
+        }
+
+        val isNewlyCreated = (existingNovelDir == null)
+        val novelDir = existingNovelDir ?: splitRootDir.createDirectory(novelBaseName) ?: return@withContext null
+
+        // 2. 先頭 64KB から文字コードを高精度自動判定
+        val charset = context.contentResolver.openInputStream(fileDoc.uri)?.use { stream ->
+            UniversalCharsetDetector.detectCharsetFromStream(stream)
+        } ?: StandardCharsets.UTF_8
+
+        onLog("✂️ 物理分割中: $fileName (${charset.displayName()}, 目安:${effectiveSplitChars}文字) → 分割済み/$novelBaseName/")
+
+        // 3. ストリーミング分割出力 (メモリ消費ゼロ & 直接 UTF-8 書き出し & トランザクション例外保証)
+        var partNumber = 1
+
+        fun writePartFile(content: String) {
+            val partName = String.format("part_%04d.txt", partNumber)
+            val partDoc = novelDir.createFile("text/plain", partName)
+                ?: throw IOException("Failed to create part file: $partName")
+            context.contentResolver.openOutputStream(partDoc.uri, "wt")?.use { out ->
+                out.writer(Charsets.UTF_8).use { writer ->
+                    writer.write(content)
+                    writer.flush()
+                }
+            } ?: throw IOException("Failed to open output stream for: $partName")
+            partNumber++
+        }
+
+        fun rollback() {
+            try {
+                if (isNewlyCreated) {
+                    novelDir.delete()
+                } else {
+                    novelDir.listFiles().forEach { it.delete() }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to rollback incomplete folder: $novelBaseName", e)
+            }
+        }
+
+        var splitSuccess = false
+        try {
+            context.contentResolver.openInputStream(fileDoc.uri)?.use { inStream ->
+                InputStreamReader(inStream, charset).buffered().use { reader ->
+                    splitLines(reader.lineSequence(), effectiveSplitChars) { chunkText ->
+                        coroutineContext.ensureActive()
+                        writePartFile(chunkText)
+                    }
+                }
+            }
+            // 空ファイル対策: 最低限1つのパートを出力して整合性を保つ
+            if (partNumber == 1) {
+                writePartFile("")
+            }
+            splitSuccess = true
+        } catch (e: CancellationException) {
+            // 停止ボタン押下時: 中途半端な作りかけファイルをその場で即座にロールバック
+            withContext(NonCancellable) { rollback() }
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Error streaming file: $fileName", e)
+            onLog("❌ 分割エラー: $fileName (${e.message})")
+            withContext(NonCancellable) { rollback() }
+        }
+
+        if (splitSuccess && partNumber > 1) {
+            val totalParts = partNumber - 1
+            onLog("✅ 分割完了: $novelBaseName (${totalParts} パート)")
+            novelDir
+        } else {
+            null
+        }
+    }
+
+    /**
+     * 指定フォルダ直下の生テキストファイルを指定文字数ごとに物理分割し、
+     * 「分割済み/<小説名>/part_XXXX.txt」に出力する。
+     *
+     * @return 分割が実行された（または既存の）小説サブフォルダ (DocumentFile) のリスト
+     */
+    suspend fun splitRawTextFilesInFolder(
+        context: Context,
+        inputFolderDoc: DocumentFile,
+        splitSizeChars: Int = DEFAULT_SPLIT_SIZE_CHARS,
+        onLog: (String) -> Unit = {}
+    ): List<DocumentFile> = withContext(Dispatchers.IO) {
+        val rootFiles = inputFolderDoc.listFiles().filter {
+            it.isFile && it.name?.endsWith(".txt", ignoreCase = true) == true &&
+                    it.name?.startsWith("part_", ignoreCase = true) != true
+        }
+
+        if (rootFiles.isEmpty()) return@withContext emptyList()
+
+        val splitRootDir = inputFolderDoc.findFile("分割済み") ?: inputFolderDoc.createDirectory("分割済み")
+        if (splitRootDir == null) {
+            onLog("❌ 物理分割: 出力先「分割済み」フォルダの作成に失敗しました")
+            return@withContext emptyList()
+        }
+
+        val resultFolders = mutableListOf<DocumentFile>()
+        for (fileDoc in rootFiles) {
+            coroutineContext.ensureActive()
+            val novelDir = splitSingleTextFile(context, fileDoc, splitRootDir, splitSizeChars, onLog)
+            if (novelDir != null) {
+                resultFolders.add(novelDir)
+            }
+        }
+        resultFolders
+    }
+
+    /**
+     * 行シーケンスを指定文字数ごとに分割し、各チャンクをコールバックに渡すコアストリーミングロジック。
+     */
+    fun splitLines(
+        lines: Sequence<String>,
+        splitSizeChars: Int = DEFAULT_SPLIT_SIZE_CHARS,
+        onChunk: (String) -> Unit
+    ) {
+        val effectiveSplitChars = splitSizeChars.coerceAtLeast(500)
+        val currentChunk = StringBuilder()
+
+        fun flush() {
+            if (currentChunk.isNotEmpty()) {
+                onChunk(currentChunk.toString())
+                currentChunk.clear()
+            }
+        }
+
+        for (rawLine in lines) {
+            val line = TextCleanser.cleanse(rawLine)
+            if (line.length > effectiveSplitChars) {
+                // 改行のない超長行フォールバック
+                for (segment in splitOversizedLine(line, effectiveSplitChars)) {
+                    if (currentChunk.length + segment.length >= effectiveSplitChars && currentChunk.isNotEmpty()) {
+                        flush()
+                    }
+                    currentChunk.append(segment).append("\n")
+                    if (currentChunk.length >= effectiveSplitChars) {
+                        flush()
+                    }
+                }
+            } else {
+                if (currentChunk.length + line.length + 1 > effectiveSplitChars && currentChunk.isNotEmpty()) {
+                    flush()
+                }
+                currentChunk.append(line).append("\n")
+            }
+        }
+        flush()
+    }
+
+    /**
+     * テスト用ヘルパー: 全チャンクを List<String> として取得する。
+     */
+    fun splitLinesIntoChunks(
+        lines: Sequence<String>,
+        splitSizeChars: Int = DEFAULT_SPLIT_SIZE_CHARS
+    ): List<String> {
+        val result = mutableListOf<String>()
+        splitLines(lines, splitSizeChars) { result.add(it) }
+        return result
+    }
+
+    private fun splitOversizedLine(line: String, maxChars: Int): List<String> {
+        if (line.length <= maxChars) return listOf(line)
+        val chunks = mutableListOf<String>()
+        var start = 0
+        while (start < line.length) {
+            val end = (start + maxChars).coerceAtMost(line.length)
+            chunks.add(line.substring(start, end))
+            start = end
+        }
+        return chunks
+    }
+}

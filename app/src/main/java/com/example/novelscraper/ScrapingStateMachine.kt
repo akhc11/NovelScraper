@@ -29,6 +29,7 @@ class ScrapingStateMachine(
         ) : Action()
         data class UpdateStatus(val message: String) : Action()
         data class WaitAndLoad(val url: String, val delayMs: Long) : Action()
+        data class WaitAndScrapeAgain(val delayMs: Long) : Action()
         data class WaitForCF(val delayMs: Long) : Action()
         data class Finish(val reason: String) : Action()
     }
@@ -44,20 +45,30 @@ class ScrapingStateMachine(
         private set
     var retryCount = 0
         private set
+    private val manualSpec = ChapterNumberExtractor.parseManualSpec(config.chapter)
+    private val padLength = manualSpec?.padLength ?: 4
     private var manualChapterCounter: Int? = null
     private val endCheckRegex: Regex? = try {
         if (config.endCheck.isNotEmpty()) Regex(config.endCheck) else null
     } catch (e: Exception) { null }
 
+    // 循環ループ検知（A ➔ B ➔ C ➔ A などの無限ループを完全防止）
+    private val visitedUrls = mutableSetOf<String>()
+
+    // SPA本文空振り防止（本文が非同期で遅れて届く場合の段階的待機カウンタ）
+    var emptyContentRetryCount = 0
+        private set
+
     init {
-        if (config.chapter.startsWith("@") && config.chapter.length > 1) {
-            manualChapterCounter = config.chapter.substring(1).toIntOrNull()
+        if (manualSpec != null) {
+            manualChapterCounter = manualSpec.startNumber
         }
     }
 
     /** ページ読み込み完了時の状態遷移を決定 */
     fun onPageLoaded(url: String, pageTitle: String): List<Action> {
         currentUrl = url
+        emptyContentRetryCount = 0 // 新ページ読み込み時は空本文リトライをリセット
         val actions = mutableListOf<Action>()
 
         if (CloudflareDetector.isCloudflareChallenge(pageTitle)) {
@@ -95,17 +106,26 @@ class ScrapingStateMachine(
     /** ディレイ計算 (pure関数) */
     fun calculateDelay(): Long = calculateDelay(config.delay)
 
+    /** 同一ページでの再スクレイピング用Actionを生成 */
+    fun buildScrapePageAction(): Action {
+        if (currentUrl == lastSuccessUrl) return Action.UpdateStatus("スキップ（同一URL）")
+        val jsCode = ScrapingScriptBuilder.buildScrapingScript(config, true, false)
+        return Action.EvaluateJs(jsCode, JsPurpose.SCRAPE_PAGE)
+    }
+
     // --- 内部ロジック ---
 
     private fun buildCheckFolderLinkAction(): Action {
         if (config.folderLink.isEmpty()) {
             return handleDirectFolderName()
         }
+        val safeLink = config.folderLink.replace("\\", "\\\\").replace("'", "\\'")
         val js = """
             (function(){
-                var el = document.querySelector('${config.folderLink.replace("'", "\\'")}');
+                var el = document.querySelector('$safeLink');
                 if (!el) return '';
                 var a = el.tagName === 'A' ? el : el.closest('a');
+                if (!a && el.querySelector) a = el.querySelector('a');
                 if (a) {
                     var href = a.href || a.getAttribute('href');
                     if (href) return new URL(href, location.href).href;
@@ -117,14 +137,9 @@ class ScrapingStateMachine(
     }
 
     private fun buildFetchFolderNameAction(): Action {
-        val js = "(function(){ var el=document.querySelector('${config.folder.replace("'", "\\'")}'); return el?el.innerText.trim():''; })();"
+        val safeFolder = config.folder.replace("\\", "\\\\").replace("'", "\\'")
+        val js = "(function(){ var el=document.querySelector('$safeFolder'); return el?el.innerText.trim():''; })();"
         return Action.EvaluateJs(js, JsPurpose.FETCH_FOLDER_NAME)
-    }
-
-    private fun buildScrapePageAction(): Action {
-        if (currentUrl == lastSuccessUrl) return Action.UpdateStatus("スキップ（同一URL）")
-        val jsCode = ScrapingScriptBuilder.buildScrapingScript(config, true, false)
-        return Action.EvaluateJs(jsCode, JsPurpose.SCRAPE_PAGE)
     }
 
     private fun handleFolderLinkResult(result: String): List<Action> {
@@ -173,11 +188,62 @@ class ScrapingStateMachine(
             }
 
             val data = Json.decodeFromString<ScrapingResult>(rawResult)
-            if (data.folderName.isNotEmpty()) folderName = data.folderName
+
+            // SPA本文空振り防止スマートリトライ:
+            // 本文が空・空白のみであり、かつ次ページURLが存在する場合、
+            // 「まだSPAでDOMに本文が流し込まれていない可能性」を考慮して、同一ページで最大3回まで再スクレイピングを試みる
+            // （超低速回線対応: 最低1.5秒を保証しつつ、ユーザーの指定した待機時間に合わせてゆったり待機）
+            if (data.content.isBlank() && data.nextUrl.isNotBlank() && emptyContentRetryCount < MAX_EMPTY_CONTENT_RETRIES) {
+                emptyContentRetryCount++
+                val retryDelayMs = maxOf(MIN_EMPTY_CONTENT_RETRY_DELAY_MS, calculateDelay(config.delay))
+                val actions = mutableListOf<Action>()
+                actions.add(Action.UpdateStatus("本文待機中... ($emptyContentRetryCount/$MAX_EMPTY_CONTENT_RETRIES)"))
+                actions.add(Action.WaitAndScrapeAgain(retryDelayMs))
+                return actions
+            }
+            emptyContentRetryCount = 0 // 正常に本文が取れた、またはリトライ上限到達時はリセット
+
+            if (folderName.isEmpty() && data.folderName.isNotEmpty()) {
+                folderName = data.folderName
+            } else if (data.folderName.isNotEmpty() && !data.folderName.startsWith("(") && !data.folderName.startsWith("別URL")) {
+                folderName = data.folderName
+            }
 
             val title = data.title.ifEmpty { "無題" }
-            val chapNum = ChapterNumberExtractor.extract(data.chapter, config.chapter, currentUrl, manualChapterCounter)
-            if (manualChapterCounter != null) manualChapterCounter = manualChapterCounter!! + 1
+            val normChapter = ChapterNumberExtractor.normalize(config.chapter)
+            val isHybrid = normChapter.contains("||")
+
+            val digitsFromJs = data.chapter.filter { it.isDigit() }
+            val jsNum = digitsFromJs.toIntOrNull()
+
+            val chosenNum = if (manualChapterCounter != null) {
+                if (isHybrid && jsNum != null) {
+                    val maxVal = maxOf(manualChapterCounter!!, jsNum)
+                    ChapterNumberExtractor.formatNumber(maxVal, padLength)
+                } else {
+                    ChapterNumberExtractor.formatNumber(manualChapterCounter!!, padLength)
+                }
+            } else if (jsNum != null) {
+                ChapterNumberExtractor.formatNumber(jsNum, padLength)
+            } else if (data.chapter.isNotEmpty()) {
+                val digits = data.chapter.filter { it.isDigit() }
+                val num = digits.toIntOrNull()
+                if (num != null) {
+                    ChapterNumberExtractor.formatNumber(num, padLength)
+                } else {
+                    digits.padStart(padLength, '0')
+                }
+            } else {
+                ChapterNumberExtractor.formatNumber(1, padLength)
+            }
+            val chapNum = chosenNum
+
+            if (manualChapterCounter != null) {
+                val currentInt = chapNum.toIntOrNull() ?: manualChapterCounter!!
+                manualChapterCounter = currentInt + 1
+            } else if (isHybrid && jsNum != null) {
+                manualChapterCounter = jsNum + 1
+            }
 
             // 本文が空・空白のみの場合は代替テキストを自動補完し、エラー停止させずに保存して進行する
             val finalContent = data.content.ifBlank { "(本文なし)" }
@@ -186,66 +252,67 @@ class ScrapingStateMachine(
             actions.add(Action.SaveAndContinue(folderName, title, finalContent, chapNum, data.nextUrl, currentUrl))
             actions.add(Action.UpdateHistory(folderName, title, chapNum, currentUrl, data.nextUrl))
 
+            visitedUrls.add(currentUrl)
             lastSuccessUrl = currentUrl
             retryCount = 0
             actions.add(Action.UpdateStatus("保存: $chapNum ${title.take(10)}..."))
 
             val shouldStop = isEndDetected(data.nextUrl, title)
-            if (data.nextUrl.isNotEmpty() && data.nextUrl != "null" && !shouldStop) {
+            val isLoopDetected = data.nextUrl.isNotEmpty() && visitedUrls.contains(data.nextUrl)
+
+            if (isLoopDetected) {
+                actions.add(Action.Finish("循環参照ループ検出により終了"))
+            } else if (data.nextUrl.isNotEmpty() && data.nextUrl != "null" && !shouldStop) {
                 val delayMs = calculateDelay(config.delay)
                 actions.add(Action.WaitAndLoad(data.nextUrl, delayMs))
             } else {
-                val reason = if (shouldStop) "終了検知" else "完了"
+                val reason = if (shouldStop) "終了条件合致" else "次ページなし"
                 actions.add(Action.Finish(reason))
             }
             actions
         } catch (e: Exception) {
-            buildRetryActions("エラー: ${e.message}")
+            buildRetryActions("JSONパースエラー: ${e.message}")
         }
     }
 
     private fun buildRetryActions(reason: String): List<Action> {
-        return if (retryCount < MAX_RETRY_COUNT) {
-            retryCount++
+        retryCount++
+        return if (retryCount <= MAX_RETRIES) {
             listOf(
-                Action.UpdateStatus("リトライ($retryCount): $reason"),
+                Action.UpdateStatus("リトライ ($retryCount/$MAX_RETRIES): $reason"),
                 Action.WaitAndLoad(currentUrl, RETRY_DELAY_MS)
             )
         } else {
-            listOf(
-                Action.UpdateStatus("エラー停止: $reason"),
-                Action.Finish("エラー停止: $reason")
-            )
+            listOf(Action.Finish("エラー停止 (上限到達): $reason"))
         }
     }
 
     private fun isEndDetected(nextUrl: String, title: String): Boolean {
-        if (endCheckRegex != null) {
-            if (endCheckRegex.containsMatchIn(nextUrl) || endCheckRegex.containsMatchIn(title)) return true
-        }
-        return nextUrl.contains("/null") || nextUrl.endsWith("null")
+        if (nextUrl.isEmpty() || nextUrl == "null") return true
+        val regex = endCheckRegex ?: return false
+        return regex.containsMatchIn(nextUrl) || regex.containsMatchIn(title)
     }
 
     companion object {
-        private const val MAX_RETRY_COUNT = 3
-        private const val RETRY_DELAY_MS = 60_000L
-        private const val CF_WAIT_DELAY_MS = 30_000L
+        private const val MAX_RETRIES = 5
+        private const val RETRY_DELAY_MS = 10000L
+        private const val CF_WAIT_DELAY_MS = 5000L
 
-        fun calculateDelay(delayStr: String): Long {
-            return try {
-                if (delayStr.contains("-")) {
-                    val parts = delayStr.split("-")
-                    val min = parts[0].trim().toLongOrNull() ?: DEFAULT_DELAY_SECONDS
-                    val max = parts[1].trim().toLongOrNull() ?: min
-                    kotlin.random.Random.nextLong(min, max + 1) * 1000
-                } else {
-                    (delayStr.toLongOrNull() ?: DEFAULT_DELAY_SECONDS) * 1000
+        // SPA本文待機スマートリトライ設定（超低速回線対応: 最低1.5秒保証）
+        private const val MAX_EMPTY_CONTENT_RETRIES = 3
+        private const val MIN_EMPTY_CONTENT_RETRY_DELAY_MS = 1500L
+
+        fun calculateDelay(delayConfig: String): Long {
+            val parts = delayConfig.split("-").mapNotNull { it.trim().toLongOrNull() }
+            return when (parts.size) {
+                1 -> parts[0] * 1000L
+                2 -> {
+                    val min = minOf(parts[0], parts[1])
+                    val max = maxOf(parts[0], parts[1])
+                    (min + (Math.random() * (max - min + 1)).toLong()) * 1000L
                 }
-            } catch (e: Exception) {
-                DEFAULT_DELAY_SECONDS * 1000
+                else -> 5000L
             }
         }
-
-        private const val DEFAULT_DELAY_SECONDS = 2L
     }
 }

@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper.translation.llm.api
+package com.example.novelscraper.translation.llm.api
 
 import com.example.novelscraper.translation.llm.api.LlmApiClient.awaitResponse
 import com.example.novelscraper.translation.llm.api.model.*
@@ -94,19 +94,19 @@ object OpenAiCompatibleClient {
                 }
                 429 -> {
                     LlmApiResult.QuotaExceeded(
-                        message = "Quota Exceeded (429): ${bodyString.take(150)}"
+                        message = "Quota Exceeded (429): ${bodyString.take(3000)}"
                     )
                 }
                 500, 502, 503, 504 -> {
                     LlmApiResult.NetworkError(
                         statusCode = code,
-                        message = "Server Error ($code): ${bodyString.take(150)}"
+                        message = "Server Error ($code): ${bodyString.take(1000)}"
                     )
                 }
                 else -> {
                     LlmApiResult.FatalError(
                         statusCode = code,
-                        message = "HTTP $code: ${bodyString.take(150)}"
+                        message = "HTTP $code: ${bodyString.take(1000)}"
                     )
                 }
             }

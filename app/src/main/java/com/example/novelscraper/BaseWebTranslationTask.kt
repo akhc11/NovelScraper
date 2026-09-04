@@ -5,19 +5,30 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
 import kotlin.random.Random
 
 /**
- * Webバックグラウンド翻訳タスクの共通基底クラス。
- * Google 翻訳・DeepL 翻訳などの共通ワークフロー（DOM制御、ファイル処理、チャンク分割、リトライ、ディレイ計算）を集約し、
- * DRY (Don't Repeat Yourself) を達成する。
+ * 独立したバックグラウンド WebView インスタンスで動作する Web 翻訳共通タスク。
+ * Strategy パターンにより Google / DeepL / Papago 翻訳の固有 DOM 差異を吸収する。
  */
-open class BaseWebTranslationTask(
+class BaseWebTranslationTask(
     private val context: Context,
     private val folderUri: Uri,
     private val strategy: WebTranslationStrategy,
@@ -40,11 +51,9 @@ open class BaseWebTranslationTask(
         fun onTaskFinished(success: Boolean, message: String)
     }
 
-    private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+    private val json = Json { ignoreUnknownKeys = true }
     private val mainHandler = Handler(Looper.getMainLooper())
     private val fileStore = TranslationFileStore(context, strategy.outputFolderName)
-
-    // バックグラウンド専用の独立したWebView（画面のCompose/Activityライフサイクルから完全に分離）
     private val webView = WebView(context.applicationContext)
 
     // Activityの破棄・バックグラウンド移行と連動してキャンセルされない独立したScope
@@ -56,6 +65,18 @@ open class BaseWebTranslationTask(
     init {
         WebViewHelper.applyStandardSettings(webView, blockImages = false, isDesktop = strategy.isDesktop)
         WebViewHelper.applyVirtualSize(webView) // ヘッドレス（0x0）判定を解除
+
+        // レンダラープロセス強制終了(OOM等)の安全ハンドラを常駐
+        webView.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                val didCrash = detail?.didCrash() ?: false
+                val reason = if (didCrash) "レンダラークラッシュ (C++エラー)" else "メモリ不足によるOS強制終了 (OOM)"
+                Log.e(TAG, "WebView onRenderProcessGone 検知: $reason")
+                listener.onTaskFinished(false, "翻訳エラー停止: $reason")
+                stop()
+                return true // ホストアプリの道連れクラッシュを100%阻止
+            }
+        }
     }
 
     fun start() {
@@ -92,23 +113,38 @@ open class BaseWebTranslationTask(
                                 pageLoaded.complete(true)
                             }
                         }
+
+                        override fun onRenderProcessGone(v: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                            Log.e(TAG, "初期ロード中に onRenderProcessGone を検知")
+                            if (!pageLoaded.isCompleted) pageLoaded.complete(false)
+                            return true
+                        }
                     }
 
-                    webView.loadUrl(targetUrl)
+                    mainHandler.post {
+                        webView.loadUrl(targetUrl)
+                    }
 
-                    val isLoaded = withTimeoutOrNull(strategy.pageLoadTimeoutMs) {
+                    withTimeout(strategy.pageLoadTimeoutMs) {
                         pageLoaded.await()
-                    } ?: false
-
-                    if (!isLoaded || !isRunning) {
-                        throw IllegalStateException("${strategy.engineName}翻訳のページ読み込みに失敗しました")
                     }
                 }
 
-                // 入力欄がDOMに出現するまで待機
+                if (!isRunning) return@launch
+
+                // PC版ビューポートの最適化スクリプト注入
+                if (strategy.isDesktop) {
+                    evalJs(webView, WebViewHelper.buildDesktopViewportJs(true))
+                }
+
+                // DOMが操作可能になるまで待機
+                listener.onProgress(0, totalFiles, "", 0, 0, "${strategy.engineName}の入力枠を待機中...")
                 waitForDomReady(webView)
 
                 var completedCount = 0
+                var consecutiveFailureCount = 0
+                val maxConsecutiveFailures = 2 // 連続2ファイル失敗で全体停止（サーキットブレーカー）
+                val failedFileNames = mutableListOf<String>()
 
                 for ((index, fileInfo) in pendingFiles.withIndex()) {
                     if (!isRunning) break
@@ -122,6 +158,14 @@ open class BaseWebTranslationTask(
                     val readResult = fileStore.readTextFile(fileInfo.uri)
                     if (readResult.isFailure) {
                         Log.e(TAG, "Failed to read file: ${fileInfo.name}", readResult.exceptionOrNull())
+                        consecutiveFailureCount++
+                        failedFileNames.add(fileInfo.name)
+                        if (consecutiveFailureCount >= maxConsecutiveFailures) {
+                            val stopMsg = "${strategy.engineName}翻訳を停止しました: ファイルの読み込みに連続して失敗しました"
+                            listener.onTaskFinished(false, stopMsg)
+                            stop()
+                            return@launch
+                        }
                         continue
                     }
 
@@ -129,6 +173,7 @@ open class BaseWebTranslationTask(
                     if (originalContent.isEmpty()) {
                         fileStore.saveTranslatedFile(folderUri, fileInfo.name, "")
                         completedCount++
+                        consecutiveFailureCount = 0 // 成功したのでリセット
                         listener.onProgress(
                             completedCount, totalFiles, fileInfo.name, 1, 1,
                             "空ファイルを保存完了 ($currentFileNum/$totalFiles)"
@@ -139,8 +184,8 @@ open class BaseWebTranslationTask(
                     val chunks = TextChunker.splitIntoChunks(originalContent, strategy.maxChunkSize)
                     val totalChunks = chunks.size
                     val translatedChunks = mutableListOf<String>()
-                    var fileSuccess = true
                     var lastChunkResultText = ""
+                    var fileSuccess = true
 
                     Log.d(TAG, "Starting file ${fileInfo.name}: totalLength=${originalContent.length}, totalChunks=$totalChunks")
 
@@ -153,19 +198,32 @@ open class BaseWebTranslationTask(
                             "${strategy.engineName}翻訳中 ($currentFileNum/$totalFiles, チャンク $currentChunkNum/$totalChunks)"
                         )
 
-                        // チャンク翻訳（リトライ対応 & 前世代重複防止）
+                        // チャンク翻訳（通信瞬断・遅延に耐えるシンプル3回リトライ）
                         var chunkResult: String? = null
-                        for (retry in 0..MAX_CHUNK_RETRIES) {
+                        val maxRetries = 3
+
+                        for (retry in 1..maxRetries) {
                             if (!isRunning) break
+
                             chunkResult = translateChunk(webView, chunkText, lastChunkResultText)
-                            if (chunkResult != null && chunkResult.isNotBlank()) break
-                            Log.w(TAG, "Chunk $currentChunkNum retry $retry of file ${fileInfo.name}")
-                            delay(2000L + Random.nextLong(0, 500))
+                            if (!chunkResult.isNullOrBlank()) {
+                                break // 成功！
+                            }
+
+                            // 本文が取得できなかった場合
+                            if (retry < maxRetries) {
+                                listener.onProgress(
+                                    completedCount, totalFiles, fileInfo.name, currentChunkNum, totalChunks,
+                                    "本文を取得できなかったため再試行中 ($retry/$maxRetries 回目)..."
+                                )
+                                delay(2000L + Random.nextLong(500, 1500))
+                            }
                         }
 
-                        if (chunkResult == null || chunkResult.isBlank()) {
+                        // 3回試行しても本文が取得できなかった場合: このファイルを中断
+                        if (chunkResult.isNullOrBlank()) {
                             fileSuccess = false
-                            Log.e(TAG, "Translation failed for chunk $currentChunkNum of file ${fileInfo.name}")
+                            Log.e(TAG, "Chunk $currentChunkNum failed after $maxRetries retries for file ${fileInfo.name}")
                             break
                         }
 
@@ -186,21 +244,43 @@ open class BaseWebTranslationTask(
                         delay(actualChunkDelay)
                     }
 
+                    // ファイル全体の保存成否判定
                     if (fileSuccess && isRunning && translatedChunks.size == totalChunks) {
                         val combinedResult = translatedChunks.joinToString("")
                         Log.d(TAG, "Saving translated file ${fileInfo.name}: originalLength=${originalContent.length}, translatedLength=${combinedResult.length}")
                         val saveResult = fileStore.saveTranslatedFile(folderUri, fileInfo.name, combinedResult)
                         if (saveResult.isSuccess) {
                             completedCount++
+                            consecutiveFailureCount = 0 // ★成功したので連続失敗カウントをリセット！
                             listener.onProgress(
                                 completedCount, totalFiles, fileInfo.name, totalChunks, totalChunks,
                                 "保存完了 ($currentFileNum/$totalFiles)"
                             )
                         } else {
+                            fileSuccess = false
                             Log.e(TAG, "Failed to save translated file: ${fileInfo.name}", saveResult.exceptionOrNull())
                         }
-                    } else {
-                        Log.e(TAG, "File ${fileInfo.name} failed or cancelled. translatedChunks=${translatedChunks.size}/$totalChunks")
+                    }
+
+                    // サーキットブレーカー判定
+                    if (!fileSuccess && isRunning) {
+                        consecutiveFailureCount++
+                        failedFileNames.add(fileInfo.name)
+                        Log.w(TAG, "File ${fileInfo.name} failed. Consecutive failures: $consecutiveFailureCount")
+
+                        if (consecutiveFailureCount >= maxConsecutiveFailures) {
+                            // ★連続2ファイル失敗: 単一ファイルではなく全体的な制限・Captcha・通信障害と判断して全体安全停止
+                            val stopMsg = "${strategy.engineName}翻訳を停止しました: 連続して翻訳に失敗しました（制限・Captcha・通信障害の可能性があります）。Web版をご確認ください"
+                            listener.onProgress(completedCount, totalFiles, fileInfo.name, 0, 0, stopMsg)
+                            listener.onTaskFinished(false, stopMsg)
+                            stop()
+                            return@launch
+                        } else {
+                            // ★単一の失敗（1回目）: このファイルをスキップして後続ファイルへ前進
+                            val skipMsg = "⚠️ ${fileInfo.name} をスキップして次へ進みます"
+                            listener.onProgress(completedCount, totalFiles, fileInfo.name, 0, 0, skipMsg)
+                            delay(1500L)
+                        }
                     }
 
                     // 通信ゼロで Chromium の一時 RAM キャッシュをパージ（長時間稼働時のメモリ肥大化防止）
@@ -216,7 +296,11 @@ open class BaseWebTranslationTask(
                 }
 
                 if (isRunning) {
-                    val finishMessage = "${strategy.engineName}: 全 $completedCount / $totalFiles 件の翻訳が完了しました"
+                    val finishMessage = if (failedFileNames.isEmpty()) {
+                        "${strategy.engineName}: 全 $completedCount / $totalFiles 件の翻訳が完了しました"
+                    } else {
+                        "${strategy.engineName}: $completedCount / $totalFiles 件完了 (${failedFileNames.size}件スキップ: ${failedFileNames.joinToString(", ")})"
+                    }
                     listener.onProgress(completedCount, totalFiles, "", 0, 0, finishMessage)
                     listener.onTaskFinished(true, finishMessage)
                 }
@@ -243,6 +327,7 @@ open class BaseWebTranslationTask(
 
     /**
      * 単一チャンクの翻訳処理。
+     * 本文が正常に確定取得できた場合はテキストを返し、取得できなければ null を返す（KISS原則）。
      */
     private suspend fun translateChunk(view: WebView, text: String, lastResultText: String): String? {
         if (!isRunning) return null
@@ -291,11 +376,6 @@ open class BaseWebTranslationTask(
 
             val domResult = parseDomResult(evalJs(view, strategy.getResultJs))
 
-            if (domResult.status == "LIMIT_ERROR") {
-                Log.e(TAG, "Limit error: ${domResult.message}")
-                return null
-            }
-
             if (domResult.status == "OK" && domResult.text.isNotBlank()) {
                 // 前回チャンクの結果と同一なら、まだ新しい翻訳が反映されていない
                 if (lastResultText.isNotEmpty() && domResult.text == lastResultText) {
@@ -330,67 +410,57 @@ open class BaseWebTranslationTask(
         return try {
             json.decodeFromString<DomTranslationResult>(cleanJson)
         } catch (_: Exception) {
-            DomTranslationResult(status = "WAITING")
+            DomTranslationResult(status = "UNKNOWN", text = cleanJson)
         }
     }
 
-    private suspend fun evalJs(view: WebView, script: String): String = withTimeoutOrNull(10000L) {
+    private suspend fun evalJs(view: WebView, script: String): String =
         suspendCancellableCoroutine { cont ->
             mainHandler.post {
-                if (!isRunning) {
-                    if (cont.isActive) cont.resumeWith(Result.success("CANCELLED"))
-                    return@post
-                }
                 view.evaluateJavascript(script) { result ->
-                    if (cont.isActive) {
-                        cont.resumeWith(Result.success(result ?: "null"))
-                    }
+                    if (cont.isActive) cont.resume(result ?: "")
                 }
             }
         }
-    } ?: "TIMEOUT"
 
     fun stop() {
+        if (!isRunning) return
         isRunning = false
         job?.cancel()
         job = null
         mainHandler.post {
             try {
                 webView.stopLoading()
-                webView.webViewClient = object : WebViewClient() {}
-                webView.webChromeClient = null
+                webView.pauseTimers()
                 webView.destroy()
             } catch (e: Exception) {
-                Log.w(TAG, "Error destroying webView", e)
+                Log.w(TAG, "Error destroying translation WebView", e)
             }
+        }
+    }
+
+    /**
+     * "1.0-3.0" などの範囲文字列からランダムなミリ秒待機時間を算出する。
+     */
+    private fun calculateDelayMs(delayConfig: String, defaultSec: Double): Long {
+        return try {
+            if (delayConfig.contains("-")) {
+                val parts = delayConfig.split("-")
+                val minSec = parts[0].trim().toDoubleOrNull() ?: defaultSec
+                val maxSec = parts[1].trim().toDoubleOrNull() ?: minSec
+                val actualMin = minOf(minSec, maxSec)
+                val actualMax = maxOf(minSec, maxSec)
+                (Random.nextDouble(actualMin, actualMax) * 1000).toLong()
+            } else {
+                val sec = delayConfig.trim().toDoubleOrNull() ?: defaultSec
+                (sec * 1000).toLong()
+            }
+        } catch (_: Exception) {
+            (defaultSec * 1000).toLong()
         }
     }
 
     companion object {
         private const val TAG = "BaseWebTranslationTask"
-        private const val MAX_CHUNK_RETRIES = 2
-
-        /**
-         * 範囲指定（"30-80" や "1-3"）または単一指定からランダムな待機時間（ミリ秒）を計算する。
-         */
-        fun calculateDelayMs(delayStr: String, defaultSec: Double = 2.0): Long {
-            return try {
-                if (delayStr.contains("-")) {
-                    val parts = delayStr.split("-")
-                    val min = parts[0].trim().toDoubleOrNull() ?: defaultSec
-                    val max = parts.getOrNull(1)?.trim()?.toDoubleOrNull() ?: min
-                    val actualMin = min.coerceAtLeast(0.1)
-                    val actualMax = max.coerceAtLeast(actualMin)
-                    val randomSec = if (actualMin >= actualMax) actualMin else Random.nextDouble(actualMin, actualMax)
-                    (randomSec * 1000).toLong()
-                } else {
-                    val sec = delayStr.toDoubleOrNull() ?: defaultSec
-                    val jitter = Random.nextDouble(-0.3, 0.3)
-                    ((sec + jitter).coerceAtLeast(0.1) * 1000).toLong()
-                }
-            } catch (_: Exception) {
-                (defaultSec * 1000).toLong()
-            }
-        }
     }
 }

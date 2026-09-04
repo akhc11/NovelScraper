@@ -28,12 +28,13 @@ data class ModelProfile(
     val id: String = UUID.randomUUID().toString(),
     val provider: LlmProvider = LlmProvider.GEMINI,
     val modelName: String,
+    val maxOutputChars: Int = 20000,     // 目標日本語出力文字数 (デフォルト20,000文字)
     val thinkingLevel: String = "medium", // minimal, low, medium, high
     val thinkingBudget: Int? = null,     // 0=思考OFF, -1=動的, 正数=トークン数
     val temperature: Double? = null,     // null時はAPIに送信しない
-    val splitThresholdBytes: Int = 13000,
-    val chunkSizeBytes: Int = 12000,
-    val batchMaxBytes: Int = 12000,
+    val splitThresholdBytes: Int = 50000,
+    val chunkSizeBytes: Int = 45000,
+    val batchMaxBytes: Int = 45000,
     val promptOrder: List<Int> = listOf(1, 1),
     val useCustomPromptOrder: Boolean = false, // trueなら一括設定や言語自動選択に上書きされず、このモデル固有のpromptOrderを絶対優先
     val reasoningEffort: String = "none", // OpenRouter用 (none, low, medium, high)
@@ -71,9 +72,9 @@ data class LlmTranslationConfig(
             provider = LlmProvider.GEMINI,
             thinkingLevel = "medium",
             temperature = null,
-            splitThresholdBytes = 13000,
-            chunkSizeBytes = 12000,
-            batchMaxBytes = 12000,
+            splitThresholdBytes = 50000,
+            chunkSizeBytes = 45000,
+            batchMaxBytes = 45000,
             promptOrder = listOf(1, 1)
         ),
         ModelProfile(
@@ -81,9 +82,9 @@ data class LlmTranslationConfig(
             provider = LlmProvider.GEMINI,
             thinkingLevel = "medium",
             temperature = null,
-            splitThresholdBytes = 14000,
-            chunkSizeBytes = 12000,
-            batchMaxBytes = 12000,
+            splitThresholdBytes = 50000,
+            chunkSizeBytes = 45000,
+            batchMaxBytes = 45000,
             promptOrder = listOf(1, 1)
         ),
         ModelProfile(
@@ -91,9 +92,9 @@ data class LlmTranslationConfig(
             provider = LlmProvider.GEMINI,
             thinkingLevel = "medium",
             temperature = null,
-            splitThresholdBytes = 14000,
-            chunkSizeBytes = 12000,
-            batchMaxBytes = 12000,
+            splitThresholdBytes = 50000,
+            chunkSizeBytes = 45000,
+            batchMaxBytes = 45000,
             promptOrder = listOf(1, 1)
         ),
         ModelProfile(
@@ -101,9 +102,9 @@ data class LlmTranslationConfig(
             provider = LlmProvider.GEMINI,
             thinkingLevel = "medium",
             temperature = 1.0,
-            splitThresholdBytes = 14000,
-            chunkSizeBytes = 12000,
-            batchMaxBytes = 12000,
+            splitThresholdBytes = 50000,
+            chunkSizeBytes = 45000,
+            batchMaxBytes = 45000,
             promptOrder = listOf(1, 1)
         ),
         ModelProfile(
@@ -111,9 +112,9 @@ data class LlmTranslationConfig(
             provider = LlmProvider.GEMINI,
             thinkingLevel = "medium",
             temperature = 1.0,
-            splitThresholdBytes = 14000,
-            chunkSizeBytes = 12000,
-            batchMaxBytes = 12000,
+            splitThresholdBytes = 50000,
+            chunkSizeBytes = 45000,
+            batchMaxBytes = 45000,
             promptOrder = listOf(1, 1)
         )
     ),
@@ -142,17 +143,30 @@ data class LlmTranslationConfig(
 
     val enableCompletionMarker: Boolean = true,
     val enableTextSplit: Boolean = false,
-    val textSplitSizeBytes: Int = 8000,
+    val textSplitSizeChars: Int = 8000,
 
     val enableDictGen: Boolean = false,
     val dictProvider: LlmProvider = LlmProvider.GEMINI,
     val dictModel: String = "gemma-4-31b-it",
-    val dictMergeModel: String = "gemini-3.5-flash", // マージ・レビュー用モデル (空欄時は dictModel を使用)
+    val dictMergeModel: String = "gemini-3.5-flash", // レガシー互換用
+
+    // プロバイダー別の個別辞書モデル・設定
+    val dictGeminiModel: String = "gemini-3.1-flash-lite",
+    val dictGeminiMergeModel: String = "gemini-3.5-flash",
+    val dictOpenRouterModel: String = "google/gemma-4-31b-it:free",
+    val dictOpenRouterMergeModel: String = "",
+    val dictOpenRouterProviderOrder: List<String> = emptyList(),
+    val dictOpenRouterProviderAllowFallbacks: Boolean? = false,
+    val dictGroqModel: String = "llama-3.3-70b-versatile",
+    val dictGroqMergeModel: String = "",
+
     val dictTotalParts: Int = 100, // 0 = 全ファイル
     val dictSampleMode: DictSampleMode = DictSampleMode.HEAD, // 抽出範囲モード (先頭 / 全編均等)
     val dictBatchMaxBytes: Int = 50000, // 1回のAPI送信最大サイズ (デフォルト50KB ≒ 約15,000トークン安全圏)
     val dictMaxTotalScanBytes: Int = 2000000, // 辞書用合計最大スキャン容量 (2MBセーフティガード)
-    val dictParallelCount: Int = 30, // 辞書生成並列数 (キー数×5推奨, gemma-4-31b: 15RPM/キー)
+    val dictWorkerCount: Int = 6, // 辞書生成 同時ワーカー数 (キー分散数)
+    val dictConcurrencyPerWorker: Int = 5, // 1ワーカーあたりの並列リクエスト数
+    val dictParallelCount: Int = 30, // 辞書生成並列数 (互換用: dictWorkerCount * dictConcurrencyPerWorker)
     val dictRequestDelaySec: Int = 0, // 辞書生成 1リクエストごとの待機秒数 (0=待機なし, Gemma等TPM制限時は10〜15秒推奨)
     val dict429CooldownSec: Int = 60, // 辞書生成 429 Quota Exceeded 検知時の待機秒数 (デフォルト60秒)
 
@@ -163,39 +177,121 @@ data class LlmTranslationConfig(
     val filesPerFolder: Int = 0,   // 0=無制限, >0=フォルダあたり上限
     val requestDelaySec: Int = 2,
 
-    // 言語別自動サイズ調整
-    val enableAutoLanguageSize: Boolean = true, // 検出言語に応じた分割サイズの自動調整
-    val langSplitKoreanKb: Int = 25,            // 韓国語 分割閾値 (KB)
-    val langSplitChineseKb: Int = 20,           // 中国語 分割閾値 (KB)
-    val langSplitEnglishKb: Int = 15,           // 英語 分割閾値 (KB)
-
     // 言語連動プロンプト自動選択 (成人向け等の手動選択を保護するためデフォルトOFF)
     val enableAutoPromptOrder: Boolean = false,
     val autoPromptOrderKorean: List<Int> = listOf(3, 7),
     val autoPromptOrderChinese: List<Int> = listOf(1, 1),
-    val autoPromptOrderEnglish: List<Int> = listOf(2, 7)
+    val autoPromptOrderEnglish: List<Int> = listOf(2, 7),
+
+    // 言語別 品質検証サイズ比設定 (min %, max %)
+    val sizeRatioZhMin: Int = 102,
+    val sizeRatioZhMax: Int = 200,
+    val sizeRatioKoMin: Int = 102,
+    val sizeRatioKoMax: Int = 150,
+    val sizeRatioEnMin: Int = 105,
+    val sizeRatioEnMax: Int = 220, // 小説向け適正デフォルト (220%)
+    val sizeRatioJaMin: Int = 100,
+    val sizeRatioJaMax: Int = 200
 ) {
     /**
-     * 検出言語とプロファイルに応じた実効分割閾値（バイト）を取得
+     * 言語別の実効サイズ比範囲 (min %, max %) を取得
      */
-    fun getEffectiveSplitThreshold(sourceLang: SourceLanguage, profile: ModelProfile): Int {
-        if (!enableAutoLanguageSize) return profile.splitThresholdBytes
-        val kb = when (sourceLang) {
-            SourceLanguage.KO -> langSplitKoreanKb
-            SourceLanguage.ZH -> langSplitChineseKb
-            SourceLanguage.EN -> langSplitEnglishKb
-            SourceLanguage.JA -> langSplitKoreanKb
+    fun getSizeRatioRange(sourceLang: SourceLanguage): Pair<Int, Int> {
+        val (minVal, maxVal) = when (sourceLang) {
+            SourceLanguage.ZH -> sizeRatioZhMin to sizeRatioZhMax
+            SourceLanguage.KO -> sizeRatioKoMin to sizeRatioKoMax
+            SourceLanguage.EN -> sizeRatioEnMin to sizeRatioEnMax
+            SourceLanguage.JA -> sizeRatioJaMin to sizeRatioJaMax
         }
-        return (kb * 1000).coerceAtLeast(4000)
+        val safeMin = minVal.coerceIn(50, 300)
+        val safeMax = maxVal.coerceIn(safeMin, 500)
+        return safeMin to safeMax
     }
 
     /**
-     * 検出言語とプロファイルに応じた実効チャンクサイズ（バイト）を取得
+     * 辞書生成の実効同時APIリクエスト数 (ワーカー数 × 並列数) を取得
+     */
+    fun getEffectiveDictParallelCount(): Int {
+        val calculated = dictWorkerCount * dictConcurrencyPerWorker
+        return if (calculated > 0) calculated.coerceIn(1, 30) else dictParallelCount.coerceIn(1, 30)
+    }
+
+    fun getEffectiveDictModel(targetProvider: LlmProvider = dictProvider): String {
+        val model = when (targetProvider) {
+            LlmProvider.GEMINI -> dictGeminiModel.ifBlank { dictModel }
+            LlmProvider.OPENROUTER -> dictOpenRouterModel.ifBlank { dictModel }
+            LlmProvider.GROQ -> dictGroqModel.ifBlank { dictModel }
+        }
+        return model.trim().ifBlank {
+            when (targetProvider) {
+                LlmProvider.GEMINI -> "gemini-3.1-flash-lite"
+                LlmProvider.OPENROUTER -> "google/gemma-4-31b-it:free"
+                LlmProvider.GROQ -> "llama-3.3-70b-versatile"
+            }
+        }
+    }
+
+    /**
+     * 現在の辞書プロバイダーに応じた実効マージ・レビューモデルを取得
+     */
+    fun getEffectiveDictMergeModel(targetProvider: LlmProvider = dictProvider): String {
+        val mergeModel = when (targetProvider) {
+            LlmProvider.GEMINI -> dictGeminiMergeModel.ifBlank { dictMergeModel }
+            LlmProvider.OPENROUTER -> dictOpenRouterMergeModel
+            LlmProvider.GROQ -> dictGroqMergeModel
+        }
+        return mergeModel.trim().ifBlank { getEffectiveDictModel(targetProvider) }
+    }
+
+    /**
+     * 辞書生成用の OpenRouter プロバイダー指定 (ルーティング)
+     */
+    fun getEffectiveDictProviderOrder(): List<String> {
+        return if (dictProvider == LlmProvider.OPENROUTER) dictOpenRouterProviderOrder else emptyList()
+    }
+
+    /**
+     * 辞書生成用の OpenRouter フォールバック許可フラグ
+     */
+    fun getEffectiveDictProviderAllowFallbacks(): Boolean? {
+        return if (dictProvider == LlmProvider.OPENROUTER) dictOpenRouterProviderAllowFallbacks else false
+    }
+
+    /**
+     * 検出言語とプロファイルの目標出力文字数に応じた実効入力分割閾値（バイト）を取得
+     * - 目標日本語出力文字数 (maxOutputChars) から言語別の翻訳膨張率で逆算
+     */
+    fun getEffectiveSplitThreshold(sourceLang: SourceLanguage, profile: ModelProfile): Int {
+        val targetChars = profile.maxOutputChars.coerceIn(2000, 100000)
+
+        val inputBytes = when (sourceLang) {
+            // 中国語: 漢字1文字=3B, 日本語への文字膨張率 約1.6倍 ➔ 目標20,000字で約37.5KB
+            SourceLanguage.ZH -> (targetChars * 3.0 / 1.6).toInt()
+            // 韓国語: ハングル1文字=3B, 日本語への文字膨張率 約1.1倍 ➔ 目標20,000字で約54.5KB
+            SourceLanguage.KO -> (targetChars * 3.0 / 1.1).toInt()
+            // 英語: 1文字=1B, 1単語≒5Bで日本語約2.8文字 ➔ 目標20,000字で約35.7KB (約7,142単語)
+            SourceLanguage.EN -> (targetChars / 2.8 * 5.0).toInt()
+            SourceLanguage.JA -> targetChars * 3
+        }
+
+        return inputBytes.coerceAtLeast(4000)
+    }
+
+    /**
+     * 検出言語とプロファイルの目標出力文字数に応じた実効チャンクサイズ（バイト）を取得
      */
     fun getEffectiveChunkSize(sourceLang: SourceLanguage, profile: ModelProfile): Int {
-        if (!enableAutoLanguageSize) return profile.chunkSizeBytes
-        val splitThreshold = getEffectiveSplitThreshold(sourceLang, profile)
-        return (splitThreshold * 0.85).toInt().coerceAtLeast(3000)
+        val threshold = getEffectiveSplitThreshold(sourceLang, profile)
+        return (threshold * 0.9).toInt().coerceAtLeast(3000)
+    }
+
+    /**
+     * 検出言語とプロファイルの目標出力文字数に応じた実効バッチサイズ（バイト）を取得
+     * - 小ファイルを [SEG:N] でまとめて翻訳する最大合計バイト数
+     */
+    fun getEffectiveBatchSize(sourceLang: SourceLanguage, profile: ModelProfile): Int {
+        val threshold = getEffectiveSplitThreshold(sourceLang, profile)
+        return (threshold * 0.9).toInt().coerceAtLeast(3000)
     }
 
     /**

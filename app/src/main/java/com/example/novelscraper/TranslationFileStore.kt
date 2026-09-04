@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
+import com.example.novelscraper.translation.common.UniversalCharsetDetector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -15,14 +16,19 @@ data class TranslationFileInfo(
     val size: Long
 )
 
+/**
+ * 翻訳対象ファイルおよび完了ファイルの管理を行うストレージクラス。
+ * 毎回の listFiles() 全件走査による SAF の極端な I/O オーバーヘッドを回避するため、
+ * ディレクトリ参照および完了ファイル名のインメモリキャッシュを保持する。
+ */
 class TranslationFileStore(
     private val context: Context,
-    private val outputFolderName: String = GOOGLE_OUTPUT_FOLDER
+    val outputFolderName: String = GOOGLE_OUTPUT_FOLDER
 ) {
-
     companion object {
         const val GOOGLE_OUTPUT_FOLDER = "翻訳完了_GOOGLE"
         const val DEEPL_OUTPUT_FOLDER = "翻訳完了_DEEPL"
+        const val PAPAGO_OUTPUT_FOLDER = "翻訳完了_PAPAGO"
         private const val TAG = "TranslationFileStore"
     }
 
@@ -37,50 +43,23 @@ class TranslationFileStore(
         cachedCompletedNames.clear()
     }
 
-    private fun getDocumentFile(folderUri: Uri): DocumentFile? {
-        return if (folderUri.scheme == "file") {
-            val f = File(folderUri.path ?: return null)
-            if (f.exists()) DocumentFile.fromFile(f) else null
-        } else {
-            DocumentFile.fromTreeUri(context, folderUri)
-        }
-    }
-
     /**
-     * 翻訳完了フォルダ（指定された outputFolderName）を取得、存在しなければ新規作成する。
-     */
-    private fun getOrCreateOutputDirectory(rootDoc: DocumentFile): DocumentFile? {
-        val children = rootDoc.listFiles()
-        // 既存のフォルダ（例: 「翻訳完了_GOOGLE」または「翻訳完了_DEEPL」等）を探す
-        val existingDir = children.firstOrNull { 
-            it.isDirectory && (
-                it.name.equals(outputFolderName, ignoreCase = true) ||
-                it.name?.startsWith(outputFolderName, ignoreCase = true) == true
-            )
-        }
-        if (existingDir != null) {
-            return existingDir
-        }
-        return rootDoc.createDirectory(outputFolderName)
-    }
-
-    /**
-     * 指定されたフォルダ直下の .txt ファイルのうち、
-     * 翻訳完了フォルダに同名ファイルが存在しない未翻訳ファイル一覧を取得する。
+     * 指定されたフォルダ内の .txt ファイル一覧を取得し、
+     * 出力先フォルダ（outputFolderName）にまだ存在しない「未翻訳ファイル」のみを自然順（01, 02, ... 10）でソートして返す。
      */
     suspend fun getPendingTextFiles(folderUri: Uri): List<TranslationFileInfo> = withContext(Dispatchers.IO) {
         val rootDoc = getDocumentFile(folderUri) ?: return@withContext emptyList()
         if (!rootDoc.exists() || !rootDoc.isDirectory) return@withContext emptyList()
 
+        // 出力フォルダを取得または作成し、完了ファイル名をキャッシュ
         val outputDirDoc = getOrCreateOutputDirectory(rootDoc)
         cachedFolderUri = folderUri
         cachedOutputDirDoc = outputDirDoc
-        cachedCompletedNames.clear()
 
-        // 翻訳完了フォルダ内の既存ファイル名一覧を取得してキャッシュ
+        cachedCompletedNames.clear()
         if (outputDirDoc != null) {
             outputDirDoc.listFiles()
-                .filter { it.isFile }
+                .filter { it.isFile && it.length() > 0L }
                 .mapNotNull { it.name?.lowercase() }
                 .forEach { cachedCompletedNames.add(it) }
         }
@@ -90,7 +69,6 @@ class TranslationFileStore(
         for (file in allChildren) {
             if (file.isFile && file.name?.endsWith(".txt", ignoreCase = true) == true) {
                 val fileName = file.name ?: continue
-                // 翻訳完了フォルダ内に同名ファイルがなければ未翻訳リストに追加
                 if (!cachedCompletedNames.contains(fileName.lowercase())) {
                     pendingList.add(
                         TranslationFileInfo(
@@ -103,7 +81,7 @@ class TranslationFileStore(
             }
         }
 
-        // ファイル名順（自然順ソート）
+        // 自然順（01, 02, 10 等）でソート
         pendingList.sortedWith(Comparator { a, b ->
             compareNatural(a.name, b.name)
         })
@@ -136,24 +114,27 @@ class TranslationFileStore(
     }
 
     /**
-     * 指定されたファイルのテキストを UTF-8 で読み込む。
+     * 指定されたファイルのテキストを万能文字コード自動判別（Unicode / 韓国語 / 中国語 / 日本語）で読み込む。
      */
     suspend fun readTextFile(fileUri: Uri): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            if (fileUri.scheme == "file") {
+            val bytes = if (fileUri.scheme == "file") {
                 val file = File(fileUri.path ?: throw IllegalStateException("Invalid file path: $fileUri"))
-                file.readText(Charsets.UTF_8)
+                file.readBytes()
             } else {
                 context.contentResolver.openInputStream(fileUri)?.use { inputStream ->
-                    inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    inputStream.readBytes()
                 } ?: throw IllegalStateException("Failed to open input stream for: $fileUri")
             }
+
+            UniversalCharsetDetector.decodeBytes(bytes)
         }
     }
 
     /**
      * 翻訳完了テキストを出力フォルダ配下に同名で保存する。
      * キャッシュを活用して毎回の listFiles() 全件スキャンを回避し、高速に書き込む。
+     * 書き込み失敗時はロールバック削除を行い、破損・中途半端な残骸を残さない。
      */
     suspend fun saveTranslatedFile(folderUri: Uri, fileName: String, content: String): Result<Uri> = withContext(Dispatchers.IO) {
         runCatching {
@@ -166,9 +147,8 @@ class TranslationFileStore(
                     ?: throw IllegalStateException("Failed to get or create output directory: $outputFolderName")
                 cachedFolderUri = folderUri
                 cachedOutputDirDoc = dir
-                // 新しいフォルダの場合はキャッシュを再構築
                 cachedCompletedNames.clear()
-                dir.listFiles().filter { it.isFile }.mapNotNull { it.name?.lowercase() }.forEach { cachedCompletedNames.add(it) }
+                dir.listFiles().filter { it.isFile && it.length() > 0L }.mapNotNull { it.name?.lowercase() }.forEach { cachedCompletedNames.add(it) }
                 dir
             }
 
@@ -176,27 +156,56 @@ class TranslationFileStore(
             val isAlreadyExisting = cachedCompletedNames.contains(lowerFileName)
 
             val targetFileDoc = if (isAlreadyExisting) {
-                // 既存ファイルが存在する場合は取得、見つからなければ新規作成
                 outputDirDoc.findFile(fileName)
                     ?: outputDirDoc.listFiles().firstOrNull { it.isFile && it.name.equals(fileName, ignoreCase = true) }
                     ?: outputDirDoc.createFile("text/plain", fileName)
             } else {
-                // 新規ファイルの場合は直接作成（全件スキャンをスキップ）
                 outputDirDoc.createFile("text/plain", fileName)
             } ?: throw IllegalStateException("Failed to create file: $fileName")
 
-            if (targetFileDoc.uri.scheme == "file") {
-                val file = File(targetFileDoc.uri.path ?: throw IllegalStateException("Invalid target path"))
-                file.writeText(content, Charsets.UTF_8)
-            } else {
-                context.contentResolver.openOutputStream(targetFileDoc.uri, "wt")?.use { outputStream ->
-                    outputStream.write(content.toByteArray(Charsets.UTF_8))
-                    outputStream.flush()
-                } ?: throw IllegalStateException("Failed to open output stream for: ${targetFileDoc.uri}")
-            }
+            try {
+                if (targetFileDoc.uri.scheme == "file") {
+                    val file = File(targetFileDoc.uri.path ?: throw IllegalStateException("Invalid target path"))
+                    file.writeText(content, Charsets.UTF_8)
+                } else {
+                    context.contentResolver.openOutputStream(targetFileDoc.uri, "wt")?.use { outputStream ->
+                        outputStream.write(content.toByteArray(Charsets.UTF_8))
+                        outputStream.flush()
+                    } ?: throw IllegalStateException("Failed to open output stream for: ${targetFileDoc.uri}")
+                }
 
-            cachedCompletedNames.add(lowerFileName)
-            targetFileDoc.uri
+                // 完全に書き込み成功した後にキャッシュへ追加
+                cachedCompletedNames.add(lowerFileName)
+                targetFileDoc.uri
+            } catch (e: Exception) {
+                // 書き込み失敗時は破損残骸を残さないようロールバック削除
+                try { targetFileDoc.delete() } catch (_: Exception) {}
+                cachedCompletedNames.remove(lowerFileName)
+                throw e
+            }
         }
+    }
+
+    private fun getDocumentFile(folderUri: Uri): DocumentFile? {
+        return if (folderUri.scheme == "file") {
+            val f = File(folderUri.path ?: return null)
+            if (f.exists()) DocumentFile.fromFile(f) else null
+        } else {
+            DocumentFile.fromTreeUri(context, folderUri)
+        }
+    }
+
+    private fun getOrCreateOutputDirectory(rootDoc: DocumentFile): DocumentFile? {
+        val children = rootDoc.listFiles()
+        val existingDir = children.firstOrNull { 
+            it.isDirectory && (
+                it.name.equals(outputFolderName, ignoreCase = true) ||
+                it.name?.startsWith(outputFolderName, ignoreCase = true) == true
+            )
+        }
+        if (existingDir != null) {
+            return existingDir
+        }
+        return rootDoc.createDirectory(outputFolderName)
     }
 }

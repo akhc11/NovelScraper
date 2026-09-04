@@ -65,6 +65,33 @@ class LlmPipelineTest {
     }
 
     @Test
+    fun testTranslationQualityValidator_CustomSizeRatio() {
+        val config = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig(
+            sizeRatioEnMin = 105,
+            sizeRatioEnMax = 220
+        )
+        val (minR, maxR) = config.getSizeRatioRange(SourceLanguage.EN)
+        assertEquals(105, minR)
+        assertEquals(220, maxR)
+
+        // 200バイトの英文テキスト
+        val englishSrc = "The cold winter wind blew fiercely across the empty frozen lake as the lonely traveler walked slowly towards the distant warm light flickering inside the small wooden cabin in the deep snow."
+        val srcBytes = englishSrc.toByteArray(Charsets.UTF_8).size
+        assertTrue(srcBytes >= 150)
+
+        // 正常な日本語翻訳 (約1.5倍のバイト数)
+        val normalJapanese = "凍てつく湖を激しい冬の風が吹き抜ける中、孤独な旅人は深い雪の中に佇む小さな木造小屋の窓から漏れる、遠くのかすかな暖かい光に向かってゆっくりと歩を進めていた。"
+        val okRes = TranslationQualityValidator.validate(englishSrc, normalJapanese, SourceLanguage.EN, minR, maxR)
+        assertTrue(okRes is QualityValidationResult.Success)
+
+        // 極端な水増し・ハルシネーション (250% 超過)
+        val bloatedJapanese = normalJapanese + normalJapanese + normalJapanese
+        val failRes = TranslationQualityValidator.validate(englishSrc, bloatedJapanese, SourceLanguage.EN, minR, maxR)
+        assertTrue(failRes is QualityValidationResult.Failure)
+        assertTrue((failRes as QualityValidationResult.Failure).reason.contains("サイズ比超過"))
+    }
+
+    @Test
     fun testTranslationQualityValidator_PreambleStripping() {
         val withPreamble = "Certainly! Here is the translation:\nこれは翻訳された日本語の本文です。"
         val stripped = TranslationQualityValidator.stripPreamble(withPreamble)
@@ -111,6 +138,21 @@ class LlmPipelineTest {
         assertTrue(chunks.size > 1)
         assertEquals("part_0001.txt", chunks[0].first)
         assertEquals("part_0002.txt", chunks[1].first)
+    }
+
+    @Test
+    fun testNovelTextSplitter_OrphanTailMerge() {
+        // 約1000バイトの文章の末尾に、たった1行だけがはみ出しているケース
+        val mainText = (1..15).joinToString("\n\n") { "これは段落番号 $it の通常のテスト文章です。十分な長さがあります。" }
+        val tinyTail = "（完）" // たった1行の短い末尾
+        val fullText = "$mainText\n\n$tinyTail"
+
+        val chunks = NovelTextSplitter.splitIntoChunks(fullText, limitBytes = 1000)
+        // 最後のチャンクが「（完）」だけで孤立せず、直前のチャンク末尾に含まれていることを検証
+        val lastChunkText = chunks.last().second
+        assertTrue(lastChunkText.contains("（完）"))
+        // 最後のチャンクが十分な長さを持っている（1行だけのゴミチャンクになっていない）
+        assertTrue(lastChunkText.length > 50)
     }
 
     @Test
@@ -210,25 +252,34 @@ class LlmPipelineTest {
     }
 
     @Test
-    fun testEffectiveSplitThreshold_AutoAndManual() {
-        val config = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig(
-            enableAutoLanguageSize = true,
-            langSplitKoreanKb = 25,
-            langSplitChineseKb = 20,
-            langSplitEnglishKb = 15
+    fun testEffectiveSplitThreshold_ReverseCalculatedFromTargetOutputChars() {
+        val config = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig()
+        // 目標出力 20,000文字 (約60KBの日本語出力)
+        val profile20k = com.example.novelscraper.translation.llm.engine.ModelProfile(
+            modelName = "gemini-3.5-flash",
+            maxOutputChars = 20000
         )
-        val profile = com.example.novelscraper.translation.llm.engine.ModelProfile(modelName = "gemini-3.5-flash", splitThresholdBytes = 13000)
 
-        // 自動サイズ有効時
-        assertEquals(25000, config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, profile))
-        assertEquals(20000, config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, profile))
-        assertEquals(15000, config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, profile))
+        // 中国語 (ZH: 1.6倍膨張) ➔ 60,000B / 1.6 = 37,500B
+        val zhThreshold = config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, profile20k)
+        assertEquals(37500, zhThreshold)
+        assertEquals((37500 * 0.9).toInt(), config.getEffectiveChunkSize(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, profile20k))
 
-        // 自動サイズ無効時 (手動固定)
-        val manualConfig = config.copy(enableAutoLanguageSize = false)
-        assertEquals(13000, manualConfig.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, profile))
-        assertEquals(13000, manualConfig.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, profile))
-        assertEquals(13000, manualConfig.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, profile))
+        // 韓国語 (KO: 1.1倍膨張) ➔ 60,000B / 1.1 = 54,545B
+        val koThreshold = config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.KO, profile20k)
+        assertEquals(54545, koThreshold)
+
+        // 英語 (EN: 1単語5Bで日本語2.8文字) ➔ 20,000 / 2.8 * 5.0 = 35,714B
+        val enThreshold = config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.EN, profile20k)
+        assertEquals(35714, enThreshold)
+
+        // 目標出力 10,000文字 (約30KBの日本語出力)
+        val profile10k = com.example.novelscraper.translation.llm.engine.ModelProfile(
+            modelName = "gemma-4-31b-it",
+            maxOutputChars = 10000
+        )
+        // 中国語 ➔ 30,000B / 1.6 = 18,750B
+        assertEquals(18750, config.getEffectiveSplitThreshold(com.example.novelscraper.translation.llm.pipeline.SourceLanguage.ZH, profile10k))
     }
 
     @Test
@@ -384,5 +435,74 @@ class LlmPipelineTest {
         val translation = "これは勇者に関する物語です。彼は王国を救うために旅に出ました。"
         val res = TranslationQualityValidator.validate(src, translation, SourceLanguage.ZH)
         assertTrue(res is QualityValidationResult.Success)
+    }
+
+    @Test
+    fun testLlmTranslationConfig_EffectiveDictSettings() {
+        val config = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig(
+            dictGeminiModel = "gemini-3.5-flash",
+            dictGeminiMergeModel = "gemini-3.5-flash",
+            dictOpenRouterModel = "google/gemma-4-31b-it:free",
+            dictOpenRouterMergeModel = "meta-llama/llama-3.3-70b-instruct:free",
+            dictOpenRouterProviderOrder = listOf("upstage", "baidu/fp8"),
+            dictOpenRouterProviderAllowFallbacks = true,
+            dictGroqModel = "llama-3.3-70b-versatile",
+            dictGroqMergeModel = ""
+        )
+
+        // Gemini
+        assertEquals("gemini-3.5-flash", config.getEffectiveDictModel(com.example.novelscraper.translation.llm.engine.LlmProvider.GEMINI))
+        assertEquals("gemini-3.5-flash", config.getEffectiveDictMergeModel(com.example.novelscraper.translation.llm.engine.LlmProvider.GEMINI))
+
+        // OpenRouter
+        assertEquals("google/gemma-4-31b-it:free", config.getEffectiveDictModel(com.example.novelscraper.translation.llm.engine.LlmProvider.OPENROUTER))
+        assertEquals("meta-llama/llama-3.3-70b-instruct:free", config.getEffectiveDictMergeModel(com.example.novelscraper.translation.llm.engine.LlmProvider.OPENROUTER))
+
+        // Groq (空欄時は抽出モデルと同じ)
+        assertEquals("llama-3.3-70b-versatile", config.getEffectiveDictModel(com.example.novelscraper.translation.llm.engine.LlmProvider.GROQ))
+        assertEquals("llama-3.3-70b-versatile", config.getEffectiveDictMergeModel(com.example.novelscraper.translation.llm.engine.LlmProvider.GROQ))
+
+        // OpenRouter ルーティング
+        val openRouterConfig = config.copy(dictProvider = com.example.novelscraper.translation.llm.engine.LlmProvider.OPENROUTER)
+        assertEquals(listOf("upstage", "baidu/fp8"), openRouterConfig.getEffectiveDictProviderOrder())
+        assertEquals(true, openRouterConfig.getEffectiveDictProviderAllowFallbacks())
+
+        // Gemini時のルーティングは空
+        val geminiConfig = config.copy(dictProvider = com.example.novelscraper.translation.llm.engine.LlmProvider.GEMINI)
+        assertTrue(geminiConfig.getEffectiveDictProviderOrder().isEmpty())
+    }
+
+    @Test
+    fun testProviderOrderParsing_FullwidthCommas() {
+        val input = "upstage、 baidu/fp8，nebius  deepinfra"
+        val parsed = input.split(Regex("[,、，\\s]+")).map { it.trim() }.filter { it.isNotBlank() }
+        assertEquals(listOf("upstage", "baidu/fp8", "nebius", "deepinfra"), parsed)
+    }
+
+    @Test
+    fun testLlmTranslationConfig_DictWorkersAndConcurrency() {
+        val defaultConfig = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig()
+        // デフォルトは gemini-3.1-flash-lite
+        assertEquals("gemini-3.1-flash-lite", defaultConfig.getEffectiveDictModel(com.example.novelscraper.translation.llm.engine.LlmProvider.GEMINI))
+        // デフォルトは 6 ワーカー × 5 並列 = 30
+        assertEquals(6, defaultConfig.dictWorkerCount)
+        assertEquals(5, defaultConfig.dictConcurrencyPerWorker)
+        assertEquals(30, defaultConfig.getEffectiveDictParallelCount())
+
+        // カスタム設定: 2 ワーカー × 3 並列 = 6
+        val customConfig = defaultConfig.copy(dictWorkerCount = 2, dictConcurrencyPerWorker = 3)
+        assertEquals(6, customConfig.getEffectiveDictParallelCount())
+
+        // 上限30ガード
+        val cappedConfig = defaultConfig.copy(dictWorkerCount = 10, dictConcurrencyPerWorker = 10)
+        assertEquals(30, cappedConfig.getEffectiveDictParallelCount())
+    }
+
+    @Test
+    fun testLlmTranslationConfig_DictBatchMaxBytesLargeCapacity() {
+        val config500kb = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig(
+            dictBatchMaxBytes = 500000
+        )
+        assertEquals(500000, config500kb.dictBatchMaxBytes)
     }
 }

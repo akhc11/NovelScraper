@@ -1,6 +1,8 @@
 package com.example.novelscraper
 
 import android.content.Context
+import android.util.Log
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -86,6 +88,16 @@ class ScrapingTask(
                 val actions = stateMachine.onNetworkError(error?.errorCode ?: -1)
                 executeActions(actions)
             }
+
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                val didCrash = detail?.didCrash() ?: false
+                val reason = if (didCrash) "レンダラークラッシュ (C++エラー)" else "メモリ不足によるOS強制終了 (OOM)"
+                Log.e(TAG, "WebView onRenderProcessGone 検知: $reason")
+                updateStatus("エラー停止: $reason")
+                stop()
+                taskListener.onTaskFinished(this@ScrapingTask)
+                return true // ホストアプリの道連れクラッシュを100%阻止
+            }
         }
     }
 
@@ -99,8 +111,10 @@ class ScrapingTask(
         isRunning = false
         navigationJob?.cancel()
         scope.cancel()
-        webView.stopLoading()
-        webView.destroy()
+        try {
+            webView.stopLoading()
+            webView.destroy()
+        } catch (_: Exception) {}
     }
 
     /** StateMachineから返されたActionリストをWebView操作に変換 */
@@ -131,12 +145,31 @@ class ScrapingTask(
                     updateStatus(action.message)
                 }
                 is ScrapingStateMachine.Action.WaitAndLoad -> {
+                    // 1話ごとの予防的メモリ自動パージ：
+                    // 戻る/進む履歴（DOMスナップショット）とRAM一時キャッシュを消去し、
+                    // 長時間スクレイピング時のChromiumレンダラープロセスのメモリ肥大化（OOM）を根本から予防
+                    try {
+                        webView.clearHistory()
+                        webView.clearCache(false)
+                    } catch (_: Exception) {}
+
                     navigationJob?.cancel()
                     navigationJob = scope.launch {
                         delay(action.delayMs)
                         if (isRunning) {
                             isPageError = false
                             webView.loadUrl(action.url)
+                        }
+                    }
+                }
+                is ScrapingStateMachine.Action.WaitAndScrapeAgain -> {
+                    // SPA空本文対策: 同一ページで指定ディレイ待機後、再スクレイピングを実行
+                    navigationJob?.cancel()
+                    navigationJob = scope.launch {
+                        delay(action.delayMs)
+                        if (isRunning) {
+                            val scrapeAction = stateMachine.buildScrapePageAction()
+                            executeActions(listOf(scrapeAction))
                         }
                     }
                 }
@@ -164,6 +197,7 @@ class ScrapingTask(
     }
 
     companion object {
+        private const val TAG = "ScrapingTask"
         private const val INITIAL_PAGE_DELAY_MS = 2000L
     }
 }

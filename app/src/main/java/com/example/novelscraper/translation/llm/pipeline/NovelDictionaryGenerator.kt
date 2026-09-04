@@ -15,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
+import java.util.concurrent.ConcurrentHashMap
 
 @Serializable
 data class NovelDictionary(
@@ -22,6 +23,53 @@ data class NovelDictionary(
     val characters: Map<String, String> = emptyMap(),
     val genders: Map<String, String> = emptyMap() // 原文名 -> "男" | "女"
 )
+/**
+ * 辞書生成用 スレッドセーフなキークールダウントラッカー。
+ * 429 Quota Exceeded 検知時に該当キーを一定時間（cooldownSec）クールダウン状態として登録し、
+ * 後続の全バッチがそのキーへの無駄なアクセスを一切行わずに生きているキーへ即座にスキップできるようにする。
+ */
+class DictKeyCooldownTracker(
+    private val apiKeys: List<String>,
+    private val cooldownSec: Int
+) {
+    private val cooldownUntilMap = ConcurrentHashMap<Int, Long>()
+
+    val totalKeys: Int get() = apiKeys.size
+
+    fun isCoolingDown(keyIndex: Int): Boolean {
+        val until = cooldownUntilMap[keyIndex] ?: return false
+        val now = System.currentTimeMillis()
+        if (now >= until) {
+            cooldownUntilMap.remove(keyIndex)
+            return false
+        }
+        return true
+    }
+
+    fun markCooldown(keyIndex: Int) {
+        val until = System.currentTimeMillis() + (cooldownSec * 1000L)
+        cooldownUntilMap[keyIndex] = until
+    }
+
+    fun getAvailableKey(preferredIndex: Int): Pair<Int, String>? {
+        if (apiKeys.isEmpty()) return null
+        val count = apiKeys.size
+        for (i in 0 until count) {
+            val idx = (preferredIndex + i) % count
+            if (!isCoolingDown(idx)) {
+                return idx to apiKeys[idx]
+            }
+        }
+        return null // 全キーがクールダウン中
+    }
+
+    fun getMinCooldownRemainingMillis(): Long {
+        val now = System.currentTimeMillis()
+        val remainingTimes = cooldownUntilMap.values.map { it - now }.filter { it > 0 }
+        return if (remainingTimes.isNotEmpty()) remainingTimes.minOrNull() ?: 1000L else 1000L
+    }
+}
+
 
 object NovelDictionaryGenerator {
 
@@ -302,6 +350,8 @@ object NovelDictionaryGenerator {
         model: String,
         mergeModel: String = model,
         endpoint: String = "",
+        providerOrder: List<String> = emptyList(),
+        providerAllowFallbacks: Boolean? = null,
         maxBatchBytes: Int = 50000,
         maxTotalParts: Int = 100,
         sampleMode: DictSampleMode = DictSampleMode.HEAD,
@@ -311,8 +361,9 @@ object NovelDictionaryGenerator {
         cooldown429Sec: Int = 60,
         onLog: (String) -> Unit = {}
     ): NovelDictionary? = coroutineScope {
+        val validApiKeys = apiKeys.filter { it.isNotBlank() }
         val targetFiles = selectSampleFiles(sampleFiles, maxTotalParts, sampleMode)
-        if (targetFiles.isEmpty() || apiKeys.isEmpty()) return@coroutineScope null
+        if (targetFiles.isEmpty() || validApiKeys.isEmpty()) return@coroutineScope null
 
         val dictBuildingDir = folderDoc.findFile(".dict_building") ?: folderDoc.createDirectory(".dict_building")
         if (dictBuildingDir == null) {
@@ -331,17 +382,18 @@ object NovelDictionaryGenerator {
 
         val effectiveParallel = parallelCount.coerceIn(1, 30)
         val semaphore = Semaphore(effectiveParallel)
-        val keyCount = apiKeys.size
+        val keyCount = validApiKeys.size
         val modeLabel = if (maxTotalParts <= 0) "全件対象" else "${sampleMode.displayName} (${targetFiles.size}ファイル)"
-        onLog("📖 辞書生成 開始 (範囲:${modeLabel} ➔ ${totalBatches}バッチ[上限:${effectiveMaxBytes}B] / 並列${effectiveParallel} / 待機:${requestDelaySec}秒 / 429待機:${cooldown429Sec}秒 / 分散キー数:${keyCount} / プロバイダー:${provider.displayName} / モデル:${model})")
+        val providerOrderLabel = if (provider == LlmProvider.OPENROUTER && providerOrder.isNotEmpty()) " / ルーティング:${providerOrder.joinToString(",")}" else ""
+        onLog("📖 辞書生成 開始 (範囲:${modeLabel} ➔ ${totalBatches}バッチ[上限:${effectiveMaxBytes}B] / 並列${effectiveParallel} / 待機:${requestDelaySec}秒 / 429待機:${cooldown429Sec}秒 / 分散キー数:${keyCount} / プロバイダー:${provider.displayName} / モデル:${model}${providerOrderLabel})")
 
-        // 各バッチの処理（キープール分散ラウンドロビン ＆ 自動リトライ ＆ 429バックオフ）
+        val keyTracker = DictKeyCooldownTracker(validApiKeys, cooldown429Sec)
+
+        // 各バッチの処理（キープール分散ラウンドロビン ＆ 共有クールダウントラッカー ＆ 自動リトライ）
         val deferredResults = smartBatches.mapIndexed { index, batchText ->
             val batchNum = index + 1
             val batchFileName = String.format("batch_%04d.json", batchNum)
             val existingBatchDoc = dictBuildingDir.findFile(batchFileName)
-            val assignedKey = apiKeys[(batchNum - 1) % keyCount]
-            val keyIndex = ((batchNum - 1) % keyCount) + 1
 
             async {
                 semaphore.withPermit {
@@ -356,19 +408,37 @@ object NovelDictionaryGenerator {
                     if (batchText.isBlank()) return@withPermit null
                     val bSize = batchText.toByteArray(Charsets.UTF_8).size
 
-                    // 最大3回試行 (429バックオフ & 再試行対応)
-                    val maxRetries = 2
+                    val maxRetries = (keyCount.coerceAtLeast(1) * 2).coerceIn(2, 6)
+                    var preferredKeyIdx = (batchNum - 1) % keyCount
+
                     for (retry in 0..maxRetries) {
+                        // 生存キーの探索（429中のキーは最初から1回も叩かず即スキップ！）
+                        val liveKeyEntry = keyTracker.getAvailableKey(preferredKeyIdx)
+
+                        val (currentKeyIdx, currentKey) = if (liveKeyEntry != null) {
+                            liveKeyEntry
+                        } else {
+                            // 全キーがクールダウン中の場合
+                            val waitMs = keyTracker.getMinCooldownRemainingMillis().coerceIn(1000L, cooldown429Sec * 1000L)
+                            onLog("  ⏳ [全キー制限中] バッチ $batchNum: 全キーがクールダウン中のため ${waitMs / 1000}秒 待機...")
+                            delay(waitMs)
+                            keyTracker.getAvailableKey(preferredKeyIdx)
+                                ?: (preferredKeyIdx to validApiKeys[preferredKeyIdx])
+                        }
+
+                        val keyDisplayIndex = currentKeyIdx + 1
                         val retryLabel = if (retry > 0) " [再試行 $retry/$maxRetries]" else ""
-                        onLog("  📖 辞書生成: バッチ $batchNum/$totalBatches (${bSize}B / キー[$keyIndex/$keyCount])${retryLabel} 抽出中...")
+                        onLog("  📖 辞書生成: バッチ $batchNum/$totalBatches (${bSize}B / キー[$keyDisplayIndex/$keyCount])${retryLabel} 抽出中...")
 
                         val result = executeLlmRequest(
                             provider = provider,
-                            apiKey = assignedKey,
+                            apiKey = currentKey,
                             model = model,
                             endpoint = endpoint,
                             prompt = BATCH_PROMPT,
-                            sourceText = batchText
+                            sourceText = batchText,
+                            providerOrder = providerOrder,
+                            providerAllowFallbacks = providerAllowFallbacks
                         )
 
                         when (result) {
@@ -385,9 +455,21 @@ object NovelDictionaryGenerator {
                                 return@withPermit rawText
                             }
                             is LlmApiResult.QuotaExceeded -> {
+                                // 429検知：全バッチに即座にクールダウンを共有！
+                                keyTracker.markCooldown(currentKeyIdx)
+
                                 if (retry < maxRetries) {
-                                    onLog("  ⏳ [429 Quota Exceeded] バッチ $batchNum: レート制限検知。${cooldown429Sec}秒待機して再試行します...")
-                                    delay(cooldown429Sec * 1000L)
+                                    val nextEntry = keyTracker.getAvailableKey(currentKeyIdx + 1)
+                                    if (nextEntry != null) {
+                                        val nextKeyDisplay = nextEntry.first + 1
+                                        onLog("  ⏳ [429 Quota Exceeded] バッチ $batchNum: キー[$keyDisplayIndex]制限(全バッチ共有)。生存キー[$nextKeyDisplay]へ即時交代...")
+                                        preferredKeyIdx = nextEntry.first
+                                        delay(1000L)
+                                    } else {
+                                        val waitMs = keyTracker.getMinCooldownRemainingMillis().coerceIn(1000L, cooldown429Sec * 1000L)
+                                        onLog("  ⏳ [429 Quota Exceeded] バッチ $batchNum: 全キー制限到達。${waitMs / 1000}秒待機して再試行...")
+                                        delay(waitMs)
+                                    }
                                 } else {
                                     onLog("  ❌ [429 Quota Exceeded] バッチ $batchNum: 最大再試行回数に達しました")
                                 }
@@ -427,12 +509,15 @@ object NovelDictionaryGenerator {
             var parsedMerged: NovelDictionary? = null
 
             for (mergeRetry in 0..2) {
-                val mergeApiKey = apiKeys[mergeRetry % keyCount]
-                val mergeKeyIndex = (mergeRetry % keyCount) + 1
+                val liveMergeKey = keyTracker.getAvailableKey(mergeRetry)
+                val mergeKeyIndex = liveMergeKey?.first ?: (mergeRetry % keyCount)
+                val mergeApiKey = liveMergeKey?.second ?: validApiKeys[mergeKeyIndex]
+                val mergeKeyDisplay = mergeKeyIndex + 1
+
                 if (mergeRetry > 0) {
-                    onLog("  🔄 辞書マージ: 再試行 [${mergeRetry + 1}/3] (キー[$mergeKeyIndex/$keyCount])...")
+                    onLog("  🔄 辞書マージ: 再試行 [${mergeRetry + 1}/3] (キー[$mergeKeyDisplay/$keyCount])...")
                 } else {
-                    onLog("  🔄 辞書マージ: 実行中 (キー[$mergeKeyIndex/$keyCount])...")
+                    onLog("  🔄 辞書マージ: 実行中 (キー[$mergeKeyDisplay/$keyCount])...")
                 }
 
                 val mergeResult = executeLlmRequest(
@@ -441,7 +526,9 @@ object NovelDictionaryGenerator {
                     model = mergeModel,
                     endpoint = endpoint,
                     prompt = MERGE_PROMPT,
-                    sourceText = mergeInput
+                    sourceText = mergeInput,
+                    providerOrder = providerOrder,
+                    providerAllowFallbacks = providerAllowFallbacks
                 )
 
                 when (mergeResult) {
@@ -456,9 +543,10 @@ object NovelDictionaryGenerator {
                         }
                     }
                     is LlmApiResult.QuotaExceeded -> {
+                        keyTracker.markCooldown(mergeKeyIndex)
                         if (mergeRetry < 2) {
-                            onLog("  ⏳ [429 Quota Exceeded] 辞書マージ: レート制限検知。${cooldown429Sec}秒待機して再試行します...")
-                            delay(cooldown429Sec * 1000L)
+                            onLog("  ⏳ [429 Quota Exceeded] 辞書マージ: キー[$mergeKeyDisplay]制限検知。別キーへ即時交代...")
+                            delay(1000L)
                         }
                     }
                     else -> {
@@ -480,8 +568,9 @@ object NovelDictionaryGenerator {
         var finalDict: NovelDictionary = mergedDict
 
         for (reviewRetry in 0..1) {
-            val reviewKeyIdx = (reviewRetry + 1) % keyCount
-            val reviewApiKey = apiKeys[reviewKeyIdx]
+            val liveReviewKey = keyTracker.getAvailableKey(reviewRetry + 1)
+            val reviewKeyIdx = liveReviewKey?.first ?: ((reviewRetry + 1) % keyCount)
+            val reviewApiKey = liveReviewKey?.second ?: validApiKeys[reviewKeyIdx]
             val reviewKeyIndex = reviewKeyIdx + 1
 
             if (reviewRetry > 0) {
@@ -496,7 +585,9 @@ object NovelDictionaryGenerator {
                 model = mergeModel,
                 endpoint = endpoint,
                 prompt = REVIEW_PROMPT,
-                sourceText = reviewInput
+                sourceText = reviewInput,
+                providerOrder = providerOrder,
+                providerAllowFallbacks = providerAllowFallbacks
             )
 
             when (reviewResult) {
@@ -508,9 +599,10 @@ object NovelDictionaryGenerator {
                     }
                 }
                 is LlmApiResult.QuotaExceeded -> {
+                    keyTracker.markCooldown(reviewKeyIdx)
                     if (reviewRetry < 1) {
-                        onLog("  ⏳ [429 Quota Exceeded] 辞書レビュー: レート制限検知。${cooldown429Sec}秒待機して再試行します...")
-                        delay(cooldown429Sec * 1000L)
+                        onLog("  ⏳ [429 Quota Exceeded] 辞書レビュー: キー[$reviewKeyIndex]制限検知。別キーへ即時交代...")
+                        delay(1000L)
                     }
                 }
                 else -> {
@@ -578,7 +670,9 @@ object NovelDictionaryGenerator {
         model: String,
         endpoint: String,
         prompt: String,
-        sourceText: String
+        sourceText: String,
+        providerOrder: List<String> = emptyList(),
+        providerAllowFallbacks: Boolean? = null
     ): LlmApiResult {
         return when (provider) {
             LlmProvider.GEMINI -> {
@@ -595,7 +689,9 @@ object NovelDictionaryGenerator {
                     model = model,
                     endpoint = endpoint,
                     prompt = prompt,
-                    sourceText = sourceText
+                    sourceText = sourceText,
+                    providerOrder = providerOrder,
+                    providerAllowFallbacks = providerAllowFallbacks
                 )
             }
         }

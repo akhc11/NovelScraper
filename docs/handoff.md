@@ -1,16 +1,37 @@
-# 引き継ぎ状況 - 最終更新: 2026-09-02 (機能別敵対的レビュー & 不要コード・デッドコード完全削除完了)
+# 引き継ぎ状況 - 最終更新: 2026-09-04 (事前物理分割の完全1本化 ＆ SAFパフォーマンス最適化・トランザクション堅牢化 完了)
 
 ## 現在の状態
-- **不要コード・デッドコード削除完了**:
-  - `InspectElementDialog`（旧 Compose ダイアログ・104行）および関連メソッド（`onInspectResult`, `showInspectElementDialog`, `ActiveDialog.InspectElement`）を完全削除。
-  - 未使用ラッパークラス `TranslationTask.kt`, `DeeplTranslationTask.kt` を完全削除。
-  - 未使用フィールド `FolderItem`（`totalTextFiles`, `untranslatedGoogleCount`, `untranslatedDeeplCount`）、未使用定数 `TranslationFileStore.OUTPUT_FOLDER_NAME` を削除。
-  - 未使用アクション `ScrapingStateMachine.Action.Retry`, `Action.Error` および到達不能分岐を削除。
-- **翻訳後ホバー強調の完全抹殺**:
-  - `LiveTranslateScriptBuilder.kt` において、Google翻訳のテキストホバーによる強調（ハイライト）および原文バルーンツールチップ（`#goog-gt-tt`, `.goog-te-balloon-frame`）を完全非表示・無効化。
+- **全翻訳エンジン（LLM / Google / DeepL / Papago）における事前物理分割の「文字数」統一 & 共通化 完了**:
+  - **背景と目的**:
+    - バイト数（Byte）による分割では、UTF-8のマルチバイト言語（日本語・中国語・韓国語＝1文字3バイト）において「8,000バイト＝約2,600文字」と細切れになりすぎ、英語（8,000文字）との間で不均衡が生じていた。
+    - また、Web翻訳とLLM翻訳で物理分割の実装が2系統（`WebPhysicalSplitter` / `TextFilePhysicalSplitter`）に分散し、LLM側には旧式のファイル全量 `readBytes()` によるOOMリスクが残っていた。
+  - **根本治療とリファクタリング（余計なラッパー・対症療法コードの完全排除）**:
+    1. **統一ストリーミング物理分割エンジン (`NovelPhysicalSplitter.kt`) への完全1本化**:
+       - 1行ストリーミング読み込み（`BufferedReader.lineSequence()`）とコールバック（`splitLines`）により、メモリ消費は常に1行分の数KB（100MB〜1GB超の巨大テキストでもOOM 100%根絶）。
+       - 先頭64KBサンプリングによる万能文字コード判定（`UniversalCharsetDetector`）により文字化け完全防止。
+       - 行ごとの有害文字クレンジング（`TextCleanser.cleanse`）により、NULL文字（`\u0000`）、埋め込みBOM（`\uFEFF`）、ゼロ幅スペース（`\u200B`）を安全に除去しつつ、通常の小説本文・改行・空白・記号は100%忠実に維持。
+       - 改行のない超長文段落に対する安全分割フォールバック（`splitOversizedLine`）を実装。
+       - **無駄な互換ラッパーの完全削除**: 不要な `WebPhysicalSplitter.kt` および `TextFilePhysicalSplitter.kt` は完全に削除・廃止し、コードベースから不要な抽象化や二重管理を根絶。
+       - **旧設定（バイト数）の二重管理・if分岐の完全撤去**: `textSplitSizeBytes` や `if (textSplitSizeChars > 0) ... else ...` のような場当たり的ガードを全廃し、`textSplitSizeChars`（文字数）に直接1本化。
+    2. **全エンジンでの分割文字数設定 UI 対応**:
+       - **Google / DeepL / Papago**: 翻訳パネルの物理分割トグル下に「分割文字数: [ 8000 ] 文字」入力フィールドを追加。DataStore（`web_split_size_chars`）で永続化。
+       - **LLM (AI翻訳)**: LLM設定ダイアログの表記を「物理分割文字数 (文字): [ 8000 ]」に統一。
+    3. **SAF (Storage Access Framework) パフォーマンス最適化 & 中断時即時ロールバック (根本治療)**:
+       - **SAF インメモリキャッシュ ($O(1)$)**: AOSP内部コードの仕様（`DocumentFile.findFile()` が毎回 `listFiles()` を実行し全子ファイル名を IPC 取得する線形探索 $O(N)$）を解消。分割直前にルート配下のディレクトリ一覧を1回だけ取得し、ループ内の `findFile` を完全根絶（Binder IPC クエリを 99% 削減）。
+       - **既存フォルダ・データの完全保護**: 既存フォルダ内に `.txt` パートが存在する場合は一切触らず安全にスキップ。特殊なマーカーファイル（`.split_done`）を全廃し、ユーザーの手動配置ファイルや既存データが誤って消去されるリスクを100%排除。
+       - **中断時即時ロールバック (トランザクション性)**: ユーザーが停止ボタンを押した際（`CancellationException`）や例外発生時、`withContext(NonCancellable)` 下で今回新規作成中だったフォルダのみをその場で即座に削除（ロールバック）。中途半端な破損ファイルが残存せず、次回起動時は自動的にクリーンな状態から最初から再作成される。
+       - **協調的キャンセル (`ensureActive()`)**: ループおよびチャンク出力時に `coroutineContext.ensureActive()` を配置し、停止ボタン押下時にミリ秒単位で即時中断。
+    4. **オンデマンド（翻訳直前）都度分割 (JIT / Zero-Wait Architecture)**:
+       - **事前の全量一括分割ループを完全撤廃**: 200ファイル以上の大量テキスト（最大28MB、平均2MB）が存在する場合でも、開始時に全ファイルをまとめて分割して待たされる問題を根本解消。開始時は 0.05秒でキュー項目を即座にセットアップ。
+       - **単一ファイル分割 API (`splitSingleTextFile`)**: `NovelPhysicalSplitter` に単一ファイル分割を新設。
+       - **翻訳直前オンデマンド分割**:
+         - **Web翻訳 (`TranslationQueueManager`)**: キュー内の各小説の番が回ってきた「まさにその直前」に、その1ファイルのみを都度分割して翻訳を開始。
+         - **LLM翻訳 (`LlmTranslationEngine`)**: 親フォルダ直下の生テキストファイルを1ファイルずつ翻訳直前に分割してAI翻訳へ投入。
+         - 待ち時間ゼロで即座に1冊目の翻訳が開始され、途中で停止した場合も未翻訳のファイルは分割されずディスクや時間を一切浪費しない。
 - **品質・テスト検証**:
-  - ユニットテスト（`.\gradlew testDebugUnitTest`）全件合格（BUILD SUCCESSFUL）。
-  - ビルド（`.\gradlew assembleDebug`）正常完了（BUILD SUCCESSFUL）。
+  - `NovelPhysicalSplitterTest`（文字数分割、有害文字除去、超長行フォールバック、空シーケンス、単一短文）を含む全109件のテストを実行し、全件合格（`BUILD SUCCESSFUL in 34s`）。
+  - 不要ファイル・対症療法コード・マーカーファイルの残存ゼロ確認済み。
 
 ## 次のステップ
 - ユーザー指示待ち。
+

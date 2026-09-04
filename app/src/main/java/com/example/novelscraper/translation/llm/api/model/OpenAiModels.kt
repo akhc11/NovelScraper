@@ -24,7 +24,9 @@ data class OpenAiChatRequest(
 @Serializable
 data class OpenAiMessage(
     val role: String,
-    val content: String
+    val content: String? = null,
+    // 推論系モデルが思考過程を返す別枠（contentが空でもここに入ることがある）
+    val reasoning: String? = null
 )
 
 @Serializable

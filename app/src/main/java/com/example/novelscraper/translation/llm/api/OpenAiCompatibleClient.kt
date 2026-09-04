@@ -69,8 +69,13 @@ object OpenAiCompatibleClient {
             when (code) {
                 200 -> {
                     val openAiResp = LlmApiClient.json.decodeFromString(OpenAiChatResponse.serializer(), bodyString)
-                    val text = openAiResp.choices?.firstOrNull()?.message?.content
+                    val msg = openAiResp.choices?.firstOrNull()?.message
+                    val text = msg?.content
                     if (text.isNullOrBlank()) {
+                        if (!msg?.reasoning.isNullOrBlank()) {
+                            // 推論過程のみで翻訳本文なし（推論文を訳文に混ぜない）
+                            return@withContext LlmApiResult.QualityError("OpenAI/OpenRouter推論のみ応答 (翻訳本文なし)")
+                        }
                         return@withContext LlmApiResult.QualityError("OpenAI/OpenRouter空応答またはテキスト欠損")
                     }
                     val usage = openAiResp.usage
@@ -93,10 +98,7 @@ object OpenAiCompatibleClient {
                     )
                 }
                 else -> {
-                    LlmApiResult.FatalError(
-                        statusCode = code,
-                        message = "HTTP $code: ${bodyString.take(1000)}"
-                    )
+                    mapHttpError(code, bodyString)
                 }
             }
         } catch (e: CancellationException) {
@@ -105,6 +107,28 @@ object OpenAiCompatibleClient {
             LlmApiResult.NetworkError(
                 statusCode = -1,
                 message = "通信例外: ${e.message ?: e.javaClass.simpleName}"
+            )
+        }
+    }
+
+    /**
+     * HTTPエラーコード＋本文から次の一手を決める（pure・テスト容易）。
+     * 402/404等の設定不良は ConfigError（再試行・キー回しをせず設定案内へ）。
+     */
+    fun mapHttpError(code: Int, body: String): LlmApiResult {
+        val classified = ErrorClassifier.classifyHttpStatus(code, body)
+        return when (classified.kind) {
+            ApiFailureKind.CONFIG -> LlmApiResult.ConfigError(
+                message = "OpenAI互換API設定エラー (${classified.configKind}): ${body.take(500)}",
+                kind = classified.configKind
+            )
+            ApiFailureKind.TRANSIENT -> LlmApiResult.NetworkError(
+                statusCode = code,
+                message = "Server Error ($code): ${body.take(1000)}"
+            )
+            else -> LlmApiResult.FatalError(
+                statusCode = code,
+                message = "HTTP $code: ${body.take(1000)}"
             )
         }
     }

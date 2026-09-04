@@ -61,7 +61,9 @@ object LlmRequestRunner {
         rotationManager: LlmRotationManager,
         profile: ModelProfile,
         prompt: String,
-        sourceText: String
+        sourceText: String,
+        responseMimeType: String? = null,
+        responseSchema: kotlinx.serialization.json.JsonElement? = null
     ): LlmApiResult {
         throttle(config)
 
@@ -79,7 +81,9 @@ object LlmRequestRunner {
                     sourceText = sourceText,
                     temperature = profile.temperature,
                     thinkingLevel = profile.thinkingLevel,
-                    thinkingBudget = profile.thinkingBudget
+                    thinkingBudget = profile.thinkingBudget,
+                    responseMimeType = responseMimeType,
+                    responseSchema = responseSchema
                 )
             }
             LlmProvider.OPENROUTER -> {

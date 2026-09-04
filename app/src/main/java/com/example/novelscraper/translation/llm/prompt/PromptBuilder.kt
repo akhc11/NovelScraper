@@ -57,7 +57,8 @@ object PromptBuilder {
     }
 
     /**
-     * バッチ翻訳 ([SEG:N]) 用のプロンプトを構築する
+     * バッチ翻訳 (XMLペアタグ / JSON) 用のプロンプトを構築する。
+     * バッチ経路では `[SRC_END]` を使わない（完走判定は出力側の閉じタグで行う）。
      */
     fun buildBatchPrompt(
         promptNumber: Int,
@@ -68,7 +69,7 @@ object PromptBuilder {
         dictionaryStyle: String? = null,
         dictionaryMap: Map<String, String>? = null,
         dictionaryGenders: Map<String, String>? = null,
-        enableCompletionMarker: Boolean = true
+        jsonMode: Boolean = false
     ): String {
         val basePrompt = customPrompts?.get(promptNumber)?.ifBlank { null }
             ?: TranslationPrompts.getPromptByNumber(promptNumber)
@@ -77,26 +78,43 @@ object PromptBuilder {
             .filterNot { it.startsWith("- OUTPUT ONLY:") || it.startsWith("OUTPUT ONLY:") }
             .joinToString("\n")
 
+        val outputFormat = if (jsonMode) {
+            """
+            BATCH OUTPUT FORMAT (this overrides all other output instructions):
+            - Return ONLY a single JSON object with this exact shape (no code fences, no preamble):
+            {"translations": [{"id": 1, "ja": "(Japanese translation of document 1)"}, {"id": 2, "ja": "(Japanese translation of document 2)"}]}
+            - Include all $fileCount document(s) with ids 1..$fileCount. Do NOT skip any id.
+            - Do NOT add text before or after the JSON object.
+            """.trimIndent()
+        } else {
+            """
+            BATCH OUTPUT FORMAT (this overrides all other output instructions):
+            - Start your response with <translations> and end with </translations>.
+            - For each document, output exactly:
+            <trans id="N">
+            (Japanese translation of document N)
+            </trans>
+            - Do NOT skip any id (1..$fileCount). Do NOT add text outside <translations>.
+            - EXACT required structure:
+            <translations>
+            <trans id="1">
+            (Japanese translation of document 1)
+            </trans>
+            ... continue for all $fileCount document(s).
+            </translations>
+            """.trimIndent()
+        }
+
         val sb = StringBuilder()
         sb.append("""
 CRITICAL — READ BEFORE STARTING:
-This input contains $fileCount text segment(s). Each segment begins with a marker: [SEG:1], [SEG:2] etc.
-THE MARKERS ARE STRUCTURAL DELIMITERS, NOT TEXT TO TRANSLATE.
-You MUST copy each marker into your output exactly as written.
+This input contains $fileCount document(s) wrapped as <documents><doc id="1">...</doc>...</documents>.
+THE <doc> / <documents> TAGS ARE STRUCTURAL DELIMITERS, NOT TEXT TO TRANSLATE.
+You MUST translate each <doc id="N"> separately. No preamble, no explanations.
 
 $baseTrimmed
 
-BATCH OUTPUT FORMAT (this overrides all other output instructions):
-- Start your response with the first marker: [SEG:1]
-- Immediately after each marker, write the translated text for that segment.
-- Then the next marker, then its translation, and so on.
-- Do NOT skip any marker. Do NOT add text before [SEG:1].
-- EXACT required structure:
-[SEG:1]
-(Japanese translation of segment 1)
-[SEG:2]
-(Japanese translation of segment 2)
-... continue for all $fileCount segment(s).
+$outputFormat
 """.trimIndent())
 
         // 直前原文末尾
@@ -112,18 +130,6 @@ BATCH OUTPUT FORMAT (this overrides all other output instructions):
             if (dictSection.isNotBlank()) {
                 sb.append(dictSection)
             }
-        }
-
-        // 完了マーカー (最終セグメント末尾)
-        if (enableCompletionMarker) {
-            sb.append("\n\n- The LAST segment's source text ends with the marker ")
-            sb.append(CompletionMarkerHelper.MARKER)
-            sb.append(" appended after its actual content.\n")
-            sb.append("- THIS MARKER IS ALSO A STRUCTURAL DELIMITER, NOT TEXT TO TRANSLATE (same rule as [SEG:N]).\n")
-            sb.append("- You MUST copy it into your output exactly as written, as the very last line of the LAST segment's translation.\n")
-            sb.append("- Do NOT add this marker after any segment other than the last one.\n\n")
-            sb.append("Updated exact structure (final segment only):\n...\n[SEG:$fileCount]\n(Japanese translation of segment $fileCount)\n")
-            sb.append(CompletionMarkerHelper.MARKER)
         }
 
         return sb.toString()

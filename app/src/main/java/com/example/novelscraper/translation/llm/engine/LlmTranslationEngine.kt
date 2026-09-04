@@ -606,7 +606,7 @@ class LlmTranslationEngine(
                     val currentIdx = fileIndexByUri[fileDoc.uri.toString()] ?: -1
                     if (currentIdx >= 0) {
                         for (nextIdx in (currentIdx + 1) until allFiles.size) {
-                            if (batchItems.size >= 10) break // 1バッチ最大10ファイル
+                            if (batchItems.size >= 3) break // 1バッチ最大3ファイル (セグメント不一致抑制)
                             val nextDoc = allFiles[nextIdx]
                             val nextName = nextDoc.name ?: continue
                             if (existingOutputNames.contains(nextName) || existingOutputNames.contains("$nextName.failed")) continue
@@ -647,10 +647,10 @@ class LlmTranslationEngine(
                     }
 
                     if (batchItems.size > 1) {
-                        // 2件以上: まとめてバッチ翻訳実行！
+                        // 2件以上: まとめてバッチ翻訳実行（部分回収・単体フォールバックは内部で完結）
                         val batchNames = batchItems.map { it.first.name ?: "" }
                         addLog("[W#$workerId] 📦 バッチ翻訳開始 (${batchItems.size}ファイル / 計:${currentBatchBytes}B / 枠:${effectiveBatchSize}B)")
-                        val batchSuccess = translateBatchFiles(
+                        val outcome = translateBatchFiles(
                             batchItems = batchItems,
                             outputDir = outputDir,
                             existingOutputNames = existingOutputNames,
@@ -661,39 +661,17 @@ class LlmTranslationEngine(
                             workerId = workerId
                         )
 
-                        if (batchSuccess) {
-                            val done = completedCounter.addAndGet(batchItems.size)
-                            folderProcessedCounter.addAndGet(batchItems.size)
+                        // カウンタ加算はここに一本化（translateBatchFiles内部では加算しない）
+                        if (outcome.settled > 0) {
+                            val done = completedCounter.addAndGet(outcome.settled)
+                            folderProcessedCounter.addAndGet(outcome.settled)
                             _engineState.update { it.copy(
                                 progress = done to totalCount,
                                 currentFileName = batchNames.last()
                             ) }
-                        } else {
-                            // バッチ失敗時は各ファイルを単体翻訳へフォールバック (フェイルセーフ)
-                            addLog("[W#$workerId] ⚠️ バッチ翻訳失敗 → 各ファイルを単体翻訳へフォールバック")
-                            for (item in batchItems) {
-                                if (isStopRequested || !currentCoroutineContext().isActive) break
-                                val singleSuccess = translateSingleFile(
-                                    fileDoc = item.first,
-                                    content = item.second,
-                                    outputDir = outputDir,
-                                    existingOutputNames = existingOutputNames,
-                                    rotationManager = rotationManager,
-                                    sourceLang = sourceLang,
-                                    novelDict = novelDict,
-                                    prevSourceTail = prevSourceTail,
-                                    workerId = workerId
-                                )
-                                if (singleSuccess) {
-                                    existingOutputNames.add(item.first.name ?: "")
-                                }
-                                val done = completedCounter.incrementAndGet()
-                                folderProcessedCounter.incrementAndGet()
-                                _engineState.update { it.copy(
-                                    progress = done to totalCount,
-                                    currentFileName = item.first.name ?: ""
-                                ) }
-                            }
+                        }
+                        if (outcome.completed < batchItems.size) {
+                            addLog("[W#$workerId] ⚠️ バッチ未完 (確定:${outcome.completed}/${batchItems.size}) → 未確定分は次回再試行")
                         }
                     } else {
                         // 1件のみ: 単体翻訳
@@ -741,9 +719,9 @@ class LlmTranslationEngine(
         novelDict: NovelDictionary?,
         prevSourceTail: String?,
         workerId: Int
-    ): Boolean {
+    ): BatchOutcome {
         val filePairs = batchItems.map { (doc, text) -> (doc.name ?: "file.txt") to text }
-        val combinedInput = BatchTranslator.buildBatchInput(filePairs, config.enableCompletionMarker)
+        val combinedInput = BatchTranslator.buildBatchInput(filePairs)
         val profiles = config.modelProfiles.ifEmpty { listOf(ModelProfile(modelName = "gemini-3.5-flash")) }
         var parsedSegments: Map<Int, String>? = null
 
@@ -757,12 +735,15 @@ class LlmTranslationEngine(
             }
 
             val promptList = config.getEffectivePromptOrder(sourceLang, profile).ifEmpty { listOf(1, 1) }
+            // JSON SchemaはGeminiかつ両フラグONのプロファイルでのみ試行し、失敗時はXMLへ自動劣化する
+            val jsonEligible = config.enableBatchJsonSchema && profile.useJsonSchema &&
+                profile.provider == LlmProvider.GEMINI
 
             // --- 2. プロンプトループ ---
             for (promptNum in promptList) {
                 if (isStopRequested || !currentCoroutineContext().isActive) break
 
-                val prompt = PromptBuilder.buildBatchPrompt(
+                val xmlPrompt = PromptBuilder.buildBatchPrompt(
                     promptNumber = promptNum,
                     fileCount = batchItems.size,
                     customPrompts = config.customPrompts,
@@ -771,8 +752,22 @@ class LlmTranslationEngine(
                     dictionaryStyle = novelDict?.style,
                     dictionaryMap = novelDict?.characters,
                     dictionaryGenders = novelDict?.genders,
-                    enableCompletionMarker = config.enableCompletionMarker
+                    jsonMode = false
                 )
+                val jsonPrompt = if (jsonEligible) {
+                    PromptBuilder.buildBatchPrompt(
+                        promptNumber = promptNum,
+                        fileCount = batchItems.size,
+                        customPrompts = config.customPrompts,
+                        previousSourceTail = if (config.enablePrevSrcContext) prevSourceTail else null,
+                        sourceText = combinedInput,
+                        dictionaryStyle = novelDict?.style,
+                        dictionaryMap = novelDict?.characters,
+                        dictionaryGenders = novelDict?.genders,
+                        jsonMode = true
+                    )
+                } else null
+                var jsonAttempted = false
 
                 // --- 3. ネットワークリトライループ ---
                 var retry = 0
@@ -785,49 +780,58 @@ class LlmTranslationEngine(
 
                     val activeProfile = rotationManager.getCurrentProfile()
                     val targetProfile = if (profile.provider == LlmProvider.GEMINI) activeProfile else profile
+                    val useJson = jsonPrompt != null && !jsonAttempted
 
-                    val apiResult = callApiForProfile(targetProfile, prompt, combinedInput, rotationManager)
+                    val apiResult = if (useJson) {
+                        LlmRequestRunner.callForProfile(
+                            config,
+                            rotationManager,
+                            targetProfile,
+                            jsonPrompt,
+                            combinedInput,
+                            "application/json",
+                            BatchTranslator.buildBatchJsonSchema()
+                        )
+                    } else {
+                        callApiForProfile(targetProfile, xmlPrompt, combinedInput, rotationManager)
+                    }
 
                     when (apiResult) {
                         is LlmApiResult.Success -> {
-                            val markerStripped = CompletionMarkerHelper.checkAndStripMarker(apiResult.text, config.enableCompletionMarker)
-                            if (markerStripped == null) {
-                                addLog("[W#$workerId] ⚠️ バッチ: 完了マーカーなし → 次のプロンプトへ")
+                            if (useJson) {
+                                jsonAttempted = true
+                                val jsonParsed = BatchTranslator.parseJsonResponse(apiResult.text)
+                                if (!jsonParsed.isNullOrEmpty()) {
+                                    addLog("[W#$workerId] ✅ バッチ: JSON Schema応答を取得 (${jsonParsed.size}/${batchItems.size}件)")
+                                    parsedSegments = jsonParsed
+                                    break
+                                }
+                                addLog("[W#$workerId] ⚠️ バッチ: JSONパース失敗 → XMLへ劣化して再試行")
+                                continue
+                            }
+
+                            if (!CompletionMarkerHelper.checkBatchCompletion(apiResult.text, true)) {
+                                addLog("[W#$workerId] ⚠️ バッチ: 完走タグなし (生成途絶疑い) → 次のプロンプトへ")
                                 break
                             }
 
-                            val parsed = BatchTranslator.parseBatchResponse(markerStripped, batchItems.size)
-                            if (parsed == null) {
+                            val parsed = BatchTranslator.parseBatchResponse(apiResult.text, batchItems.size)
+                            if (parsed.isNullOrEmpty()) {
                                 addLog("[W#$workerId] ⚠️ バッチ: セグメント分離失敗 (形式不一致/欠落) → 次のプロンプトへ")
                                 break
                             }
 
-                            // 各セグメントの品質チェック
-                            val (minRatio, maxRatio) = config.getSizeRatioRange(sourceLang)
-                            var allSegmentsValid = true
-                            for ((idx, item) in batchItems.withIndex()) {
-                                val segNum = idx + 1
-                                val segText = parsed[segNum] ?: ""
-                                val cleanedSeg = TranslationQualityValidator.stripPreamble(segText)
-                                val v = TranslationQualityValidator.validate(item.second, cleanedSeg, sourceLang, minRatio, maxRatio)
-                                if (v is QualityValidationResult.Failure) {
-                                    addLog("[W#$workerId] ⚠️ バッチ[SEG:$segNum]: 品質NG (${v.reason})")
-                                    allSegmentsValid = false
-                                    break
-                                }
+                            // 欠番があっても部分回収へ進む（ salvaged できなかった分のみ単体フォールバック）
+                            if (parsed.size < batchItems.size) {
+                                addLog("[W#$workerId] ⚠️ バッチ: 部分抽出 (${parsed.size}/${batchItems.size}件) → 欠落分は単体フォールバックへ")
                             }
-
-                            if (allSegmentsValid) {
-                                parsedSegments = parsed
-                                break
-                            } else {
-                                break
-                            }
+                            parsedSegments = parsed
+                            break
                         }
                         is LlmApiResult.QuotaExceeded -> {
                             if (targetProfile.provider == LlmProvider.GEMINI && config.geminiRotationEnabled) {
                                 val advanced = rotationManager.advanceRotation(apiResult.message) { addLog("[W#$workerId]  $it") }
-                                if (!advanced) return false
+                                if (!advanced) return BatchOutcome(0, 0)
                                 retry++
                             } else {
                                 addLog("[W#$workerId] ⏳ バッチ制限待機 (429): ${apiResult.message.take(100)}...")
@@ -850,6 +854,11 @@ class LlmTranslationEngine(
                             break
                         }
                         is LlmApiResult.FatalError -> {
+                            if (useJson && apiResult.statusCode == 400) {
+                                jsonAttempted = true
+                                addLog("[W#$workerId] ⚠️ バッチ: JSON Schema未対応 (400) → XMLへ劣化して再試行")
+                                continue
+                            }
                             addLog("[W#$workerId] ❌ バッチ致命的エラー (${apiResult.statusCode}): ${apiResult.message.take(200)} ➔ 次のプロンプト/モデルへ")
                             break
                         }
@@ -863,25 +872,110 @@ class LlmTranslationEngine(
         }
 
         if (parsedSegments != null) {
-            var allSaved = true
-            for ((idx, item) in batchItems.withIndex()) {
-                val segNum = idx + 1
-                val fname = item.first.name ?: "file_$segNum.txt"
-                val rawSeg = parsedSegments[segNum] ?: ""
-                val cleanSeg = TranslationQualityValidator.stripPreamble(rawSeg)
-                val outFile = outputDir.findFile(fname) ?: outputDir.createFile("text/plain", fname)
-                if (outFile != null && saveFileContent(outFile, cleanSeg)) {
-                    existingOutputNames.add(fname)
-                    addLog("[W#$workerId] ✅ $fname (バッチ保存)")
-                } else {
-                    addLog("[W#$workerId] ❌ $fname バッチ保存失敗 → 単体フォールバックへ")
-                    allSaved = false
-                }
-            }
-            return allSaved
+            return salvageBatchSegments(
+                parsed = parsedSegments,
+                batchItems = batchItems,
+                outputDir = outputDir,
+                existingOutputNames = existingOutputNames,
+                rotationManager = rotationManager,
+                sourceLang = sourceLang,
+                novelDict = novelDict,
+                prevSourceTail = prevSourceTail,
+                workerId = workerId
+            )
         }
 
-        return false
+        addLog("[W#$workerId] ⚠️ バッチ全滅 (全ドライバー失敗) → 未完了のまま保持 (次回再試行)")
+        return BatchOutcome(0, 0)
+    }
+
+    /**
+     * バッチ処理の確定結果。completed=翻訳確定数、settled=処理済数（確定＋失敗確定）。
+     * 中断により未処理の分はどちらにも含めない。
+     */
+    private data class BatchOutcome(val completed: Int, val settled: Int)
+
+    /**
+     * バッチ抽出結果の部分回収：成功分は即保存し、
+     * 欠落・品質NG・保存失敗分のみ単体翻訳へフォールバックする。
+     * 全件揃いを要求しないため、正常分が巻き添え破棄されない。
+     */
+    private suspend fun salvageBatchSegments(
+        parsed: Map<Int, String>,
+        batchItems: List<Pair<DocumentFile, String>>,
+        outputDir: DocumentFile,
+        existingOutputNames: MutableSet<String>,
+        rotationManager: LlmRotationManager,
+        sourceLang: SourceLanguage,
+        novelDict: NovelDictionary?,
+        prevSourceTail: String?,
+        workerId: Int
+    ): BatchOutcome {
+        val (minRatio, maxRatio) = config.getSizeRatioRange(sourceLang)
+        val failedItems = mutableListOf<Pair<DocumentFile, String>>()
+        var completed = 0
+        var settled = 0
+
+        for ((idx, item) in batchItems.withIndex()) {
+            if (isStopRequested || !currentCoroutineContext().isActive) break
+            val segNum = idx + 1
+            val fname = item.first.name ?: "file_$segNum.txt"
+            val segText = parsed[segNum]
+
+            if (segText.isNullOrBlank()) {
+                addLog("[W#$workerId] ⚠️ バッチ[id:$segNum]: 欠落 → 単体フォールバック対象へ")
+                failedItems.add(item)
+                continue
+            }
+
+            val cleanedSeg = TranslationQualityValidator.stripPreamble(segText)
+            val v = TranslationQualityValidator.validate(item.second, cleanedSeg, sourceLang, minRatio, maxRatio)
+            if (v is QualityValidationResult.Failure) {
+                addLog("[W#$workerId] ⚠️ バッチ[id:$segNum]: 品質NG (${v.reason}) → 単体フォールバック対象へ")
+                failedItems.add(item)
+                continue
+            }
+
+            val outFile = outputDir.findFile(fname) ?: outputDir.createFile("text/plain", fname)
+            if (outFile != null && saveFileContent(outFile, cleanedSeg)) {
+                existingOutputNames.add(fname)
+                completed++
+                settled++
+                addLog("[W#$workerId] ✅ $fname (バッチ部分回収保存)")
+            } else {
+                addLog("[W#$workerId] ❌ $fname バッチ保存失敗 → 単体フォールバックへ")
+                failedItems.add(item)
+            }
+        }
+
+        // 失敗分のみ単体翻訳へ（成功分は確定済みのため再翻訳しない）
+        if (failedItems.isNotEmpty()) {
+            if (isStopRequested || !currentCoroutineContext().isActive) {
+                addLog("[W#$workerId] 🛑 バッチ部分回収: 中断のため残り${failedItems.size}件は未処理で保持")
+                return BatchOutcome(completed, settled)
+            }
+            addLog("[W#$workerId] ⚠️ バッチ部分回収: ${failedItems.size}件を単体翻訳へフォールバック")
+            for (item in failedItems) {
+                if (isStopRequested || !currentCoroutineContext().isActive) break
+                if (translateSingleFile(
+                        fileDoc = item.first,
+                        content = item.second,
+                        outputDir = outputDir,
+                        existingOutputNames = existingOutputNames,
+                        rotationManager = rotationManager,
+                        sourceLang = sourceLang,
+                        novelDict = novelDict,
+                        prevSourceTail = prevSourceTail,
+                        workerId = workerId
+                    )
+                ) {
+                    completed++
+                }
+                settled++
+            }
+        }
+
+        return BatchOutcome(completed, settled)
     }
 
     /**

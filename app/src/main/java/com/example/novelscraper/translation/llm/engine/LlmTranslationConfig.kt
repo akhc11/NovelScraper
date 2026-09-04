@@ -40,6 +40,7 @@ data class ModelProfile(
     val useCustomPromptOrder: Boolean = false, // trueなら一括設定や言語自動選択に上書きされず、このモデル固有のpromptOrderを絶対優先
     val reasoningEffort: String = "none", // OpenRouter用 (none, low, medium, high)
     val reasoningEnabled: Boolean? = null, // OpenRouter DeepSeek V3.2用 {"reasoning":{"enabled":false}}
+    val useJsonSchema: Boolean = false, // バッチ翻訳でJSON Schema出力を試行 (Geminiのみ有効、失敗時はXMLへ自動劣化)
     val providerOrder: List<String> = emptyList(), // OpenRouter用 (例: ["upstage", "baidu/fp8"])
     val providerAllowFallbacks: Boolean? = false,  // OpenRouter用 (false=指定社のみ完全固定, true=他社フォールバック許可)
     val topP: Double? = null,
@@ -143,6 +144,7 @@ data class LlmTranslationConfig(
     val outputSubDir: String = "翻訳完了_LLM",
 
     val enableCompletionMarker: Boolean = true,
+    val enableBatchJsonSchema: Boolean = false, // バッチ翻訳のJSON Schema優先試行 (OFF時はXMLのみ)
     val enableTextSplit: Boolean = false,
     val textSplitSizeChars: Int = 7000,
 

@@ -776,7 +776,7 @@ fun LlmSettingsDialog(
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text("対象総パート数 (先頭N件 / 0=全件):", color = AppColors.textSecondary, fontSize = 10.sp)
+                                        Text("対象ファイル数 (バランス抽出 / 0=全件):", color = AppColors.textSecondary, fontSize = 10.sp)
                                         BasicInputArea(value = dictTotalPartsText, onValueChange = { dictTotalPartsText = it })
                                     }
                                     Column(modifier = Modifier.weight(1f)) {
@@ -943,9 +943,9 @@ fun LlmSettingsDialog(
                                 dictParallelCount = ((dictWorkerCountText.toIntOrNull() ?: 6) * (dictConcurrencyText.toIntOrNull() ?: 5)).coerceIn(1, 30),
                                 dictRequestDelaySec = dictRequestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
                                 dict429CooldownSec = dict429CooldownSecText.toIntOrNull()?.coerceIn(5, 300) ?: 60,
-                                parallelWorkers = parallelWorkersText.toIntOrNull()?.coerceIn(1, 6) ?: 2,
+                                parallelWorkers = parallelWorkersText.toIntOrNull()?.coerceIn(1, 6) ?: 3,
                                 enablePrevSrcContext = enablePrevSrcContext,
-                                requestDelaySec = requestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 10,
+                                requestDelaySec = requestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 30,
                                 enableAutoPromptOrder = enableAutoPromptOrder,
                                 autoPromptOrderKorean = autoPromptOrderKoreanText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(3, 7) },
                                 autoPromptOrderChinese = autoPromptOrderChineseText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(1, 1) },

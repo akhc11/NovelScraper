@@ -13,6 +13,8 @@ object TranslationPrompts {
 - キャラクター名の表記：
 - 固有の意味を持つ名前、または中国語／日本語／神話的な雰囲気を持つ名前 → 漢字表記を検討
 - 初出時は「張偉（チャン・ウェイ）」のように両方の表記を用い、その後は漢字表記に統一すること。
+- OUTPUT ONLY: Return only the translated Japanese text. No explanations, notes, or preamble.
+- Do not wrap in code fences. Start directly with the translation.
 """
 
     /** [2] 標準翻訳 (英語) */

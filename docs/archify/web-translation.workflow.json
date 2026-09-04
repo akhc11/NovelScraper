@@ -1,0 +1,254 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "NovelScraper Web Translation Pipeline",
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "full-pipeline",
+        "label": "End-to-end web translation",
+        "focus": [
+          "queue_manager",
+          "text_chunker",
+          "web_task",
+          "web_strategy",
+          "script_builder",
+          "web_service",
+          "dom_poller",
+          "file_store"
+        ],
+        "note": "Complete pipeline from queue intake, chunking, simulated paste, DOM extraction, to storage."
+      },
+      {
+        "id": "event-simulation",
+        "label": "Ctrl+V event emulation",
+        "focus": [
+          "script_builder",
+          "web_task",
+          "web_service"
+        ],
+        "note": "Simulated user paste sequence to avoid bot fallback and maintain neural translation quality."
+      },
+      {
+        "id": "chunking-loop",
+        "label": "Sequential chunk processing",
+        "focus": [
+          "text_chunker",
+          "web_task",
+          "dom_poller",
+          "file_store"
+        ],
+        "note": "Text splitting respecting service limits and iterative chunk evaluation."
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "queue_lane",
+      "label": "Queue & Chunking"
+    },
+    {
+      "id": "script_lane",
+      "label": "Strategy & Script IPC"
+    },
+    {
+      "id": "task_lane",
+      "label": "Task & WebView Host"
+    },
+    {
+      "id": "cloud_lane",
+      "label": "External Web Engine"
+    },
+    {
+      "id": "storage_lane",
+      "label": "Output & Persistence"
+    }
+  ],
+  "phases": [
+    {
+      "id": "phase_input",
+      "label": "Intake & Chunking",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "phase_exec",
+      "label": "WebView IPC & DOM Automation",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "phase_output",
+      "label": "Extraction & Storage",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "queue_manager",
+    "text_chunker",
+    "web_task",
+    "web_service",
+    "dom_poller",
+    "file_store"
+  ],
+  "nodes": [
+    {
+      "id": "queue_manager",
+      "lane": "queue_lane",
+      "col": 0,
+      "type": "backend",
+      "label": "QueueManager",
+      "sublabel": "FIFO Task Dispatch",
+      "tag": "queue",
+      "width": 140
+    },
+    {
+      "id": "text_chunker",
+      "lane": "queue_lane",
+      "col": 1,
+      "type": "frontend",
+      "label": "TextChunker",
+      "sublabel": "Service Size Splitting",
+      "tag": "chunker",
+      "width": 140
+    },
+    {
+      "id": "web_strategy",
+      "lane": "script_lane",
+      "col": 1,
+      "type": "backend",
+      "label": "WebStrategy",
+      "sublabel": "Google / DeepL / Papago",
+      "width": 140
+    },
+    {
+      "id": "script_builder",
+      "lane": "script_lane",
+      "col": 2,
+      "type": "security",
+      "label": "ScriptBuilder",
+      "sublabel": "Ctrl+V Event Sequence",
+      "tag": "anti-bot",
+      "width": 140
+    },
+    {
+      "id": "web_task",
+      "lane": "task_lane",
+      "col": 2,
+      "type": "backend",
+      "label": "WebTranslationTask",
+      "sublabel": "Isolated WebView Host",
+      "tag": "core",
+      "width": 140
+    },
+    {
+      "id": "web_service",
+      "lane": "cloud_lane",
+      "col": 3,
+      "type": "cloud",
+      "label": "Web Engine DOM",
+      "sublabel": "Target Browser Endpoint",
+      "width": 140
+    },
+    {
+      "id": "dom_poller",
+      "lane": "task_lane",
+      "col": 4,
+      "type": "frontend",
+      "label": "DOM Result Poller",
+      "sublabel": "Mutation & Text Watch",
+      "width": 140
+    },
+    {
+      "id": "file_store",
+      "lane": "storage_lane",
+      "col": 5,
+      "type": "database",
+      "label": "TranslationFileStore",
+      "sublabel": "Persist Translated File",
+      "tag": "storage",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_queue_chunk",
+      "from": "queue_manager",
+      "to": "text_chunker",
+      "variant": "default"
+    },
+    {
+      "id": "e_chunk_task",
+      "from": "text_chunker",
+      "to": "web_task",
+      "label": "chunked text",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e_strat_task",
+      "from": "web_strategy",
+      "to": "web_task",
+      "label": "selectors & url",
+      "variant": "dashed"
+    },
+    {
+      "id": "e_build_task",
+      "from": "script_builder",
+      "to": "web_task",
+      "label": "paste emulation",
+      "variant": "security"
+    },
+    {
+      "id": "e_task_cloud",
+      "from": "web_task",
+      "to": "web_service",
+      "label": "evaluate JS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e_cloud_poller",
+      "from": "web_service",
+      "to": "dom_poller",
+      "label": "observe output",
+      "variant": "default"
+    },
+    {
+      "id": "e_poller_store",
+      "from": "dom_poller",
+      "to": "file_store",
+      "label": "save chunk/file",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e_poller_task",
+      "from": "dom_poller",
+      "to": "web_task",
+      "label": "next chunk loop",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Anti-bot Human Emulation",
+      "items": [
+        "Google Translate requires strict focus -> select -> ClipboardEvent(paste) -> InputEvent(insertFromPaste) sequence",
+        "Prevents programmatic detection fallback to low-quality legacy translation engines"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Decoupled Background Lifecycle",
+      "items": [
+        "Dedicated WebView instance initialized with applicationContext is immune to Activity destruction",
+        "Chunked sequential translation executes smoothly in background without freezing UI thread"
+      ]
+    }
+  ]
+}

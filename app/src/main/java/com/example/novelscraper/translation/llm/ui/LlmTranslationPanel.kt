@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper.translation.llm.ui
+package com.example.novelscraper.translation.llm.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -220,6 +220,15 @@ fun LlmTranslationPanel(
                 )
             }
 
+            if (liveState.chunkProgress.second > 0) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "大ファイル進捗: ${liveState.chunkProgress.first} / ${liveState.chunkProgress.second} チャンク",
+                    color = AppColors.accentTealLight,
+                    fontSize = 11.sp
+                )
+            }
+
             if (liveState.currentFileName.isNotBlank()) {
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
@@ -265,6 +274,24 @@ fun LlmTranslationPanel(
 
         Spacer(modifier = Modifier.height(10.dp))
 
+        // 開始プリフライト: モデル0件・キー未設定では開始不可
+        val hasModel = config.modelProfiles.isNotEmpty()
+        val hasKey = config.geminiApiKeys.any { it.isNotBlank() } ||
+                config.openRouterApiKey.isNotBlank() || config.groqApiKey.isNotBlank()
+        val startBlockedReason = when {
+            !hasModel -> "モデル未登録のため開始できません (詳細設定で追加)"
+            !hasKey -> "APIキー未設定のため開始できません (詳細設定で入力)"
+            else -> null
+        }
+        if (folderList.isNotEmpty() && startBlockedReason != null && !liveState.isTranslating) {
+            Text(
+                text = "⚠️ $startBlockedReason",
+                color = Color(0xFFFFAA66),
+                fontSize = 11.sp
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+        }
+
         // 操作ボタン (開始 / 停止)
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -272,7 +299,7 @@ fun LlmTranslationPanel(
         ) {
             Button(
                 onClick = onStartClick,
-                enabled = !liveState.isTranslating && folderList.isNotEmpty(),
+                enabled = !liveState.isTranslating && folderList.isNotEmpty() && hasModel && hasKey,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = AppColors.accentOrange,
                     disabledContainerColor = AppColors.surfaceMedium

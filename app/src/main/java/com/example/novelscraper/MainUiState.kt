@@ -1,6 +1,7 @@
 package com.example.novelscraper
 
 import android.net.Uri
+import com.example.novelscraper.scraper.*
 import com.example.novelscraper.translation.llm.engine.LlmEngineState
 import kotlinx.serialization.Serializable
 

@@ -14,7 +14,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import com.example.novelscraper.SelectorField
+import com.example.novelscraper.scraper.SelectorField
 import com.example.novelscraper.ui.theme.AppColors
 
 @Composable

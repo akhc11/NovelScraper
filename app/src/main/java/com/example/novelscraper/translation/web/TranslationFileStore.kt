@@ -1,4 +1,4 @@
-package com.example.novelscraper
+package com.example.novelscraper.translation.web
 
 import android.content.Context
 import android.net.Uri

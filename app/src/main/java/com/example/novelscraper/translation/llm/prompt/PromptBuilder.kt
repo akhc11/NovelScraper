@@ -151,7 +151,7 @@ BATCH OUTPUT FORMAT (this overrides all other output instructions):
                 if (hasGender) {
                     hasMatchedGender = true
                 }
-            } else if (exampleCount < 10) {
+            } else if (exampleCount < 5) {
                 example.append(line)
                 exampleCount++
             }

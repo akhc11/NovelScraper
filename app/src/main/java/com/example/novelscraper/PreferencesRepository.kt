@@ -6,6 +6,7 @@ import android.util.Log
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.novelscraper.scraper.ScraperConfig
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow

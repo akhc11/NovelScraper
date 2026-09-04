@@ -371,7 +371,7 @@ object NovelDictionaryGenerator {
             return@coroutineScope null
         }
 
-        val effectiveMaxBytes = maxBatchBytes.coerceIn(4000, 100000)
+        val effectiveMaxBytes = maxBatchBytes.coerceIn(4000, 200000)
         val smartBatches = buildSmartBatches(context, targetFiles, effectiveMaxBytes, maxTotalScanBytes)
         val totalBatches = smartBatches.size
 
@@ -655,8 +655,9 @@ object NovelDictionaryGenerator {
 
     private fun writeDocContent(context: Context, doc: DocumentFile, content: String): Boolean {
         return try {
-            context.contentResolver.openOutputStream(doc.uri, "wt")?.use { stream ->
-                stream.write(content.toByteArray(Charsets.UTF_8))
+            val stream = context.contentResolver.openOutputStream(doc.uri, "wt") ?: return false
+            stream.use { s ->
+                s.write(content.toByteArray(Charsets.UTF_8))
             }
             true
         } catch (e: Exception) {

@@ -1,4 +1,4 @@
-package com.example.novelscraper
+package com.example.novelscraper.scraper
 
 object UrlExtractor {
     private val HTTP_URL_REGEX = Regex("""https?://[^\s<>"']+""", RegexOption.IGNORE_CASE)

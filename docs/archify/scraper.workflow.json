@@ -1,0 +1,250 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "NovelScraper Scraping Engine Pipeline",
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "scrape-loop",
+        "label": "Continuous scraping",
+        "focus": [
+          "start_url",
+          "cf_detector",
+          "script_builder",
+          "scraper_service",
+          "state_machine",
+          "file_repo",
+          "prefs_repo",
+          "finish_state"
+        ],
+        "note": "Continuous DOM extraction, content validation, saving, and next page advance loop."
+      },
+      {
+        "id": "bot-bypass",
+        "label": "Anti-bot challenge handling",
+        "focus": [
+          "start_url",
+          "cf_detector",
+          "scraper_service"
+        ],
+        "note": "Turnstile challenge detection, biometric scrolling, and trusted touch imitation."
+      },
+      {
+        "id": "persistence-path",
+        "label": "Storage and history update",
+        "focus": [
+          "state_machine",
+          "file_repo",
+          "prefs_repo",
+          "finish_state"
+        ],
+        "note": "Asynchronous IO saving with title/content fallback and history auto-pruning."
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "nav_lane",
+      "label": "Navigation & Security"
+    },
+    {
+      "id": "script_lane",
+      "label": "Script Engine & IPC"
+    },
+    {
+      "id": "engine_lane",
+      "label": "WebView & Orchestration"
+    },
+    {
+      "id": "storage_lane",
+      "label": "Storage & Persistence"
+    }
+  ],
+  "phases": [
+    {
+      "id": "init_phase",
+      "label": "Navigation & Anti-bot",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "exec_phase",
+      "label": "Extraction & State Loop",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "save_phase",
+      "label": "Storage & Completion",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "start_url",
+    "cf_detector",
+    "scraper_service",
+    "state_machine",
+    "file_repo",
+    "finish_state"
+  ],
+  "nodes": [
+    {
+      "id": "start_url",
+      "lane": "nav_lane",
+      "col": 0,
+      "type": "external",
+      "label": "Start Target URL",
+      "sublabel": "Preset / Domain Regex",
+      "width": 140
+    },
+    {
+      "id": "cf_detector",
+      "lane": "nav_lane",
+      "col": 1,
+      "type": "security",
+      "label": "CloudflareDetector",
+      "sublabel": "Biometric Tap & Scroll",
+      "tag": "anti-bot",
+      "width": 140
+    },
+    {
+      "id": "script_builder",
+      "lane": "script_lane",
+      "col": 1,
+      "type": "frontend",
+      "label": "ScrapingScriptBuilder",
+      "sublabel": "Single IPC Injection",
+      "width": 140
+    },
+    {
+      "id": "scraper_service",
+      "lane": "engine_lane",
+      "col": 2,
+      "type": "backend",
+      "label": "ScraperService",
+      "sublabel": "WebView Host Service",
+      "tag": "core",
+      "width": 140
+    },
+    {
+      "id": "state_machine",
+      "lane": "engine_lane",
+      "col": 3,
+      "type": "backend",
+      "label": "ScrapingStateMachine",
+      "sublabel": "Loop Guard & Transitions",
+      "tag": "state",
+      "width": 140
+    },
+    {
+      "id": "file_repo",
+      "lane": "storage_lane",
+      "col": 4,
+      "type": "database",
+      "label": "FileRepository",
+      "sublabel": "saveChapter IO Async",
+      "tag": "io",
+      "width": 140
+    },
+    {
+      "id": "prefs_repo",
+      "lane": "storage_lane",
+      "col": 3,
+      "type": "database",
+      "label": "PreferencesRepository",
+      "sublabel": "Auto-pruning History",
+      "width": 140
+    },
+    {
+      "id": "finish_state",
+      "lane": "storage_lane",
+      "col": 5,
+      "type": "external",
+      "label": "Scraping Finished",
+      "sublabel": "All Chapters Complete",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_url_cf",
+      "from": "start_url",
+      "to": "cf_detector",
+      "variant": "default"
+    },
+    {
+      "id": "e_cf_service",
+      "from": "cf_detector",
+      "to": "scraper_service",
+      "label": "challenge cleared",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e_build_service",
+      "from": "script_builder",
+      "to": "scraper_service",
+      "label": "evaluate JS",
+      "variant": "dashed"
+    },
+    {
+      "id": "e_service_sm",
+      "from": "scraper_service",
+      "to": "state_machine",
+      "label": "chapter extracted",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e_sm_file",
+      "from": "state_machine",
+      "to": "file_repo",
+      "label": "save chapter",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e_sm_prefs",
+      "from": "state_machine",
+      "to": "prefs_repo",
+      "label": "sync progress",
+      "variant": "default"
+    },
+    {
+      "id": "e_sm_loop",
+      "from": "state_machine",
+      "to": "scraper_service",
+      "label": "advance next URL",
+      "variant": "dashed"
+    },
+    {
+      "id": "e_file_done",
+      "from": "file_repo",
+      "to": "finish_state",
+      "label": "crawling complete",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Non-stop Crawling & Safety",
+      "items": [
+        "Empty chapter content automatically falls back to (本文なし) to prevent pipeline stall",
+        "In-memory visitedUrls set prevents infinite cycling on circular TOC links",
+        "Turnstile challenges handled via human-like multi-point scroll and trusted touch emulation"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "IPC & Architecture Optimization",
+      "items": [
+        "Consolidated JavaScript evaluation into a single evaluateJavascript call to prevent race conditions",
+        "Dedicated background WebView ensures continuous scraping decoupled from Activity lifecycle"
+      ]
+    }
+  ]
+}

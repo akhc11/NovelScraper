@@ -1,4 +1,6 @@
-package com.example.novelscraper
+package com.example.novelscraper.scraper
+
+import com.example.novelscraper.MainActivity
 
 import android.app.Notification
 import android.app.NotificationChannel

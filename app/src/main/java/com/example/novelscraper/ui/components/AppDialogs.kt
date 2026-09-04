@@ -19,7 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.novelscraper.ScraperConfig
+import com.example.novelscraper.scraper.*
 import com.example.novelscraper.ui.theme.AppColors
 
 @Composable

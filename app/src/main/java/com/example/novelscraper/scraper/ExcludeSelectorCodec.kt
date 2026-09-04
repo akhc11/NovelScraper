@@ -1,4 +1,4 @@
-package com.example.novelscraper
+package com.example.novelscraper.scraper
 
 /**
  * 除外セレクタ文字列（カンマ+スペース結合仕様）の純粋な変換処理。

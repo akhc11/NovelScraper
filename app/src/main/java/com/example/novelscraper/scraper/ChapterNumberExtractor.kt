@@ -1,4 +1,4 @@
-package com.example.novelscraper
+package com.example.novelscraper.scraper
 
 import java.net.URI
 

@@ -8,88 +8,154 @@ sealed class QualityValidationResult {
 object TranslationQualityValidator {
 
     /**
-     * 日本語（JIS常用・人名漢字）に存在しない、中国語簡体字に特有の文字群（純粋簡体字）
+     * 言語別サイズ比既定値 (min %, max %) の単一管理点。
+     * `LlmTranslationConfig` の既定値もここを参照し、二重定義を禁止する。
+     * EN 上限 220% が正規 (旧 docs の 350% 記載は誤り)。
      */
-    private val SIMPLIFIED_CHINESE_CHARS = charArrayOf(
-        '这', '们', '么', '谁', '让', '过', '还', '从', '现', '个',
-        '经', '动', '问', '应', '实', '话', '带', '见', '关', '门',
-        '车', '电', '认', '书', '写', '声', '间', '亲', '听', '乐',
-        '热', '钱', '买', '卖', '发', '变', '师', '飞', '队', '风',
-        '云', '龙', '马', '鸟', '鱼', '觉', '岁', '办', '帮', '场',
-        '导', '敌', '读', '独', '断', '对', '饭', '记', '计', '检',
-        '节', '结', '进', '紧', '宽', '况', '蓝', '烂', '累', '类',
-        '离', '连', '联', '脸', '练', '凉', '两', '灵', '领', '乱',
-        '轮', '论', '罗', '绿', '妈', '码', '骂', '吗', '难', '脑',
-        '闹', '农', '评', '凭', '颇', '铺', '齐', '骑', '启', '气',
-        '迁', '牵', '铅', '枪', '强', '墙', '抢', '桥', '倾', '庆',
-        '穷', '区', '权', '劝', '确', '扰', '荣', '赛', '杀', '伤',
-        '设', '审', '师', '诗', '时', '识', '势', '视', '试', '适',
-        '树', '数', '帅', '双', '说', '丝', '肃', '诉', '算', '随',
-        '孙', '损', '态', '滩', '谈', '汤', '涛', '讨', '腾', '题',
-        '体', '铁', '厅', '统', '头', '图', '涂', '团', '湾', '万',
-        '网', '违', '围', '为', '伟', '伪', '纬', '卫', '稳', '务',
-        '误', '雾', '戏', '虾', '峡', '吓', '显', '险', '县', '线',
-        '乡', '详', '响', '项', '销', '晓', '协', '胁', '携', '谢',
-        '醒', '兴', '幸', '凶', '汹', '须', '叙', '蓄', '绪', '续',
-        '选', '悬', '寻', '训', '讯', '逊', '压', '押', '鸦', '鸭',
-        '哑', '严', '颜', '盐', '演', '验', '阳', '养', '样', '谣',
-        '摇', '遥', '药', '爷', '页', '业', '医', '仪', '遗', '艺',
-        '议', '译', '阴', '银', '饮', '营', '蝇', '赢', '颖', '拥',
-        '佣', '涌', '踊', '忧', '优', '邮', '犹', '油', '游', '诱',
-        '渔', '娱', '屿', '语', '驭', '吁', '郁', '预', '园', '圆',
-        '缘', '远', '愿', '约', '跃', '阅', '岳', '粤', '运', '匀',
-        '杂', '灾', '载', '赞', '暂', '脏', '灶', '泽', '贼', '增',
-        '赠', '扎', '闸', '炸', '摘', '债', '战', '张', '涨', '掌',
-        '帐', '胀', '障', '赵', '针', '侦', '诊', '阵', '镇', '争',
-        '征', '挣', '睁', '筝', '蒸', '拯', '整', '证', '症', '织',
-        '职', '植', '执', '值', '侄', '制', '质', '治', '致', '智',
-        '钟', '终', '种', '肿', '轴', '昼', '皱', '诸', '猪', '蛛',
-        '烛', '著', '助', '祝', '铸', '筑', '抓', '专', '砖', '转',
-        '赚', '庄', '装', '壮', '状', '追', '准', '捉', '灼', '浊',
-        '资', '姿', '滋', '紫', '总', '纵', '邹', '阻', '组', '祖',
-        '钻', '嘴', '尊', '昨', '坐', '座', '做'
-    ).toSet()
+    const val ZH_MIN_RATIO = 102
+    const val ZH_MAX_RATIO = 200
+    const val KO_MIN_RATIO = 102
+    const val KO_MAX_RATIO = 150
+    const val EN_MIN_RATIO = 105
+    const val EN_MAX_RATIO = 220
+    const val JA_MIN_RATIO = 100
+    const val JA_MAX_RATIO = 200
+
+    /** 150B未満の極小テキストは比率誤差が大きいため検査をバイパスする */
+    const val MIN_BYTES_FOR_RATIO_CHECK = 150
 
     /**
-     * モデルの前口上1行を検知する判定関数 (bash v29.0.5.7.0 _is_preamble_line 準拠)
+     * 残留判定に必要な最小の文字種合計 (これ未満は判定不能として成功扱い)。
+     * 日本語の文には必ずかなが含まれるため、30字以上のかなゼロは中国語/韓国語残留とみなせる。
+     * 漢字のみの短い見出し (十数文字以下) は誤爆防止のため対象外になる。
      */
-    fun isPreambleLine(rawLine: String): Boolean {
-        val line = rawLine.trim().lowercase()
-        return when {
-            line == "certainly" || line == "certainly!" || line == "okay" || line == "okay." || line == "okay!" -> true
-            line.startsWith("certainly! here") || line.startsWith("okay, here") -> true
-            line.startsWith("here is the translation") || line.startsWith("here's the translation") -> true
-            line.startsWith("below is the translation") || line.startsWith("this is the translation") -> true
-            line.startsWith("i have translated") -> true
-            line.startsWith("以下、翻訳") || line.startsWith("以下は翻訳") -> true
-            line == "翻訳しました。" || line == "翻訳です。" || line.startsWith("翻訳結果") -> true
-            line == "承知しました。" || line == "承知いたしました。" || line == "かしこまりました。" -> true
-            else -> false
-        }
+    const val MIN_CHARS_FOR_RESIDUAL_CHECK = 30
+
+    /** 純粋簡体字の失敗閾値 (これ以上混入で残留疑い。かな率ゲートと併用) */
+    const val MIN_PURE_SIMPLIFIED_COUNT = 10
+
+    /** かな率ゲート (かな% がこれ未満の場合のみ純粋簡体字で落とす。通常日本語は30〜50%) */
+    const val MAX_KANA_RATIO_PERCENT = 10
+
+    /**
+     * 中国語でしか使わない漢字 (純粋簡体字280字)。JIS X 0208 (6879字) との機械差分で検証済み。
+     * 旧表に混入していた常用・人名・表外漢字 (万 区 医 昨 座 凶 乱 数 算 涛 郁 蛛 等89字) は除外済み。
+     * web小説頻出の代表的簡体字 (剑 / 长 / 气) を含む。
+     */
+    private val PURE_SIMPLIFIED_CHARS: Set<Char> = (
+        "这们么谁让过还现经动问应实话带见关门车电认书间亲乐热钱买卖发变师飞队风龙马鸟鱼觉" +
+        "岁办帮场导敌读对饭记计检节结进紧宽蓝烂类离连联脸练两灵领轮论罗绿妈码骂吗难脑闹农" +
+        "评颇铺齐骑启迁牵铅枪强墙抢桥倾庆穷权劝确扰荣赛杀伤设审诗时识势视试适树帅说丝肃诉" +
+        "孙损态滩谈汤讨腾题铁厅统头图涂团违围为伟伪纬卫稳务误雾戏虾吓显险县线乡详响项销晓" +
+        "协胁谢兴汹须绪续选悬寻训讯逊压鸦鸭哑严颜盐验阳养样谣摇药爷页业仪遗艺议译阴银饮营" +
+        "蝇赢颖拥佣忧优邮诱渔娱屿语驭预园圆缘远约跃阅运匀杂灾载赞暂脏灶泽贼增赠闸债战张涨" +
+        "帐胀赵针侦诊阵镇挣睁证织职执值侄质钟终种肿轴皱诸烛铸专砖转赚浊资总纵邹组钻" +
+        "剑长气"
+    ).toSet()
+
+    /** 改行消失とみなす行数比 (訳文行数 < 原文行数 / LINE_LOSS_DIVISOR) */
+    const val LINE_LOSS_DIVISOR = 3
+
+    /** 行数比検査を適用する最小の原文行数 */
+    const val MIN_LINES_FOR_LINE_CHECK = 5
+
+    /**
+     * 前口上1行の完全一致パターン (小文字化後に比較)
+     */
+    private val PREAMBLE_EXACT = setOf(
+        "certainly", "certainly!", "okay", "okay.", "okay!",
+        "翻訳しました。", "翻訳です。", "承知しました。",
+        "承知いたしました。", "かしこまりました。",
+        "翻译完成。", "翻译如下。", "번역했습니다.", "번역 결과입니다."
+    )
+
+    /**
+     * 前口上行の前方一致パターン (小文字化後に比較)
+     */
+    private val PREAMBLE_PREFIXES = listOf(
+        "certainly! here", "okay, here",
+        "here is the translation", "here's the translation",
+        "below is the translation", "this is the translation",
+        "i have translated",
+        "以下、翻訳", "以下は翻訳", "翻訳結果",
+        "好的", "以下是", "这里是", "下面是", "这是翻译",
+        "번역", "다음은 번역",
+        "#", "```"
+    )
+
+    /**
+     * 後口上行の判定 (末尾の非空行に対して完全一致または前方一致で比較)
+     */
+    private fun isPostambleLine(rawLine: String): Boolean {
+        val line = rawLine.trim()
+        if (line.isEmpty()) return false
+        val lower = line.lowercase()
+        if (lower == "```") return true
+        if (line.startsWith("#")) return true
+        val exact = setOf(
+            "以上です。", "以上になります。", "お楽しみください。",
+            "enjoy!", "happy reading!", "hope this helps!",
+            "let me know if you need anything else."
+        )
+        if (exact.any { lower == it.lowercase() }) return true
+        val prefixes = listOf(
+            "以上", "备注", "注:", "注：", "ps:", "p.s.",
+            "note:", "enjoy", "hope you enjoy"
+        )
+        return prefixes.any { lower.startsWith(it.lowercase()) }
     }
 
     /**
-     * AIの前口上行を検知して除去する (先頭・末尾の空行整形を含む)
+     * モデルの前口上1行を検知する判定関数
+     */
+    fun isPreambleLine(rawLine: String): Boolean {
+        val line = rawLine.trim().lowercase()
+        if (line.isEmpty()) return false
+        if (PREAMBLE_EXACT.contains(line)) return true
+        return PREAMBLE_PREFIXES.any { line.startsWith(it) }
+    }
+
+    /**
+     * LLM出力のサニタイズ: 先頭/末尾コードフェンス剥離 → 先頭前口上除去 →
+     * 末尾後口上除去 → trim。本文中のフェンスは温存する。
+     * `CompletionMarkerHelper` 検証より前に適用すること。
      */
     fun stripPreamble(content: String): String {
-        val lines = content.lines()
-        if (lines.isEmpty()) return content.trim()
+        var text = content.trim()
+        if (text.isEmpty()) return text
 
-        // 先頭から連続する空行・前口上行をすべて除去する
-        // (LLMが空行を挟んでから「Here is the translation:」等を出力するケースに対応)
-        var dropCount = 0
+        // 先頭コードフェンス (``` / ```json 等の1行) を剥離
+        var lines = text.lines().toMutableList()
+        if (lines.first().trim().startsWith("```")) {
+            lines = lines.drop(1).toMutableList()
+        }
+        // 末尾コードフェンスを剥離
+        while (lines.isNotEmpty() && lines.last().trim() == "```") {
+            lines = lines.dropLast(1).toMutableList()
+        }
+        // 先頭から連続する空行・前口上行をすべて除去
+        var dropHead = 0
         for (line in lines) {
             if (line.isBlank() || isPreambleLine(line)) {
-                dropCount++
+                dropHead++
             } else {
                 break
             }
         }
-        return if (dropCount > 0) {
-            lines.drop(dropCount).joinToString("\n").trim()
-        } else {
-            content.trim()
+        lines = lines.drop(dropHead).toMutableList()
+        // 末尾から連続する空行・後口上行をすべて除去 (最大でも全文は削らない)
+        var dropTail = 0
+        for (line in lines.asReversed()) {
+            if (line.isBlank() || isPostambleLine(line)) {
+                dropTail++
+            } else {
+                break
+            }
         }
+        if (dropTail in 1..lines.size) {
+            lines = lines.dropLast(dropTail).toMutableList()
+        }
+        return lines.joinToString("\n").trim()
     }
 
     /**
@@ -122,10 +188,10 @@ object TranslationQualityValidator {
             return langCheck
         }
 
-        // 3. 平均行長チェック (改行消失検出)
-        val lineLenCheck = checkAverageLineLength(sourceText, cleaned)
-        if (lineLenCheck is QualityValidationResult.Failure) {
-            return lineLenCheck
+        // 3. 行数比チェック (改行消失検出)
+        val lineCheck = checkLineCount(sourceText, cleaned)
+        if (lineCheck is QualityValidationResult.Failure) {
+            return lineCheck
         }
 
         // 4. サイズ比チェック (設定値または言語別適正デフォルト)
@@ -137,6 +203,11 @@ object TranslationQualityValidator {
         return QualityValidationResult.Success
     }
 
+    /**
+     * 残留言語チェック。
+     * CJK統合漢字は日中で同一コードポイントのため、漢字単体では絶対に落とさない。
+     * 日本語文には必ずかなが含まれることを利用し、かなゼロの高精度条件でのみ落とす。
+     */
     private fun checkResidualLanguage(
         translatedText: String,
         sourceLang: SourceLanguage
@@ -145,68 +216,68 @@ object TranslationQualityValidator {
             return QualityValidationResult.Success
         }
 
-        // ① 純粋な簡体字の直接検出 (中国語原文の場合: 3文字以上の混入でリジェクト)
-        if (sourceLang == SourceLanguage.ZH) {
-            val simplifiedMatches = mutableListOf<Char>()
-            for (ch in translatedText) {
-                if (SIMPLIFIED_CHINESE_CHARS.contains(ch)) {
-                    simplifiedMatches.add(ch)
-                    if (simplifiedMatches.size >= 3) break
-                }
-            }
-            if (simplifiedMatches.size >= 3) {
-                return QualityValidationResult.Failure("中国語(簡体字)残留を検出: 「${simplifiedMatches.joinToString("")}」")
-            }
-        }
-
-        // ② 全文を対象とした文字種集計 (bash スクリプト _count_chars と完全同一の判定基準)
         val detection = LanguageDetector.detect(translatedText, maxLines = Int.MAX_VALUE)
         val kanji = detection.kanjiCount
         val kana = detection.kanaCount
-        val ko = detection.hangeulCount
+        val hangeul = detection.hangeulCount
 
         if (sourceLang == SourceLanguage.ZH) {
             val total = kanji + kana
-            // 漢字がかなの7倍超 (漢字比率87.5%超) → 中国語残留と判定
-            if (total > 50 && kanji > kana * 7) {
-                return QualityValidationResult.Failure("中国語残留の疑い (漢字:$kanji かな:$kana / 漢字比率:${kanji * 100 / total}%)")
+            if (total > MIN_CHARS_FOR_RESIDUAL_CHECK && kana == 0) {
+                return QualityValidationResult.Failure("中国語残留の疑い (漢字:$kanji かな:$kana)")
             }
-            // かなが極端に少ない → 日本語化不足
-            if (total > 80 && kana < 8) {
-                return QualityValidationResult.Failure("日本語化不足 (かな:$kana / 全体:$total)")
+            // 純粋簡体字が高頻度で混入し、かつかなが極端に少ない場合のみ落とす。
+            // 通常日本語 (かな率30〜50%) は共有漢字が混じっても素通りする。
+            if (total > MIN_CHARS_FOR_RESIDUAL_CHECK &&
+                pureSimplifiedCount(translatedText) >= MIN_PURE_SIMPLIFIED_COUNT &&
+                kana * 100 < total * MAX_KANA_RATIO_PERCENT
+            ) {
+                return QualityValidationResult.Failure(
+                    "中国語(簡体字)残留を検出 (かな率:${kana * 100 / total}%)"
+                )
             }
-        } else if (sourceLang == SourceLanguage.KO) {
-            val total = ko + kana
-            // ハングルがかなの5倍超 → 韓国語残留
-            if (total > 30 && ko > kana * 5) {
-                return QualityValidationResult.Failure("韓国語残留の疑い (ハングル:$ko かな:$kana)")
-            }
-            if (total > 50 && kana < 10) {
-                return QualityValidationResult.Failure("日本語化不足 (かな:$kana)")
+        } else {
+            val total = hangeul + kana
+            if (total > MIN_CHARS_FOR_RESIDUAL_CHECK && kana == 0 && hangeul > 0) {
+                return QualityValidationResult.Failure("韓国語残留の疑い (ハングル:$hangeul かな:$kana)")
             }
         }
 
         return QualityValidationResult.Success
     }
 
-    private fun checkAverageLineLength(
+    /**
+     * 純粋簡体字の混入数を数える (閾値到達で早期終了)。
+     */
+    private fun pureSimplifiedCount(translatedText: String): Int {
+        var count = 0
+        for (ch in translatedText) {
+            if (PURE_SIMPLIFIED_CHARS.contains(ch)) {
+                count++
+                if (count >= MIN_PURE_SIMPLIFIED_COUNT) break
+            }
+        }
+        return count
+    }
+
+    /**
+     * 行数比チェック。訳文の非空行数が原文の 1/[LINE_LOSS_DIVISOR] 未満なら改行消失とみなす。
+     */
+    private fun checkLineCount(
         sourceText: String,
         translatedText: String
     ): QualityValidationResult {
         val srcLines = sourceText.lines().filter { it.isNotBlank() }
         val outLines = translatedText.lines().filter { it.isNotBlank() }
 
-        if (srcLines.size < 5 || outLines.isEmpty()) return QualityValidationResult.Success
+        if (srcLines.size < MIN_LINES_FOR_LINE_CHECK || outLines.isEmpty()) {
+            return QualityValidationResult.Success
+        }
 
-        val srcBytes = sourceText.toByteArray(Charsets.UTF_8).size
-        val outBytes = translatedText.toByteArray(Charsets.UTF_8).size
-
-        val srcAvg = srcBytes / srcLines.size
-        val outAvg = outBytes / outLines.size
-
-        // 翻訳後平均行長が原文の4倍超なら改行消失 (AVG_LINE_LEN_RATIO = 4)
-        if (srcAvg > 0 && outAvg > srcAvg * 4) {
-            return QualityValidationResult.Failure("平均行長異常 (原文:${srcAvg}B/行 翻訳後:${outAvg}B/行) → 改行消失疑い")
+        if (outLines.size * LINE_LOSS_DIVISOR < srcLines.size) {
+            return QualityValidationResult.Failure(
+                "改行消失疑い (原文:${srcLines.size}行 翻訳後:${outLines.size}行)"
+            )
         }
 
         return QualityValidationResult.Success
@@ -222,13 +293,13 @@ object TranslationQualityValidator {
         val srcBytes = sourceText.toByteArray(Charsets.UTF_8).size
         val outBytes = translatedText.toByteArray(Charsets.UTF_8).size
         // 150B未満の極小テキスト (章タイトル・短い一文等) は比率誤差が大きいためバイパス
-        if (srcBytes < 150) return QualityValidationResult.Success
+        if (srcBytes < MIN_BYTES_FOR_RATIO_CHECK) return QualityValidationResult.Success
 
         val (defaultMin, defaultMax) = when (sourceLang) {
-            SourceLanguage.ZH -> 102 to 200
-            SourceLanguage.KO -> 102 to 150
-            SourceLanguage.EN -> 105 to 220
-            SourceLanguage.JA -> 100 to 200
+            SourceLanguage.ZH -> ZH_MIN_RATIO to ZH_MAX_RATIO
+            SourceLanguage.KO -> KO_MIN_RATIO to KO_MAX_RATIO
+            SourceLanguage.EN -> EN_MIN_RATIO to EN_MAX_RATIO
+            SourceLanguage.JA -> JA_MIN_RATIO to JA_MAX_RATIO
         }
 
         val minRatio = customMinRatio ?: defaultMin

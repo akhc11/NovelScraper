@@ -1,7 +1,14 @@
 # LLM翻訳 7機能 作り直しプラン (2026-09-04)
 
-実装はしない。本ファイルはプランのみ。
 作業時は `app/src/main/java/com/example/novelscraper/translation/llm/AGENTS.md` を最優先する。
+
+## 実施記録 (2026-09-04)
+
+- 全7機能を実装済み (未コミット)。事前チェックポイント: `2909cff` (`git reset --hard 2909cff` でロールバック可)。
+- 検証: `:app:testDebugUnitTest` 全115件合格 (失敗0・エラー0・スキップ2)。`LlmPipelineTest` 35件含む。
+- 変更は `translation/llm/` + `LlmPipelineTest.kt` に限定。外部公開API (start/stop/engineState/updateConfig) 無変更。
+- 追加差分: ⑧prevTailスライディング、⑨writeDocContent戻り値、単体/バッチ保存検証、未使用変数除去、README乖離2件の同期。
+- 追补 (2026-09-04): 純粋簡体字277字をJIS X 0208機械差分で確定し複合条件 (5字以上＋かな率5%未満) で実装。不純89字を除外。全116件合格。
 
 ## 0. スコープ
 
@@ -215,3 +222,17 @@
 - EN サイズ比の具体値は AGENTS.md で固定しない。コードのデフォルト値 (`sizeRatioEnMax = 220`) を基本とし、ユーザーが UI で調整する。
 - EN は ASCII→UTF-8 の自然膨張で他言語より誤リジェクトしやすいが、値を上げすぎるとハルシネーション検知が効かなくなるため、バランスが必要。
 - 旧 docs の 350% 記載は誤りのため `docs/history/` ごと削除済み (現在0件)。historyを探さないこと。
+
+## 13. レビュー検証と是正対応 (2026-09-04)
+
+- **.lang_cache 仕様整合**: `llm/AGENTS.md` §2 の「持ち込まない」記述は誤記として改定。出力先フォルダに判定言語（ZH/KO/EN/JA）を保存し、次回以降のSAF再判定オーバーヘッドを削減する正式仕様として確定（`LLM_BEHAVIOR_STANDARD.md` と同期）。
+- **dictBatchMaxBytes 上限200KB改定**: ユーザー指示に基づき、辞書生成の1回送信上限クランプを 200,000 (200KB) に引き上げ統一（Engine / UI / AGENTS.md）。初期値は安全圏の 50,000 (50KB) を維持。
+- **nullストリーム成功誤認バグの根本修正 (3箇所)**: `openOutputStream(...)?.use { ... }; true` を `val stream = ... ?: return false` に改修し、SAF ストリーム取得失敗時の偽陽性完了を排除（`LlmTranslationEngine`, `LargeFileTranslator`, `NovelDictionaryGenerator`）。
+- **Groq 経路への推論パラメータ透過**: `LlmRequestRunner.kt` の `LlmProvider.GROQ` 呼び出しに `reasoningEffort` および `reasoningEnabled` を追加。
+- **大ファイル分割進捗の UI 表示**: `LlmTranslationPanel.kt` に `chunkProgress` 描画を追加（大ファイル分割翻訳時に `大ファイル進捗: N / M チャンク` を表示）。併せて大ファイル完了時およびジョブ開始時に `chunkProgress` をクリアするリセットを追加。
+- **FileClaimManager の例外・キャンセル耐性（try/finally構造化）**: `LlmTranslationEngine.kt` の大ファイル処理および小ファイル/バッチ処理全体を `try/finally` で囲み、停止ボタン押下や未捕捉例外発生時にも取得済みクレームが100%解放されるよう構造的保証を追加。
+- **LargeFileTranslator の結合時重複 findFile 最適化**: チャンク結合時の2重ループ（全完了確認＋テキスト結合）での重複 `findFile` を `outDir.listFiles().associateBy { it.name }` による一括マップ参照に刷新。
+- **振る舞い標準（LLM_BEHAVIOR_STANDARD.md）同期**: 旧「二重.failed」「0バイト破損完了扱い」の記述を現行の安全仕様に更新。
+- **中国web小説頻出簡体字の追加 (剑 / 长 /气)**: ユーザー指示に基づき、仙侠・玄幻・武侠等で最頻出する「剑（剣）」「长（長）」「气（気）」の3字を `TranslationQualityValidator.PURE_SIMPLIFIED_CHARS`（277字 → 280字）に追加。ユニットテスト（`LlmPipelineTest` 全37件）で正常検知を検証済み。
+- **大ファイル結合後の作業ディレクトリ再帰削除**: `LargeFileTranslator` の結合成功後の `workDir.delete()` を `deleteDirectoryRecursively(workDir)` に改修。子ファイルが残存してフォルダ削除が失敗し次回起動時に誤って再翻訳される問題を根本予防。
+

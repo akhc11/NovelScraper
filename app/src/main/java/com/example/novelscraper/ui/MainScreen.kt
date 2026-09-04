@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.*
+import com.example.novelscraper.scraper.*
 import com.example.novelscraper.translation.llm.engine.LlmEngineState
 import com.example.novelscraper.translation.llm.ui.LlmSettingsDialog
 import com.example.novelscraper.ui.components.*

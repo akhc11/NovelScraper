@@ -144,27 +144,27 @@ data class LlmTranslationConfig(
 
     val enableCompletionMarker: Boolean = true,
     val enableTextSplit: Boolean = false,
-    val textSplitSizeChars: Int = 8000,
+    val textSplitSizeChars: Int = 7000,
 
     val enableDictGen: Boolean = false,
     val dictProvider: LlmProvider = LlmProvider.GEMINI,
-    val dictModel: String = "gemma-4-31b-it",
-    val dictMergeModel: String = "gemini-3.5-flash", // レガシー互換用
+    val dictModel: String = DEFAULT_DICT_GEMINI_MODEL,
+    val dictMergeModel: String = DEFAULT_DICT_GEMINI_MODEL, // レガシー互換用
 
     // プロバイダー別の個別辞書モデル・設定
-    val dictGeminiModel: String = "gemini-3.1-flash-lite",
-    val dictGeminiMergeModel: String = "gemini-3.5-flash",
-    val dictOpenRouterModel: String = "google/gemma-4-31b-it:free",
+    val dictGeminiModel: String = DEFAULT_DICT_GEMINI_MODEL,
+    val dictGeminiMergeModel: String = DEFAULT_DICT_GEMINI_MODEL,
+    val dictOpenRouterModel: String = DEFAULT_DICT_OPENROUTER_MODEL,
     val dictOpenRouterMergeModel: String = "",
     val dictOpenRouterProviderOrder: List<String> = emptyList(),
     val dictOpenRouterProviderAllowFallbacks: Boolean? = false,
-    val dictGroqModel: String = "llama-3.3-70b-versatile",
+    val dictGroqModel: String = DEFAULT_DICT_GROQ_MODEL,
     val dictGroqMergeModel: String = "",
 
     val dictTotalParts: Int = 100, // 0 = 全ファイル
-    val dictSampleMode: DictSampleMode = DictSampleMode.HEAD, // 抽出範囲モード (先頭 / 全編均等)
-    val dictBatchMaxBytes: Int = 50000, // 1回のAPI送信最大サイズ (デフォルト50KB ≒ 約15,000トークン安全圏)
-    val dictMaxTotalScanBytes: Int = 2000000, // 辞書用合計最大スキャン容量 (2MBセーフティガード)
+    val dictSampleMode: DictSampleMode = DictSampleMode.UNIFORM, // 抽出範囲モード (先頭 / 全編均等)
+    val dictBatchMaxBytes: Int = 100000, // 1回のAPI送信最大サイズ (デフォルト100KB ≒ 約5話分)
+    val dictMaxTotalScanBytes: Int = 10000000, // 辞書用合計最大スキャン容量 (10MBセーフティガード)
     val dictWorkerCount: Int = 6, // 辞書生成 同時ワーカー数 (キー分散数)
     val dictConcurrencyPerWorker: Int = 5, // 1ワーカーあたりの並列リクエスト数
     val dictParallelCount: Int = 30, // 辞書生成並列数 (互換用: dictWorkerCount * dictConcurrencyPerWorker)
@@ -225,9 +225,9 @@ data class LlmTranslationConfig(
         }
         return model.trim().ifBlank {
             when (targetProvider) {
-                LlmProvider.GEMINI -> "gemini-3.1-flash-lite"
-                LlmProvider.OPENROUTER -> "google/gemma-4-31b-it:free"
-                LlmProvider.GROQ -> "llama-3.3-70b-versatile"
+                LlmProvider.GEMINI -> DEFAULT_DICT_GEMINI_MODEL
+                LlmProvider.OPENROUTER -> DEFAULT_DICT_OPENROUTER_MODEL
+                LlmProvider.GROQ -> DEFAULT_DICT_GROQ_MODEL
             }
         }
     }
@@ -313,5 +313,11 @@ data class LlmTranslationConfig(
             SourceLanguage.EN -> autoPromptOrderEnglish.ifEmpty { listOf(2, 7) }
             SourceLanguage.JA -> profile.promptOrder
         }
+    }
+
+    companion object {
+        const val DEFAULT_DICT_GEMINI_MODEL = "gemini-3.1-flash-lite"
+        const val DEFAULT_DICT_OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
+        const val DEFAULT_DICT_GROQ_MODEL = "llama-3.3-70b-versatile"
     }
 }

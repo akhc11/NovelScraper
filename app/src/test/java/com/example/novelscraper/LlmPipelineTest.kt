@@ -1,6 +1,8 @@
 package com.example.novelscraper
 
 import com.example.novelscraper.translation.llm.pipeline.*
+import androidx.documentfile.provider.DocumentFile
+import java.io.File
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -732,5 +734,129 @@ class LlmPipelineTest {
         )
         val candidate = resp.candidates?.firstOrNull()
         assertEquals("SAFETY", candidate?.finishReason)
+    }
+
+    @Test
+    fun testLlmTranslationConfig_DefaultDictValues() {
+        val defaultConfig = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig()
+        assertEquals("gemini-3.1-flash-lite", defaultConfig.dictModel)
+        assertEquals("gemini-3.1-flash-lite", defaultConfig.dictMergeModel)
+        assertEquals("gemini-3.1-flash-lite", defaultConfig.dictGeminiModel)
+        assertEquals("gemini-3.1-flash-lite", defaultConfig.dictGeminiMergeModel)
+        assertEquals(100000, defaultConfig.dictBatchMaxBytes)
+        assertEquals(com.example.novelscraper.translation.llm.engine.DictSampleMode.UNIFORM, defaultConfig.dictSampleMode)
+        assertEquals(10000000, defaultConfig.dictMaxTotalScanBytes)
+    }
+
+    @Test
+    fun testDictKeyCooldownTracker_StateTransitions() {
+        val tracker = DictKeyCooldownTracker(listOf("key-A", "key-B", "key-C"), cooldownSec = 60)
+        assertEquals(3, tracker.totalKeys)
+
+        // 1. 初期状態: 優先0で key-A が取得できる
+        val first = tracker.getAvailableKey(0)
+        assertNotNull(first)
+        assertEquals(0, first!!.first)
+        assertEquals("key-A", first.second)
+
+        // 2. key-A をクールダウン登録
+        tracker.markCooldown(0)
+        assertTrue(tracker.isCoolingDown(0))
+        assertFalse(tracker.isCoolingDown(1))
+
+        // 3. 次回優先0で要求しても、自動で生存キー (key-B) へスキップ
+        val next = tracker.getAvailableKey(0)
+        assertNotNull(next)
+        assertEquals(1, next!!.first)
+        assertEquals("key-B", next.second)
+
+        // 4. 残りもすべてクールダウン登録
+        tracker.markCooldown(1)
+        tracker.markCooldown(2)
+        assertTrue(tracker.isCoolingDown(1))
+        assertTrue(tracker.isCoolingDown(2))
+
+        // 5. 全キー制限時は null を返し、最小待機時間が正の値を返す
+        assertNull(tracker.getAvailableKey(0))
+        val waitMs = tracker.getMinCooldownRemainingMillis()
+        assertTrue("waitMs should be between 1000 and 60000, but was $waitMs", waitMs in 1000L..60000L)
+    }
+
+    @Test
+    fun testSelectSampleFiles_Uniform_NoDuplicates_EdgeCases() {
+        val tempDir = java.nio.file.Files.createTempDirectory("uniform_edge_test").toFile()
+        try {
+            // Case 1: 80ファイル (総数 <= 目標100パート)
+            val files80 = (1..80).map { i ->
+                val f = File(tempDir, "ch_${String.format("%04d", i)}.txt")
+                f.createNewFile()
+                DocumentFile.fromFile(f)
+            }
+            val sampled80 = NovelDictionaryGenerator.selectSampleFiles(
+                files80,
+                totalParts = 100,
+                sampleMode = com.example.novelscraper.translation.llm.engine.DictSampleMode.UNIFORM
+            )
+            assertEquals(80, sampled80.size)
+            assertEquals("80話で重複があってはならない", 80, sampled80.distinctBy { it.name }.size)
+
+            // Case 2: 110ファイル (総数 > 目標100パート、前半50と中盤25が重なる境界ケース)
+            val files110 = (1..110).map { i ->
+                val f = File(tempDir, "ch_${String.format("%04d", i)}.txt")
+                if (!f.exists()) f.createNewFile()
+                DocumentFile.fromFile(f)
+            }
+            val sampled110 = NovelDictionaryGenerator.selectSampleFiles(
+                files110,
+                totalParts = 100,
+                sampleMode = com.example.novelscraper.translation.llm.engine.DictSampleMode.UNIFORM
+            )
+            assertEquals(100, sampled110.size)
+            assertEquals("110話で重複があってはならない", 100, sampled110.distinctBy { it.name }.size)
+
+            // Case 3: 300ファイル (総数 >> 目標100パート、長編ケース)
+            val files300 = (1..300).map { i ->
+                val f = File(tempDir, "ch_${String.format("%04d", i)}.txt")
+                if (!f.exists()) f.createNewFile()
+                DocumentFile.fromFile(f)
+            }
+            val sampled300 = NovelDictionaryGenerator.selectSampleFiles(
+                files300,
+                totalParts = 100,
+                sampleMode = com.example.novelscraper.translation.llm.engine.DictSampleMode.UNIFORM
+            )
+            assertEquals(100, sampled300.size)
+            assertEquals("300話で重複があってはならない", 100, sampled300.distinctBy { it.name }.size)
+            // 先頭・中盤・終盤が含まれていること
+            assertTrue(sampled300.first().name!!.contains("0001"))
+            assertTrue(sampled300.last().name!!.contains("0300"))
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testDictionaryResume_CorruptedJsonValidation() {
+        // 正常なJSON: 人名あり -> パース成功
+        val validJson = """{"style":"カタカナ","characters":{"ルーク":"ルーク"},"genders":{"ルーク":"男"}}"""
+        val validParsed = NovelDictionaryGenerator.parseDictionaryJson(validJson)
+        assertNotNull(validParsed)
+        assertTrue(validParsed!!.characters.isNotEmpty())
+
+        // 破損JSON: 途中で切れた文字列 -> パース失敗 (null)
+        val brokenJson = """{"style":"カタカナ","characters":{"ルーク":"""
+        val brokenParsed = NovelDictionaryGenerator.parseDictionaryJson(brokenJson)
+        assertNull(brokenParsed)
+
+        // 空またはエラー文字列 -> パース失敗 (null)
+        val htmlError = """<html><body>502 Bad Gateway</body></html>"""
+        val htmlParsed = NovelDictionaryGenerator.parseDictionaryJson(htmlError)
+        assertNull(htmlParsed)
+
+        // 人名0件の空辞書 -> characters.isEmpty()
+        val emptyDictJson = """{"style":"カタカナ","characters":{},"genders":{}}"""
+        val emptyParsed = NovelDictionaryGenerator.parseDictionaryJson(emptyDictJson)
+        assertNotNull(emptyParsed)
+        assertTrue(emptyParsed!!.characters.isEmpty())
     }
 }

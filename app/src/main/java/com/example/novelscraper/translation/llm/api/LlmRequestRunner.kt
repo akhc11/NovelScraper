@@ -19,7 +19,7 @@ import kotlinx.coroutines.sync.withLock
  * 2. 全ワーカー共通の送信間隔ゲート（最低10秒）により、複数ワーカーの同時リクエスト集中
  *    （HTTP 503過負荷）を低減する。Google側の容量不足による503自体は防げないため、
  *    呼び出し側で [LlmRetryPolicy] による指数バックオフ再試行と併用すること。
- *    （辞書生成を含む全経路がこのゲートを共有する）
+ *    （辞書生成は短文出力のためバイパス、本文翻訳全ワーカーがこのゲートを共有する）
  * 3. 待機は Mutex 内で直前送信からの差分のみミリ秒単位でサスペンドし、API推論処理自体はロック外で完全並行実行される。
  * 4. パラメータは nullable のまま透過し、null 時は JSON から省略される
  *    (`encodeDefaults = false` + default null のため)。
@@ -34,7 +34,6 @@ object LlmRequestRunner {
 
     /**
      * 全ワーカー共通の送信ゲート。直前のリクエストから最低指定秒数（既定10秒）経過するまでサスペンド。
-     * 辞書生成など設定を持たない経路向けの共有ゲートでもある。
      */
     suspend fun acquireGate(minIntervalMs: Long = GATE_MIN_MS) {
         throttleMutex.withLock {

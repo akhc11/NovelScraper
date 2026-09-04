@@ -5,7 +5,6 @@ import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.llm.api.GeminiApiClient
 import com.example.novelscraper.translation.llm.api.LlmApiClient
 import com.example.novelscraper.translation.llm.api.LlmApiResult
-import com.example.novelscraper.translation.llm.api.LlmRequestRunner
 import com.example.novelscraper.translation.llm.api.LlmRetryPolicy
 import com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient
 import com.example.novelscraper.translation.llm.engine.DictSampleMode
@@ -266,15 +265,17 @@ object NovelDictionaryGenerator {
         context: Context,
         files: List<DocumentFile>,
         maxBatchBytes: Int,
-        maxTotalScanBytes: Int = 2000000
+        maxTotalScanBytes: Int = 10000000,
+        onLog: (String) -> Unit = {}
     ): List<String> {
         val batches = mutableListOf<String>()
         val currentBatchBuffer = StringBuilder()
         var currentBatchBytes = 0
         var totalAccumulatedScanBytes = 0
 
-        for (file in files) {
+        for ((fileIndex, file) in files.withIndex()) {
             if (totalAccumulatedScanBytes >= maxTotalScanBytes) {
+                onLog("⚠️ 辞書抽出: スキャン合計容量上限(${maxTotalScanBytes / 1000}KB)に到達したため以降をスキップしました (読込:${fileIndex}/${files.size}ファイル)")
                 break
             }
 
@@ -374,7 +375,7 @@ object NovelDictionaryGenerator {
         }
 
         val effectiveMaxBytes = maxBatchBytes.coerceIn(4000, 200000)
-        val smartBatches = buildSmartBatches(context, targetFiles, effectiveMaxBytes, maxTotalScanBytes)
+        val smartBatches = buildSmartBatches(context, targetFiles, effectiveMaxBytes, maxTotalScanBytes, onLog)
         val totalBatches = smartBatches.size
 
         if (smartBatches.isEmpty()) {
@@ -398,12 +399,18 @@ object NovelDictionaryGenerator {
             val existingBatchDoc = dictBuildingDir.findFile(batchFileName)
 
             async {
-                semaphore.withPermit {
+                val batchRawText = semaphore.withPermit {
                     if (existingBatchDoc != null) {
                         val content = readDocContent(context, existingBatchDoc)
                         if (!content.isNullOrBlank()) {
-                            onLog("  📖 辞書生成: バッチ $batchNum/$totalBatches (完了済 / スキップ)")
-                            return@withPermit content
+                            val parsed = parseDictionaryJson(content)
+                            if (parsed != null && parsed.characters.isNotEmpty()) {
+                                onLog("  📖 辞書生成: バッチ $batchNum/$totalBatches (完了済 / スキップ [${parsed.characters.size}名])")
+                                return@withPermit content
+                            } else {
+                                onLog("  ⚠️ 辞書生成: バッチ $batchNum の既存キャッシュが破損/空のため再取得します")
+                                try { existingBatchDoc.delete() } catch (_: Exception) {}
+                            }
                         }
                     }
 
@@ -451,9 +458,6 @@ object NovelDictionaryGenerator {
                                     writeDocContent(context, batchDoc, rawText)
                                 }
                                 onLog("  📖 辞書生成: バッチ $batchNum/$totalBatches 完了")
-                                if (requestDelaySec > 0) {
-                                    delay(requestDelaySec * 1000L)
-                                }
                                 return@withPermit rawText
                             }
                             is LlmApiResult.QuotaExceeded -> {
@@ -488,6 +492,13 @@ object NovelDictionaryGenerator {
                     onLog("  ⚠️ 辞書生成: バッチ $batchNum/$totalBatches 失敗")
                     null
                 }
+
+                // 成功後待機はpermitを解放した外側で実施 (実効並列度の低下を防止)
+                if (batchRawText != null && requestDelaySec > 0) {
+                    delay(requestDelaySec * 1000L)
+                }
+
+                batchRawText
             }
         }
 
@@ -678,8 +689,7 @@ object NovelDictionaryGenerator {
         providerOrder: List<String> = emptyList(),
         providerAllowFallbacks: Boolean? = null
     ): LlmApiResult {
-        // 本文翻訳と共通の送信ゲートを共有し、辞書バースト由来の503を抑える (推論自体の並行は維持)
-        LlmRequestRunner.acquireGate(LlmRequestRunner.GATE_MIN_MS)
+        // 辞書生成は短文出力のため10秒GATEをバイパスし、待機0秒・実効並行送信を可能にする
         return when (provider) {
             LlmProvider.GEMINI -> {
                 GeminiApiClient.generateContent(

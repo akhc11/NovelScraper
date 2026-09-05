@@ -85,6 +85,9 @@ object PromptBuilder {
             {"translations": [{"id": 1, "ja": "(Japanese translation of document 1)"}, {"id": 2, "ja": "(Japanese translation of document 2)"}]}
             - Include all $fileCount document(s) with ids 1..$fileCount. Do NOT skip any id.
             - Do NOT add text before or after the JSON object.
+            - PATTERN EXAMPLE (do NOT copy its content — translate YOUR input):
+            Input: 2 documents ("Hello world." / "Good morning.")
+            Output: {"translations": [{"id": 1, "ja": "こんにちは、世界。"}, {"id": 2, "ja": "おはようございます。"}]}
             """.trimIndent()
         } else {
             """
@@ -101,6 +104,25 @@ object PromptBuilder {
             (Japanese translation of document 1)
             </trans>
             ... continue for all $fileCount document(s).
+            </translations>
+            - PATTERN EXAMPLE (do NOT copy its content — translate YOUR input):
+            Input:
+            <documents>
+            <doc id="1">
+            Hello world.
+            </doc>
+            <doc id="2">
+            Good morning.
+            </doc>
+            </documents>
+            Output:
+            <translations>
+            <trans id="1">
+            こんにちは、世界。
+            </trans>
+            <trans id="2">
+            おはようございます。
+            </trans>
             </translations>
             """.trimIndent()
         }

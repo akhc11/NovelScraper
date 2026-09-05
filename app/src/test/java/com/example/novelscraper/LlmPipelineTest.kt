@@ -277,6 +277,10 @@ class LlmPipelineTest {
         assertTrue(xmlPrompt.contains("<trans id=\"1\">"))
         assertFalse(xmlPrompt.contains("[SRC_END]"))
         assertFalse(xmlPrompt.contains("[SEG:1]"))
+        // few-shot例とコピー禁止指示があること
+        assertTrue(xmlPrompt.contains("PATTERN EXAMPLE"))
+        assertTrue(xmlPrompt.contains("Good morning."))
+        assertTrue(xmlPrompt.contains("do NOT copy its content"))
 
         val jsonPrompt = com.example.novelscraper.translation.llm.prompt.PromptBuilder.buildBatchPrompt(
             promptNumber = 1,
@@ -285,6 +289,7 @@ class LlmPipelineTest {
         )
         assertTrue(jsonPrompt.contains("\"translations\""))
         assertFalse(jsonPrompt.contains("[SRC_END]"))
+        assertTrue(jsonPrompt.contains("PATTERN EXAMPLE"))
     }
 
     @Test

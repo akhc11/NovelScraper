@@ -81,23 +81,43 @@ object BatchTranslator {
     /**
      * `<trans id="N">...</trans>` を寛容に抽出する。
      * クォート有無・全角数字・属性前後空白・大文字小文字に対応。
+     * 全角の山括弧・等号・引用符（CJK系モデルの正規化）も受理する。
      * ID厳密一致のみ採用し、出現順の割当て直しはしない（誤訳混入防止）。
      */
     fun parseXmlResponse(response: String): Map<Int, String> {
+        // 全角→半角は1文字対1文字のため、検出位置は原文と一致する。
+        // 訳文の取り出しは原文から行い、本文の全角文字を改変しない。
+        val normalized = normalizeFullWidthTags(response)
         val result = linkedMapOf<Int, String>()
         val regex = Regex(
             """<trans\s+[^>]*?id\s*=\s*["']?([0-9０-９]+)["']?[^>]*>([\s\S]*?)</\s*trans\s*>""",
             RegexOption.IGNORE_CASE
         )
-        for (match in regex.findAll(response)) {
+        for (match in regex.findAll(normalized)) {
             val segNum = normalizeDigits(match.groupValues[1]).toIntOrNull() ?: continue
             if (segNum <= 0 || result.containsKey(segNum)) continue
-            val content = match.groupValues[2].trim()
+            val bodyRange = match.groups[2]?.range ?: continue
+            val content = response.substring(bodyRange.first, bodyRange.last + 1).trim()
             if (content.isNotBlank()) {
                 result[segNum] = content
             }
         }
         return result
+    }
+
+    /**
+     * タグ検出用に全角の山括弧・等号・引用符だけを半角化する（すべて1対1変換）。
+     * 該当文字がなければ同一インスタンスを返す。
+     * 和文で使う〈〉〔〕「」等には触れない。
+     */
+    fun normalizeFullWidthTags(text: String): String {
+        if (text.none { it == '＜' || it == '＞' || it == '＝' || it == '＂' || it == '＇' }) return text
+        return text
+            .replace('＜', '<')
+            .replace('＞', '>')
+            .replace('＝', '=')
+            .replace('＂', '"')
+            .replace('＇', '\'')
     }
 
     /**

@@ -95,14 +95,16 @@ class LlmTranslationEngine(
                         }.sortedBy { it.name }
 
                         if (rawFiles.isNotEmpty()) {
-                            // 親フォルダ直下で言語判定を先行実施（全分割サブフォルダで1つの判定結果を共有しキャッシュを1つに集約）
-                            val parentSourceLang = detectOrLoadLanguage(docFolder, rawFiles)
+                            // ファイルごとに言語判定する（混在フォルダ対応。API不要の文字数え上げのみ）。
+                            // 親での共有判定はしない（先頭ファイルの言語を他作品に押し付けない）。
                             val splitRootDir = docFolder.findFile("分割済み") ?: docFolder.createDirectory("分割済み")
                             if (splitRootDir != null) {
                                 for ((rawIndex, rawFile) in rawFiles.withIndex()) {
                                     if (isStopRequested || !isActive) break
                                     val novelName = rawFile.name?.replace(Regex("""\.[tT][xX][tT]$"""), "") ?: "小説"
                                     addLog("✂️ [小説 ${rawIndex + 1}/${rawFiles.size}] 翻訳直前分割中: ${rawFile.name}")
+                                    val rawLang = detectLanguageOfFile(rawFile)
+                                    addLog("🔤 言語検出: ${rawLang.displayName} (${rawFile.name})")
                                     val splitSubFolder = NovelPhysicalSplitter.splitSingleTextFile(
                                         context = context,
                                         fileDoc = rawFile,
@@ -112,7 +114,7 @@ class LlmTranslationEngine(
                                     )
                                     if (splitSubFolder != null && !isStopRequested && isActive) {
                                         addLog("📂 [小説 ${rawIndex + 1}/${rawFiles.size}] 分割済みサブフォルダ翻訳開始: ${splitSubFolder.name}")
-                                        processFolder(splitSubFolder, keyPoolManager, parentSourceLang)
+                                        processFolder(splitSubFolder, keyPoolManager, rawLang)
                                     }
                                 }
                                 continue // 生テキストの処理が完了したため、親フォルダ直下の直接翻訳はスキップ
@@ -186,6 +188,15 @@ class LlmTranslationEngine(
         }
         addLog("🔤 言語キャッシュ作成: ${lang.displayName}")
         return true
+    }
+
+    /**
+     * 単一ファイルの内容から言語を判定する（キャッシュを作らない純粋判定。API不要）。
+     * 物理分割前の raw ファイル毎に呼び、混在フォルダでも作品別の言語を使う。
+     */
+    private fun detectLanguageOfFile(fileDoc: DocumentFile): SourceLanguage {
+        val content = readFileContent(fileDoc) ?: ""
+        return LanguageDetector.detect(content).language
     }
 
     private fun detectOrLoadLanguage(

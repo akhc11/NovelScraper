@@ -811,9 +811,12 @@ class LlmTranslationEngine(
 
                     when (apiResult) {
                         is LlmApiResult.Success -> {
+                            // サニタイズ順序（```剥離→前口上→後口上→マーカー検証）に従い、
+                            // 完走判定・分離は整形後のテキストで行う
+                            val sanitizedResponse = TranslationQualityValidator.stripPreamble(apiResult.text)
                             if (useJson) {
                                 jsonAttempted = true
-                                val jsonParsed = BatchTranslator.parseJsonResponse(apiResult.text)
+                                val jsonParsed = BatchTranslator.parseJsonResponse(sanitizedResponse)
                                 if (!jsonParsed.isNullOrEmpty()) {
                                     addLog("[W#$workerId] ✅ バッチ: JSON Schema応答を取得 (${jsonParsed.size}/${batchItems.size}件)")
                                     parsedSegments = jsonParsed
@@ -823,13 +826,13 @@ class LlmTranslationEngine(
                                 continue
                             }
 
-                            if (!CompletionMarkerHelper.checkBatchCompletion(apiResult.text)) {
+                            if (!CompletionMarkerHelper.checkBatchCompletion(sanitizedResponse)) {
                                 batchSawOtherFailure = true
                                 addLog("[W#$workerId] ⚠️ バッチ: 完走タグなし (生成途絶疑い) → 次のプロンプトへ")
                                 break
                             }
 
-                            val parsed = BatchTranslator.parseBatchResponse(apiResult.text)
+                            val parsed = BatchTranslator.parseBatchResponse(sanitizedResponse)
                             if (parsed.isNullOrEmpty()) {
                                 batchSawOtherFailure = true
                                 addLog("[W#$workerId] ⚠️ バッチ: セグメント分離失敗 (形式不一致/欠落) → 次のプロンプトへ")

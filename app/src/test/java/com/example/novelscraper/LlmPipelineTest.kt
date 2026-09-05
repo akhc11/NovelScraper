@@ -288,6 +288,36 @@ class LlmPipelineTest {
     }
 
     @Test
+    fun testPromptBuilder_BatchFormatRepeatedAtEnd() {
+        // 辞書付きでも出力形式ブロックが末尾に再掲されること（埋もれ防止）
+        val prompt = com.example.novelscraper.translation.llm.prompt.PromptBuilder.buildBatchPrompt(
+            promptNumber = 1,
+            fileCount = 2,
+            sourceText = "劉備が関羽と話した。",
+            dictionaryStyle = "カタカナ",
+            dictionaryMap = mapOf("劉備" to "リュウビ", "関羽" to "カンウ")
+        )
+        assertTrue(prompt.contains("[人名の表記統一ルール]"))
+        val firstFormat = prompt.indexOf("BATCH OUTPUT FORMAT")
+        val lastFormat = prompt.lastIndexOf("BATCH OUTPUT FORMAT")
+        val dictPos = prompt.indexOf("[人名の表記統一ルール]")
+        assertTrue(firstFormat >= 0)
+        assertTrue(lastFormat > firstFormat)
+        assertTrue(lastFormat > dictPos)
+    }
+
+    @Test
+    fun testBatchSanitizedBeforeCompletion() {
+        // 前口上＋後口上付きでも整形後は完走判定が通ること（エンジンと同順序）
+        val raw = "Here is the translation:\n<translations>\n<trans id=\"1\">\n訳文です。\n</trans>\n</translations>\n以上です。"
+        val sanitized = TranslationQualityValidator.stripPreamble(raw)
+        assertTrue(CompletionMarkerHelper.checkBatchCompletion(sanitized))
+        val parsed = BatchTranslator.parseBatchResponse(sanitized)
+        assertNotNull(parsed)
+        assertEquals("訳文です。", parsed!![1])
+    }
+
+    @Test
     fun testNovelTextSplitter() {
         val sb = StringBuilder()
         for (i in 1..200) {

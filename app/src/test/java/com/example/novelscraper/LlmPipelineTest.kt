@@ -23,6 +23,22 @@ class LlmPipelineTest {
     }
 
     @Test
+    fun testLanguageDetector_KoreanWithHanja() {
+        // 漢字混じり韓国語は中国語誤判定されていた回帰テスト (漢字12字・かな0字)
+        val koText = "옛날 옛적 깊은 山속에 魔王이 살았다. 少年 勇者는 劍을 들고 冒險을 떠났다. 王國의 平和를 되찾기 위해서였다."
+        val result = LanguageDetector.detect(koText)
+        assertEquals(SourceLanguage.KO, result.language)
+    }
+
+    @Test
+    fun testLanguageDetector_ChineseWithKoreanQuote() {
+        // ハングル引用を含む中国語は中国語のまま (逆方向の誤爆防止)
+        val zhText = "这是一个关于冒险的故事，主角去了韩国旅行。他说안녕하세요，朋友们都很开心。"
+        val result = LanguageDetector.detect(zhText)
+        assertEquals(SourceLanguage.ZH, result.language)
+    }
+
+    @Test
     fun testLanguageDetector_Japanese() {
         val jaText = "これは冒険の物語です。主人公は平凡な少年でしたが、ある日突然不思議な力に覚醒しました。そして仲間たちと共に世界を救う旅に出る決意をしたのでした。"
         val result = LanguageDetector.detect(jaText)
@@ -91,6 +107,31 @@ class LlmPipelineTest {
         val failRes = TranslationQualityValidator.validate(englishSrc, bloatedJapanese, SourceLanguage.EN, minR, maxR)
         assertTrue(failRes is QualityValidationResult.Failure)
         assertTrue((failRes as QualityValidationResult.Failure).reason.contains("サイズ比超過"))
+    }
+
+    @Test
+    fun testTranslationQualityValidator_KoreanMinRatio90() {
+        // 韓→日は約1.1倍膨張が前提のため、下限90%帯の正規訳は通し、80%帯の省略は落とす
+        val srcUnit = "동해 물과 백두산이 마르고 닳도록 하느님이 보우하사 우리나라 만세.\n"
+        val jaUnit = "東海の水と白頭山がすり減るまで神のご加護があり我が国は永遠に栄える。\n"
+        val src = srcUnit.repeat(200)
+        val srcBytes = src.toByteArray(Charsets.UTF_8).size
+        val jaUnitBytes = jaUnit.toByteArray(Charsets.UTF_8).size
+        assertTrue(srcBytes >= 150)
+
+        // 95%帯に着地する繰り返し回数を選ぶ (バンド幅5%に対し刻み約0.5%のため必ず存在)
+        val okRepeats = (1..300).first { n -> jaUnitBytes * n * 100 / srcBytes in 93..98 }
+        val okJa = jaUnit.repeat(okRepeats)
+        val okRatio = okJa.toByteArray(Charsets.UTF_8).size * 100 / srcBytes
+        assertTrue("ratio=$okRatio", okRatio in 90..101)
+        assertTrue(TranslationQualityValidator.validate(src, okJa, SourceLanguage.KO) is QualityValidationResult.Success)
+
+        // 80%帯は省略疑いで落とす
+        val ngRepeats = (1..300).first { n -> jaUnitBytes * n * 100 / srcBytes in 75..85 }
+        val ngJa = jaUnit.repeat(ngRepeats)
+        val ngRes = TranslationQualityValidator.validate(src, ngJa, SourceLanguage.KO)
+        assertTrue(ngRes is QualityValidationResult.Failure)
+        assertTrue((ngRes as QualityValidationResult.Failure).reason.contains("サイズ比不足"))
     }
 
     @Test

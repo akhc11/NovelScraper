@@ -14,7 +14,7 @@ object TranslationQualityValidator {
      */
     const val ZH_MIN_RATIO = 102
     const val ZH_MAX_RATIO = 200
-    const val KO_MIN_RATIO = 102
+    const val KO_MIN_RATIO = 90
     const val KO_MAX_RATIO = 150
     const val EN_MIN_RATIO = 105
     const val EN_MAX_RATIO = 220

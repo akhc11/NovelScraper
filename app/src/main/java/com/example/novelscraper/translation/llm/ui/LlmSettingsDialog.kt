@@ -963,7 +963,7 @@ fun LlmSettingsDialog(
                                 autoPromptOrderEnglish = autoPromptOrderEnglishText.split(",").mapNotNull { it.trim().toIntOrNull() }.ifEmpty { listOf(2, 7) },
                                 sizeRatioZhMin = sizeRatioZhMinText.toIntOrNull()?.coerceIn(50, 300) ?: 102,
                                 sizeRatioZhMax = sizeRatioZhMaxText.toIntOrNull()?.coerceIn(100, 500) ?: 200,
-                                sizeRatioKoMin = sizeRatioKoMinText.toIntOrNull()?.coerceIn(50, 300) ?: 102,
+                                sizeRatioKoMin = sizeRatioKoMinText.toIntOrNull()?.coerceIn(50, 300) ?: 90,
                                 sizeRatioKoMax = sizeRatioKoMaxText.toIntOrNull()?.coerceIn(100, 500) ?: 150,
                                 sizeRatioEnMin = sizeRatioEnMinText.toIntOrNull()?.coerceIn(50, 300) ?: 105,
                                 sizeRatioEnMax = sizeRatioEnMaxText.toIntOrNull()?.coerceIn(100, 500) ?: 220,

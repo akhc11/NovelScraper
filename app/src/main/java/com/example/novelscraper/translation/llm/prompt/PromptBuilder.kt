@@ -132,6 +132,10 @@ $outputFormat
             }
         }
 
+        // 末尾再掲：辞書の後に形式指示が埋もれないよう、出力形式を繰り返す（同文のため指示衝突なし）
+        sb.append("\n\nREMINDER — OUTPUT FORMAT (repeated so it is the last instruction you read):\n")
+        sb.append(outputFormat)
+
         return sb.toString()
     }
 

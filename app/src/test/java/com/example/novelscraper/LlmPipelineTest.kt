@@ -318,6 +318,36 @@ class LlmPipelineTest {
     }
 
     @Test
+    fun testBatchXml_FullWidthTags() {
+        // CJK系モデルの全角正規化（＜＞＝＂）を受理すること
+        val response = """
+            ＜translations＞
+            ＜trans id＝＂1＂＞
+            第1話の訳文です。
+            ＜/trans＞
+            ＜trans id＝＂2＂＞
+            第2話の訳文です。
+            ＜/trans＞
+            ＜/translations＞
+        """.trimIndent()
+        val parsed = BatchTranslator.parseBatchResponse(response)
+        assertNotNull(parsed)
+        assertEquals(2, parsed!!.size)
+        assertEquals("第1話の訳文です。", parsed[1])
+        assertEquals("第2話の訳文です。", parsed[2])
+    }
+
+    @Test
+    fun testBatchXml_ContentNotAltered() {
+        // タグ検出のための正規化で、訳文本文の全角文字は改変しないこと
+        val response = "<trans id=\"1\">〈注〉ＡＢＣ １２３</trans>"
+        val parsed = BatchTranslator.parseXmlResponse(response)
+        assertEquals("〈注〉ＡＢＣ １２３", parsed[1])
+        // 正規化ヘルパー自体は対象外文字を温存する
+        assertEquals("〈注〉「あ」", BatchTranslator.normalizeFullWidthTags("〈注〉「あ」"))
+    }
+
+    @Test
     fun testNovelTextSplitter() {
         val sb = StringBuilder()
         for (i in 1..200) {

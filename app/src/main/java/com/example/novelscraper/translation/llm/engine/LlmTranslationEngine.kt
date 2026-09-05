@@ -835,7 +835,13 @@ class LlmTranslationEngine(
                             val parsed = BatchTranslator.parseBatchResponse(sanitizedResponse)
                             if (parsed.isNullOrEmpty()) {
                                 batchSawOtherFailure = true
-                                addLog("[W#$workerId] ⚠️ バッチ: セグメント分離失敗 (形式不一致/欠落) → 次のプロンプトへ")
+                                // 原因特定用：タグ出現数と先頭断片を残す（次回調査の証拠）
+                                val head = sanitizedResponse.take(300).replace(Regex("\\s+"), " ")
+                                val transHits = Regex("trans", RegexOption.IGNORE_CASE)
+                                    .findAll(sanitizedResponse).count()
+                                val segHits = Regex("SEG", RegexOption.IGNORE_CASE)
+                                    .findAll(sanitizedResponse).count()
+                                addLog("[W#$workerId] ⚠️ バッチ: セグメント分離失敗 (trans:${transHits}件 SEG:${segHits}件) → 次のプロンプトへ / 先頭: $head")
                                 break
                             }
 

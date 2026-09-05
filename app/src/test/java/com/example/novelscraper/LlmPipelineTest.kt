@@ -124,9 +124,9 @@ class LlmPipelineTest {
             </translations>
         """.trimIndent()
 
-        assertTrue(CompletionMarkerHelper.checkBatchCompletion(mockResponse, true))
+        assertTrue(CompletionMarkerHelper.checkBatchCompletion(mockResponse))
 
-        val parsed = BatchTranslator.parseBatchResponse(mockResponse, 2)
+        val parsed = BatchTranslator.parseBatchResponse(mockResponse)
         assertNotNull(parsed)
         assertEquals(2, parsed!!.size)
         assertEquals("これは第1話の日本語訳です。", parsed[1])
@@ -149,7 +149,7 @@ class LlmPipelineTest {
             </TRANSLATIONS>
         """.trimIndent()
 
-        val parsed = BatchTranslator.parseBatchResponse(response, 3)
+        val parsed = BatchTranslator.parseBatchResponse(response)
         assertNotNull(parsed)
         assertEquals(3, parsed!!.size)
         assertEquals("全角数字IDの訳文です。", parsed[1])
@@ -171,7 +171,7 @@ class LlmPipelineTest {
             </translations>
         """.trimIndent()
 
-        val parsed = BatchTranslator.parseBatchResponse(response, 3)
+        val parsed = BatchTranslator.parseBatchResponse(response)
         assertNotNull(parsed)
         assertEquals(2, parsed!!.size)
         assertEquals("第1話の訳文です。", parsed[1])
@@ -192,17 +192,17 @@ class LlmPipelineTest {
             第2話の訳文の途中ま
         """.trimIndent()
 
-        assertTrue(CompletionMarkerHelper.checkBatchCompletion(response, true))
+        assertTrue(CompletionMarkerHelper.checkBatchCompletion(response))
 
-        val parsed = BatchTranslator.parseBatchResponse(response, 2)
+        val parsed = BatchTranslator.parseBatchResponse(response)
         assertNotNull(parsed)
         assertEquals(1, parsed!!.size)
         assertEquals("第1話の訳文です。", parsed[1])
 
         // 閉じタグが一つもない途絶は完走失敗 → 次のプロンプトへ回す
         val earlyCutoff = "<translations>\n<trans id=\"1\">\n第1話の訳文の途中ま"
-        assertFalse(CompletionMarkerHelper.checkBatchCompletion(earlyCutoff, true))
-        assertNull(BatchTranslator.parseBatchResponse(earlyCutoff, 2))
+        assertFalse(CompletionMarkerHelper.checkBatchCompletion(earlyCutoff))
+        assertNull(BatchTranslator.parseBatchResponse(earlyCutoff))
     }
 
     @Test
@@ -228,7 +228,7 @@ class LlmPipelineTest {
             {"translations": [{"id": 1, "ja": "第1話の訳文です。"}, {"id": 2, "ja": "第2話の訳文です。"}]}
         """.trimIndent()
 
-        val parsed = BatchTranslator.parseBatchResponse(jsonResponse, 2)
+        val parsed = BatchTranslator.parseBatchResponse(jsonResponse)
         assertNotNull(parsed)
         assertEquals(2, parsed!!.size)
         assertEquals("第1話の訳文です。", parsed[1])
@@ -257,12 +257,10 @@ class LlmPipelineTest {
     @Test
     fun testCompletionMarkerHelper_BatchVsLargeFile() {
         // バッチ完走判定は閉じタグで行い、大ファイルの [SRC_END] と干渉しないこと
-        assertTrue(CompletionMarkerHelper.checkBatchCompletion("<translations><trans id=\"1\">訳</trans></translations>", true))
-        assertTrue(CompletionMarkerHelper.checkBatchCompletion("```\n<translations>\n<trans id=\"1\">\n訳\n</trans>\n</translations>\n```", true))
-        assertFalse(CompletionMarkerHelper.checkBatchCompletion("<translations><trans id=\"1\">訳", true))
-        assertFalse(CompletionMarkerHelper.checkBatchCompletion("", true))
-        // 無効化時は常に true
-        assertTrue(CompletionMarkerHelper.checkBatchCompletion("anything", false))
+        assertTrue(CompletionMarkerHelper.checkBatchCompletion("<translations><trans id=\"1\">訳</trans></translations>"))
+        assertTrue(CompletionMarkerHelper.checkBatchCompletion("```\n<translations>\n<trans id=\"1\">\n訳\n</trans>\n</translations>\n```"))
+        assertFalse(CompletionMarkerHelper.checkBatchCompletion("<translations><trans id=\"1\">訳"))
+        assertFalse(CompletionMarkerHelper.checkBatchCompletion(""))
 
         // 大ファイル用 [SRC_END] 検証は従来通り
         assertNotNull(CompletionMarkerHelper.checkAndStripMarker("訳文。\n[SRC_END]", true))
@@ -618,7 +616,7 @@ class LlmPipelineTest {
             これはセグメント3の訳文です。
         """.trimIndent()
 
-        val parsed = BatchTranslator.parseBatchResponse(response, 3)
+        val parsed = BatchTranslator.parseBatchResponse(response)
         assertNotNull(parsed)
         assertEquals("これはセグメント1の訳文です。", parsed!![1])
         assertEquals("これはセグメント2の訳文です。", parsed[2])

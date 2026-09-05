@@ -50,9 +50,7 @@ object CompletionMarkerHelper {
     /**
      * バッチ翻訳出力が正常に完走したか（最外周閉じタグまたは最終セグメント閉じタグが存在するか）を判定する。
      */
-    fun checkBatchCompletion(content: String, enabled: Boolean): Boolean {
-        if (!enabled) return true
-
+    fun checkBatchCompletion(content: String): Boolean {
         var text = content.trim()
         if (text.endsWith("```")) {
             text = text.removeSuffix("```").trim()

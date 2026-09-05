@@ -127,42 +127,6 @@ object NovelPhysicalSplitter {
     }
 
     /**
-     * 指定フォルダ直下の生テキストファイルを指定文字数ごとに物理分割し、
-     * 「分割済み/<小説名>/part_XXXX.txt」に出力する。
-     *
-     * @return 分割が実行された（または既存の）小説サブフォルダ (DocumentFile) のリスト
-     */
-    suspend fun splitRawTextFilesInFolder(
-        context: Context,
-        inputFolderDoc: DocumentFile,
-        splitSizeChars: Int = DEFAULT_SPLIT_SIZE_CHARS,
-        onLog: (String) -> Unit = {}
-    ): List<DocumentFile> = withContext(Dispatchers.IO) {
-        val rootFiles = inputFolderDoc.listFiles().filter {
-            it.isFile && it.name?.endsWith(".txt", ignoreCase = true) == true &&
-                    it.name?.startsWith("part_", ignoreCase = true) != true
-        }
-
-        if (rootFiles.isEmpty()) return@withContext emptyList()
-
-        val splitRootDir = inputFolderDoc.findFile("分割済み") ?: inputFolderDoc.createDirectory("分割済み")
-        if (splitRootDir == null) {
-            onLog("❌ 物理分割: 出力先「分割済み」フォルダの作成に失敗しました")
-            return@withContext emptyList()
-        }
-
-        val resultFolders = mutableListOf<DocumentFile>()
-        for (fileDoc in rootFiles) {
-            coroutineContext.ensureActive()
-            val novelDir = splitSingleTextFile(context, fileDoc, splitRootDir, splitSizeChars, onLog)
-            if (novelDir != null) {
-                resultFolders.add(novelDir)
-            }
-        }
-        resultFolders
-    }
-
-    /**
      * 行シーケンスを指定文字数ごとに分割し、各チャンクをコールバックに渡すコアストリーミングロジック。
      */
     fun splitLines(

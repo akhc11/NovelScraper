@@ -10,10 +10,10 @@ import com.example.novelscraper.translation.llm.api.handlerFor
 import com.example.novelscraper.translation.llm.api.LlmRequestRunner
 import com.example.novelscraper.translation.llm.api.LlmRetryPolicy
 import com.example.novelscraper.translation.common.NovelPhysicalSplitter
+import com.example.novelscraper.translation.common.SafDocIO
 import com.example.novelscraper.translation.llm.pipeline.*
 import com.example.novelscraper.translation.llm.prompt.PromptBuilder
 import com.example.novelscraper.translation.llm.rotation.ApiKeyPoolManager
-import com.example.novelscraper.translation.llm.rotation.KeyClaimResult
 import com.example.novelscraper.translation.llm.rotation.LlmRotationManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,7 +30,6 @@ data class LlmEngineState(
     val currentFileName: String = "",
     val progress: Pair<Int, Int> = 0 to 0,
     val chunkProgress: Pair<Int, Int> = 0 to 0,
-    val totalTokensUsed: Int = 0,
     val logs: List<String> = emptyList()
 )
 
@@ -824,13 +823,13 @@ class LlmTranslationEngine(
                                 continue
                             }
 
-                            if (!CompletionMarkerHelper.checkBatchCompletion(apiResult.text, true)) {
+                            if (!CompletionMarkerHelper.checkBatchCompletion(apiResult.text)) {
                                 batchSawOtherFailure = true
                                 addLog("[W#$workerId] ⚠️ バッチ: 完走タグなし (生成途絶疑い) → 次のプロンプトへ")
                                 break
                             }
 
-                            val parsed = BatchTranslator.parseBatchResponse(apiResult.text, batchItems.size)
+                            val parsed = BatchTranslator.parseBatchResponse(apiResult.text)
                             if (parsed.isNullOrEmpty()) {
                                 batchSawOtherFailure = true
                                 addLog("[W#$workerId] ⚠️ バッチ: セグメント分離失敗 (形式不一致/欠落) → 次のプロンプトへ")
@@ -1255,25 +1254,12 @@ class LlmTranslationEngine(
     }
 
     private fun readFileContent(doc: DocumentFile, fileName: String = ""): String? {
-        return try {
-            context.contentResolver.openInputStream(doc.uri)?.use { stream ->
-                TextCharsetDetector.readTextAutoDetect(stream)
-            }
-        } catch (e: Exception) {
+        return SafDocIO.readDocContent(context, doc) { e ->
             addLog("⚠️ ${fileName.ifBlank { doc.name ?: "不明" }} 読み取り例外: ${e.message}")
-            null
         }
     }
 
     private fun saveFileContent(doc: DocumentFile, content: String): Boolean {
-        return try {
-            val stream = context.contentResolver.openOutputStream(doc.uri, "wt") ?: return false
-            stream.use { s ->
-                s.write(content.toByteArray(Charsets.UTF_8))
-            }
-            true
-        } catch (e: Exception) {
-            false
-        }
+        return SafDocIO.writeDocContent(context, doc, content)
     }
 }

@@ -34,8 +34,6 @@ class LlmRotationManager(
         return if (profiles.isNotEmpty()) profiles[currentProfileIndex.coerceIn(0, profiles.size - 1)] else ModelProfile(modelName = "gemini-3.5-flash")
     }
 
-    fun getCurrentModel(): String = getCurrentProfile().modelName
-
     /**
      * 429 Quota制限検知時に即座に次のモデル/新キーへ切り替える。
      * @param errorMessage 429 エラーメッセージ (RPD/RPM 判別用)

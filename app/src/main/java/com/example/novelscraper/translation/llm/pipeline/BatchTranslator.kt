@@ -12,13 +12,9 @@ import kotlinx.serialization.json.jsonPrimitive
 
 object BatchTranslator {
 
-    /** バッチ入力の外周・文書タグ */
+    /** バッチ入出力の文書タグ */
     const val INPUT_ROOT = "documents"
     const val INPUT_TAG = "doc"
-
-    /** バッチ出力の外周・訳文タグ */
-    const val OUTPUT_ROOT = "translations"
-    const val OUTPUT_TAG = "trans"
 
     private val batchJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -61,13 +57,8 @@ object BatchTranslator {
      * 優先順位: JSON (`{"translations":[...]}`) → XML (`<trans id="N">`) → 旧形式 (`[SEG:N]`)。
      * 部分回収のため、抽出できた分だけを返す（欠番は含めない）。
      * 何も抽出できなかった場合のみ null を返す。
-     *
-     * @param expectedCount 期待件数（互換用の参照値。厳密一致は要求しない）
      */
-    fun parseBatchResponse(
-        response: String,
-        expectedCount: Int
-    ): Map<Int, String>? {
+    fun parseBatchResponse(response: String): Map<Int, String>? {
         // 1. JSONハイブリッド (Phase 2 / JSON Schema応答)
         val fenced = stripOuterFences(response).trim()
         if (fenced.startsWith("{")) {

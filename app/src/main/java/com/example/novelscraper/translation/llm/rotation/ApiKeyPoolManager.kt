@@ -30,9 +30,6 @@ class ApiKeyPoolManager(
     val totalKeyCount: Int
         get() = apiKeys.size
 
-    val availableKeyCount: Int
-        get() = apiKeys.size - claimedIndices.size - dailyExhaustedIndices.size
-
     /**
      * 429 エラーメッセージから RPD (日次上限) か RPM (分次一時制限) かを判別し登録する。
      * @return true: RPD (日次枯渇), false: RPM (一時制限)

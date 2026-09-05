@@ -2,6 +2,9 @@ package com.example.novelscraper.translation.llm.pipeline
 
 import android.content.Context
 import androidx.documentfile.provider.DocumentFile
+import com.example.novelscraper.translation.common.SafDocIO.deleteDirectoryRecursively
+import com.example.novelscraper.translation.common.SafDocIO.readDocContent
+import com.example.novelscraper.translation.common.SafDocIO.writeDocContent
 import com.example.novelscraper.translation.llm.api.GeminiApiClient
 import com.example.novelscraper.translation.llm.api.LlmApiClient
 import com.example.novelscraper.translation.llm.api.LlmApiResult
@@ -279,13 +282,7 @@ object NovelDictionaryGenerator {
                 break
             }
 
-            val raw = try {
-                context.contentResolver.openInputStream(file.uri)?.use { stream ->
-                    TextCharsetDetector.readTextAutoDetect(stream)
-                }
-            } catch (e: Exception) {
-                null
-            } ?: continue
+            val raw = readDocContent(context, file) ?: continue
 
             val content = TextCleanser.cleanse(raw).trim()
             if (content.isBlank()) continue
@@ -653,41 +650,6 @@ object NovelDictionaryGenerator {
             writeDocContent(context, savedFile, LlmApiClient.json.encodeToString(NovelDictionary.serializer(), dict))
             deleteDirectoryRecursively(dictBuildingDir)
             onLog("✅ 辞書確定 (最終精査完了): ${dict.characters.size}名 (世界観スタイル:【${dict.style}】)")
-        }
-    }
-
-    private fun deleteDirectoryRecursively(dir: DocumentFile) {
-        try {
-            dir.listFiles().forEach { child ->
-                if (child.isDirectory) {
-                    deleteDirectoryRecursively(child)
-                } else {
-                    child.delete()
-                }
-            }
-            dir.delete()
-        } catch (_: Exception) {}
-    }
-
-    private fun readDocContent(context: Context, doc: DocumentFile): String? {
-        return try {
-            context.contentResolver.openInputStream(doc.uri)?.use { stream ->
-                TextCharsetDetector.readTextAutoDetect(stream)
-            }
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun writeDocContent(context: Context, doc: DocumentFile, content: String): Boolean {
-        return try {
-            val stream = context.contentResolver.openOutputStream(doc.uri, "wt") ?: return false
-            stream.use { s ->
-                s.write(content.toByteArray(Charsets.UTF_8))
-            }
-            true
-        } catch (e: Exception) {
-            false
         }
     }
 

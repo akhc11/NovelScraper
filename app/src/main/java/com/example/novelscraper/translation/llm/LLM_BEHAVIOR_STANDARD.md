@@ -11,10 +11,10 @@
 4. 辞書ON時のみ人名辞書生成 (`pipeline/NovelDictionaryGenerator`)。失敗時はフォルダ全体スキップ
 5. 並列ワーカー起動 (`engine/LlmTranslationEngine`)。1ワーカーがGeminiキー1本を専有
 6. ファイルごとに3経路へ分岐：
-   - 小 → 後続と束ねてバッチ翻訳 (`pipeline/BatchTranslator`、`[SEG:N]`形式)。失敗時は単体にフォールバック
+   - 小 → 後続と束ねてバッチ翻訳 (`pipeline/BatchTranslator`、`<doc>/<trans>`タグ形式。JSON Schema時はJSON)。失敗分のみ単体にフォールバック
    - 大 → チャンク分割して順次翻訳 (`pipeline/LargeFileTranslator`、`.parts_*`作業所)。直前訳文末尾のみ文脈注入
    - 単体 → 1件ずつ翻訳
-7. 全経路で品質検証 (`pipeline/TranslationQualityValidator`＋`CompletionMarkerHelper [SRC_END]`)。NGは次プロンプト/次モデルへ
+7. 全経路で品質検証 (`pipeline/TranslationQualityValidator`＋`CompletionMarkerHelper`：単体・大ファイルは`[SRC_END]`、バッチは閉じタグ)。NGは次プロンプト/次モデルへ
 8. 成功分のみ`翻訳完了_LLM/<元名>`に保存
 
 ## 成功・失敗・中断時の扱い

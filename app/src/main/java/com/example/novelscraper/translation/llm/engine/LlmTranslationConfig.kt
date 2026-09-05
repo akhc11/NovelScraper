@@ -46,7 +46,6 @@ data class ModelProfile(
 
 @Serializable
 data class LlmTranslationConfig(
-    val provider: LlmProvider = LlmProvider.GEMINI,
     val geminiApiKeys: List<String> = listOf(
         "***REMOVED***",
         "***REMOVED***",
@@ -111,13 +110,6 @@ data class LlmTranslationConfig(
         PromptOrderPreset(label = "4, 7 (成人)", order = listOf(4, 7)),
         PromptOrderPreset(label = "1, 6, 7 (意訳)", order = listOf(1, 6, 7))
     ),
-
-    // レガシー互換用の旧プロパティ（ModelProfileに移行済み）
-    val geminiModels: List<String> = emptyList(),
-    val openRouterModel: String = "google/gemma-4-31b-it:free",
-    val groqModel: String = "llama-3.3-70b-versatile",
-    val selectedPromptNumber: Int = 1,
-    val fallbackPromptNumbers: List<Int> = listOf(1, 1),
 
     val customPrompts: Map<Int, String> = emptyMap(),
     val outputSubDir: String = "翻訳完了_LLM",

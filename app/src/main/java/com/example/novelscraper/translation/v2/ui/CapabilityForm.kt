@@ -65,9 +65,11 @@ fun NullableDoubleEditor(
             Box(
                 modifier = Modifier
                     .weight(1f)
+                    .height(36.dp)
                     .background(AppColors.backgroundDark, RoundedCornerShape(4.dp))
                     .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                    .padding(horizontal = 8.dp),
+                contentAlignment = Alignment.CenterStart
             ) {
                 BasicTextField(
                     value = display,

@@ -54,11 +54,16 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -252,16 +257,12 @@ fun V2SettingsDialog(
 
     val draft = buildDraftSettings()
     val issues = validateV2Settings(draft)
-    val blocking = issues.filter { it.blocksSave }
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
+    Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.95f)
-                .fillMaxHeight(0.94f),
+                .fillMaxWidth()
+                .fillMaxHeight(0.92f),
             shape = RoundedCornerShape(8.dp),
             color = AppColors.surfaceDark,
             tonalElevation = 6.dp
@@ -315,8 +316,7 @@ fun V2SettingsDialog(
                 Column(
                     modifier = Modifier
                         .weight(1f)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .verticalScroll(rememberScrollState())
                 ) {
                     when (selectedTab) {
                         V2SettingsTab.MODELS -> {
@@ -334,6 +334,8 @@ fun V2SettingsDialog(
                                     lineHeight = 14.sp
                                 )
                             }
+
+                            Spacer(modifier = Modifier.height(8.dp))
 
                             // プロンプト順序設定カード
                             Card(
@@ -379,15 +381,18 @@ fun V2SettingsDialog(
                                         ) {
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text("韓国語 (KO):", color = AppColors.textSecondary, fontSize = 9.sp)
-                                                V2InputArea(value = autoOrderKoText, onValueChange = { autoOrderKoText = it })
+                                                Spacer(modifier = Modifier.height(2.dp))
+                                                V2InputArea(value = autoOrderKoText, onValueChange = { autoOrderKoText = it }, singleLine = true)
                                             }
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text("中国語 (ZH):", color = AppColors.textSecondary, fontSize = 9.sp)
-                                                V2InputArea(value = autoOrderZhText, onValueChange = { autoOrderZhText = it })
+                                                Spacer(modifier = Modifier.height(2.dp))
+                                                V2InputArea(value = autoOrderZhText, onValueChange = { autoOrderZhText = it }, singleLine = true)
                                             }
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text("英語 (EN):", color = AppColors.textSecondary, fontSize = 9.sp)
-                                                V2InputArea(value = autoOrderEnText, onValueChange = { autoOrderEnText = it })
+                                                Spacer(modifier = Modifier.height(2.dp))
+                                                V2InputArea(value = autoOrderEnText, onValueChange = { autoOrderEnText = it }, singleLine = true)
                                             }
                                         }
                                     } else {
@@ -533,6 +538,8 @@ fun V2SettingsDialog(
                                 }
                             }
 
+                            Spacer(modifier = Modifier.height(6.dp))
+
                             // モデルカード一覧（アコーディオン）
                             val parsedBatchOrder = parsePromptList(batchPromptOrderText, listOf(1, 1))
                             val effectiveCommonOrder = if (autoPromptEnabled) {
@@ -593,6 +600,7 @@ fun V2SettingsDialog(
                                         }
                                     })
                                 )
+                                Spacer(modifier = Modifier.height(6.dp))
                             }
                         }
 
@@ -601,18 +609,27 @@ fun V2SettingsDialog(
                             // 1. 🔑 各社 APIキー設定
                             // ==========================================
                             Text("🔑 各社 APIキー設定", color = AppColors.accentTealLight, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            Spacer(modifier = Modifier.height(2.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
 
-                            Text("Google AI Studio (Gemini) APIキープール (1行1キー / 複数可):", color = AppColors.textSecondary, fontSize = 10.sp)
-                            V2InputArea(value = geminiKeysText, onValueChange = { geminiKeysText = it }, minLines = 2)
-                            TextButton(
-                                onClick = {
-                                    geminiKeysText = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig().geminiApiKeys.joinToString("\n")
-                                }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("同梱値にリセット", color = AppColors.accentTealLight, fontSize = 10.sp)
+                                Text("Google AI Studio (Gemini) APIキープール (1行1キー / 複数可):", color = AppColors.textSecondary, fontSize = 10.sp)
+                                Text(
+                                    text = "同梱値にリセット",
+                                    color = AppColors.accentTealLight,
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.clickable {
+                                        geminiKeysText = com.example.novelscraper.translation.llm.engine.LlmTranslationConfig().geminiApiKeys.joinToString("\n")
+                                    }
+                                )
                             }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            V2InputArea(value = geminiKeysText, onValueChange = { geminiKeysText = it }, minLines = 2, maxLines = 5)
 
+                            Spacer(modifier = Modifier.height(2.dp))
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(checked = geminiRotationEnabled, onCheckedChange = { geminiRotationEnabled = it })
                                 Text("429検知時の即時キー/モデルローテーション有効", color = AppColors.textPrimary, fontSize = 10.sp)
@@ -620,15 +637,17 @@ fun V2SettingsDialog(
 
                             Spacer(modifier = Modifier.height(4.dp))
                             Text("OpenRouter APIキー:", color = AppColors.textSecondary, fontSize = 10.sp)
-                            V2InputArea(value = openRouterKey, onValueChange = { openRouterKey = it })
+                            Spacer(modifier = Modifier.height(2.dp))
+                            V2InputArea(value = openRouterKey, onValueChange = { openRouterKey = it }, singleLine = true)
 
                             Spacer(modifier = Modifier.height(4.dp))
                             Text("OpenRouter エンドポイント (標準: https://openrouter.ai/api/v1/chat/completions):", color = AppColors.textSecondary, fontSize = 10.sp)
-                            V2InputArea(value = openRouterEndpoint, onValueChange = { openRouterEndpoint = it })
+                            Spacer(modifier = Modifier.height(2.dp))
+                            V2InputArea(value = openRouterEndpoint, onValueChange = { openRouterEndpoint = it }, singleLine = true)
 
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
                             HorizontalDivider(color = Color.DarkGray)
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
 
                             // ==========================================
                             // 2. 📄 本文翻訳・実行設定
@@ -651,11 +670,14 @@ fun V2SettingsDialog(
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("出力フォルダ名:", color = AppColors.textSecondary, fontSize = 10.sp)
-                                    V2InputArea(value = outputSubDir, onValueChange = { outputSubDir = it })
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    V2InputArea(value = outputSubDir, onValueChange = { outputSubDir = it }, singleLine = true)
                                 }
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("本文翻訳 並列ワーカー数 (1〜6):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                    V2InputArea(value = parallelWorkers, onValueChange = { parallelWorkers = it })
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    V2InputArea(value = parallelWorkers, onValueChange = { parallelWorkers = it }, singleLine = true)
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Text("※同時並行ファイル数 (1〜6)", color = AppColors.textTertiary, fontSize = 8.sp)
                                 }
                             }
@@ -665,11 +687,13 @@ fun V2SettingsDialog(
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("本文翻訳 リクエスト間隔 (秒):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                    V2InputArea(value = requestDelay, onValueChange = { requestDelay = it })
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    V2InputArea(value = requestDelay, onValueChange = { requestDelay = it }, singleLine = true)
                                 }
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("Gemini 429待機 (秒):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                    V2InputArea(value = geminiCooldownSecText, onValueChange = { geminiCooldownSecText = it })
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    V2InputArea(value = geminiCooldownSecText, onValueChange = { geminiCooldownSecText = it }, singleLine = true)
                                 }
                             }
 
@@ -680,64 +704,86 @@ fun V2SettingsDialog(
                             }
                             if (splitEnabled) {
                                 Spacer(modifier = Modifier.height(2.dp))
-                                Text("物理分割文字数 (文字):", color = AppColors.textSecondary, fontSize = 9.sp)
-                                V2InputArea(value = splitSize, onValueChange = { splitSize = it })
-                                Text("※例: 7000 ➔ 約7,000文字 (約2〜3話相当) 毎にパート分割", color = AppColors.textTertiary, fontSize = 8.sp)
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text("入力文字コード (自動判定で化ける時のみ指定):", color = AppColors.textSecondary, fontSize = 9.sp)
-                                Box(
-                                    modifier = Modifier
-                                        .height(36.dp)
-                                        .background(AppColors.backgroundDark, RoundedCornerShape(4.dp))
-                                        .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
-                                        .clickable { splitEncodingMenu = true }
-                                        .padding(horizontal = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = V2_ENCODING_OPTIONS.firstOrNull { it.first == splitEncoding }?.second ?: splitEncoding,
-                                            color = AppColors.textPrimary,
-                                            fontSize = 11.sp
-                                        )
-                                        Icon(Icons.Default.ArrowDropDown, contentDescription = "文字コード", tint = Color.White, modifier = Modifier.size(18.dp))
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("物理分割文字数 (文字):", color = AppColors.textSecondary, fontSize = 9.sp)
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        V2InputArea(value = splitSize, onValueChange = { splitSize = it }, singleLine = true)
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text("※例: 7000 (約2〜3話相当)", color = AppColors.textTertiary, fontSize = 8.sp)
                                     }
-                                    DropdownMenu(
-                                        expanded = splitEncodingMenu,
-                                        onDismissRequest = { splitEncodingMenu = false },
-                                        modifier = Modifier.background(AppColors.surfaceDark)
-                                    ) {
-                                        V2_ENCODING_OPTIONS.forEach { option ->
-                                            DropdownMenuItem(
-                                                text = {
-                                                    Text(
-                                                        text = "${if (option.first == splitEncoding) "✓ " else ""}${option.second}",
-                                                        color = if (option.first == splitEncoding) AppColors.accentTealLight else AppColors.textPrimary,
-                                                        fontSize = 11.sp
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("入力文字コード (自動判定推奨):", color = AppColors.textSecondary, fontSize = 9.sp)
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(36.dp)
+                                                .background(AppColors.backgroundDark, RoundedCornerShape(4.dp))
+                                                .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
+                                                .clickable { splitEncodingMenu = true }
+                                                .padding(horizontal = 8.dp),
+                                            contentAlignment = Alignment.CenterStart
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(
+                                                    text = V2_ENCODING_OPTIONS.firstOrNull { it.first == splitEncoding }?.second ?: splitEncoding,
+                                                    color = AppColors.textPrimary,
+                                                    fontSize = 11.sp
+                                                )
+                                                Icon(Icons.Default.ArrowDropDown, contentDescription = "文字コード", tint = Color.White, modifier = Modifier.size(18.dp))
+                                            }
+                                            DropdownMenu(
+                                                expanded = splitEncodingMenu,
+                                                onDismissRequest = { splitEncodingMenu = false },
+                                                modifier = Modifier.background(AppColors.surfaceDark)
+                                            ) {
+                                                V2_ENCODING_OPTIONS.forEach { option ->
+                                                    DropdownMenuItem(
+                                                        text = {
+                                                            Text(
+                                                                text = "${if (option.first == splitEncoding) "✓ " else ""}${option.second}",
+                                                                color = if (option.first == splitEncoding) AppColors.accentTealLight else AppColors.textPrimary,
+                                                                fontSize = 11.sp,
+                                                                fontWeight = if (option.first == splitEncoding) FontWeight.Bold else FontWeight.Normal
+                                                            )
+                                                        },
+                                                        onClick = {
+                                                            splitEncoding = option.first
+                                                            splitEncodingMenu = false
+                                                        }
                                                     )
-                                                },
-                                                onClick = {
-                                                    splitEncoding = option.first
-                                                    splitEncodingMenu = false
                                                 }
-                                            )
+                                            }
                                         }
                                     }
                                 }
                             }
 
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 Checkbox(checked = prevEnabled, onCheckedChange = { prevEnabled = it })
                                 Text("直前ファイル原文末尾の文脈注入", color = AppColors.textPrimary, fontSize = 10.sp)
-                            }
-                            if (prevEnabled) {
-                                Text("注入行数 (1〜100):", color = AppColors.textSecondary, fontSize = 9.sp)
-                                V2InputArea(value = prevLines, onValueChange = { prevLines = it })
+                                if (prevEnabled) {
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("注入行数:", color = AppColors.textSecondary, fontSize = 9.sp)
+                                    Box(modifier = Modifier.width(60.dp)) {
+                                        V2InputArea(value = prevLines, onValueChange = { prevLines = it }, singleLine = true)
+                                    }
+                                    Text("行", color = AppColors.textSecondary, fontSize = 9.sp)
+                                }
                             }
 
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
                             HorizontalDivider(color = Color.DarkGray)
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
 
                             // ==========================================
                             // 3. 📊 品質検証・サイズ比 (%) 設定
@@ -749,22 +795,25 @@ fun V2SettingsDialog(
                                 color = AppColors.textTertiary,
                                 fontSize = 9.sp
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
+
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("中国語 (ZH) 最小〜最大 %:", color = AppColors.textSecondary, fontSize = 9.sp)
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioZhMinText, onValueChange = { sizeRatioZhMinText = it }) }
+                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioZhMinText, onValueChange = { sizeRatioZhMinText = it }, singleLine = true) }
                                         Text("〜", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 4.dp))
-                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioZhMaxText, onValueChange = { sizeRatioZhMaxText = it }) }
+                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioZhMaxText, onValueChange = { sizeRatioZhMaxText = it }, singleLine = true) }
                                     }
                                 }
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("韓国語 (KO) 最小〜最大 %:", color = AppColors.textSecondary, fontSize = 9.sp)
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioKoMinText, onValueChange = { sizeRatioKoMinText = it }) }
+                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioKoMinText, onValueChange = { sizeRatioKoMinText = it }, singleLine = true) }
                                         Text("〜", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 4.dp))
-                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioKoMaxText, onValueChange = { sizeRatioKoMaxText = it }) }
+                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioKoMaxText, onValueChange = { sizeRatioKoMaxText = it }, singleLine = true) }
                                     }
                                 }
                             }
@@ -772,25 +821,27 @@ fun V2SettingsDialog(
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("英語 (EN) 最小〜最大 %:", color = AppColors.textSecondary, fontSize = 9.sp)
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioEnMinText, onValueChange = { sizeRatioEnMinText = it }) }
+                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioEnMinText, onValueChange = { sizeRatioEnMinText = it }, singleLine = true) }
                                         Text("〜", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 4.dp))
-                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioEnMaxText, onValueChange = { sizeRatioEnMaxText = it }) }
+                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioEnMaxText, onValueChange = { sizeRatioEnMaxText = it }, singleLine = true) }
                                     }
                                 }
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("日本語 (JA) 最小〜最大 %:", color = AppColors.textSecondary, fontSize = 9.sp)
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioJaMinText, onValueChange = { sizeRatioJaMinText = it }) }
+                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioJaMinText, onValueChange = { sizeRatioJaMinText = it }, singleLine = true) }
                                         Text("〜", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 4.dp))
-                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioJaMaxText, onValueChange = { sizeRatioJaMaxText = it }) }
+                                        Box(modifier = Modifier.weight(1f)) { V2InputArea(value = sizeRatioJaMaxText, onValueChange = { sizeRatioJaMaxText = it }, singleLine = true) }
                                     }
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
                             HorizontalDivider(color = Color.DarkGray)
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
 
                             // ==========================================
                             // 4. 📖 人名辞書自動生成 (dictionary.json)
@@ -818,6 +869,7 @@ fun V2SettingsDialog(
 
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text("辞書抽出用モデル:", color = AppColors.textSecondary, fontSize = 10.sp)
+                                Spacer(modifier = Modifier.height(2.dp))
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -839,6 +891,7 @@ fun V2SettingsDialog(
 
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text("マージ・レビュー用モデル (空欄で抽出と同一):", color = AppColors.textSecondary, fontSize = 10.sp)
+                                Spacer(modifier = Modifier.height(2.dp))
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -871,7 +924,9 @@ fun V2SettingsDialog(
                                 if (dictProvider == "openrouter") {
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text("OpenRouter プロバイダー指定 (カンマ区切り, 例: upstage, baidu/fp8):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                    V2InputArea(value = dictOpenRouterProviderOrderText, onValueChange = { dictOpenRouterProviderOrderText = it })
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    V2InputArea(value = dictOpenRouterProviderOrderText, onValueChange = { dictOpenRouterProviderOrderText = it }, singleLine = true)
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Checkbox(
                                             checked = dictOpenRouterProviderAllowFallbacks,
@@ -885,11 +940,13 @@ fun V2SettingsDialog(
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("対象ファイル数 (0=全件):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                        V2InputArea(value = dictTotalParts, onValueChange = { dictTotalParts = it })
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        V2InputArea(value = dictTotalParts, onValueChange = { dictTotalParts = it }, singleLine = true)
                                     }
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("1回の送信上限 (KB / 上限200):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                        V2InputArea(value = dictBatchKb, onValueChange = { dictBatchKb = it })
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        V2InputArea(value = dictBatchKb, onValueChange = { dictBatchKb = it }, singleLine = true)
                                     }
                                 }
 
@@ -897,32 +954,37 @@ fun V2SettingsDialog(
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("辞書抽出 ワーカー数 (1〜30):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                        V2InputArea(value = dictWorker, onValueChange = { dictWorker = it })
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        V2InputArea(value = dictWorker, onValueChange = { dictWorker = it }, singleLine = true)
                                     }
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("1ワーカーあたり並列数 (1〜10):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                        V2InputArea(value = dictConcurrency, onValueChange = { dictConcurrency = it })
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        V2InputArea(value = dictConcurrency, onValueChange = { dictConcurrency = it }, singleLine = true)
                                     }
                                 }
                                 val totalReq = ((dictWorker.toIntOrNull() ?: 6) * (dictConcurrency.toIntOrNull() ?: 5)).coerceIn(1, 30)
+                                Spacer(modifier = Modifier.height(2.dp))
                                 Text("➔ 同時APIリクエスト合計: ${totalReq} 並列 (ワーカー数 × 並列数 / 最大30)", color = AppColors.accentTealLight, fontSize = 9.sp, fontWeight = FontWeight.Bold)
 
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("リクエスト待機 (秒):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                        V2InputArea(value = dictDelay, onValueChange = { dictDelay = it })
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        V2InputArea(value = dictDelay, onValueChange = { dictDelay = it }, singleLine = true)
                                     }
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("429待機時間 (秒):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                        V2InputArea(value = dictCooldown, onValueChange = { dictCooldown = it })
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        V2InputArea(value = dictCooldown, onValueChange = { dictCooldown = it }, singleLine = true)
                                     }
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
                             HorizontalDivider(color = Color.DarkGray)
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
 
                             // ==========================================
                             // 5. 💰 コスト上限 & 旧設定取込 (v2固有)
@@ -933,23 +995,27 @@ fun V2SettingsDialog(
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("最大トークン (空＝無制限):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                    V2InputArea(value = maxTokens, onValueChange = { maxTokens = it })
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    V2InputArea(value = maxTokens, onValueChange = { maxTokens = it }, singleLine = true)
                                 }
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("最大コスト (USD想定 / 空＝無制限):", color = AppColors.textSecondary, fontSize = 10.sp)
-                                    V2InputArea(value = maxCost, onValueChange = { maxCost = it })
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    V2InputArea(value = maxCost, onValueChange = { maxCost = it }, singleLine = true)
                                 }
                             }
 
                             if (onImportLegacy != null) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text("旧設定JSON取込（検証・合格分のみ継承）:", color = AppColors.textSecondary, fontSize = 10.sp)
-                                V2InputArea(value = legacyJson, onValueChange = { legacyJson = it }, minLines = 2)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                V2InputArea(value = legacyJson, onValueChange = { legacyJson = it }, minLines = 2, maxLines = 4)
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Button(
                                     onClick = { onImportLegacy(legacyJson) },
                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF37474F)),
-                                    shape = RoundedCornerShape(4.dp)
+                                    shape = RoundedCornerShape(4.dp),
+                                    modifier = Modifier.height(36.dp)
                                 ) {
                                     Text("旧設定を取り込む", color = Color.White, fontSize = 11.sp)
                                 }
@@ -974,12 +1040,24 @@ fun V2SettingsDialog(
                                 (1..7).forEach { num ->
                                     val isSel = (editingPromptNumber == num)
                                     val isCustomized = customPromptsMap.containsKey(num)
-                                    SelectBox(
-                                        label = "$num${if (isCustomized) "*" else ""}",
-                                        selected = isSel,
-                                        onClick = { editingPromptNumber = num },
-                                        modifier = Modifier.weight(1f)
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .background(
+                                                if (isSel) AppColors.accentTeal else if (isCustomized) AppColors.accentTealDark else AppColors.surfaceMedium,
+                                                RoundedCornerShape(4.dp)
+                                            )
+                                            .clickable { editingPromptNumber = num }
+                                            .padding(vertical = 6.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "$num${if (isCustomized) "*" else ""}",
+                                            color = if (isSel) Color.White else AppColors.textPrimary,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
                                 }
                             }
 
@@ -993,13 +1071,27 @@ fun V2SettingsDialog(
                                 7 to "7: リトライ短文 (最小限指示)"
                             )
 
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = promptTitles[editingPromptNumber] ?: "$editingPromptNumber",
-                                color = AppColors.accentTealLight,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = promptTitles[editingPromptNumber] ?: "$editingPromptNumber",
+                                    color = AppColors.accentTealLight,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                TextButton(
+                                    onClick = {
+                                        customPromptsMap.remove(editingPromptNumber)
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text("初期値に戻す", color = Color(0xFFFF8888), fontSize = 10.sp)
+                                }
+                            }
 
                             val currentPromptText = customPromptsMap[editingPromptNumber]
                                 ?: getV2PromptByNumber(editingPromptNumber)
@@ -1014,25 +1106,17 @@ fun V2SettingsDialog(
                                 maxLines = 14
                             )
 
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                TextButton(
-                                    onClick = {
-                                        customPromptsMap.remove(editingPromptNumber)
-                                    }
+                            if (customPromptsMap.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End
                                 ) {
-                                    Text("このプロンプトをデフォルトに戻す", color = AppColors.accentTealLight, fontSize = 10.sp)
-                                }
-
-                                if (customPromptsMap.isNotEmpty()) {
                                     TextButton(
                                         onClick = {
                                             customPromptsMap.clear()
-                                        }
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
                                     ) {
                                         Text("全プロンプトを初期化", color = Color(0xFFFF6666), fontSize = 10.sp)
                                     }
@@ -1073,7 +1157,6 @@ fun V2SettingsDialog(
                     }
                     Button(
                         onClick = { onSave(coercedV2Settings(draft)) },
-                        enabled = blocking.isEmpty(),
                         colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
                         shape = RoundedCornerShape(4.dp),
                         modifier = Modifier.weight(1f)
@@ -1382,7 +1465,7 @@ private fun V2ProfileCard(
                                     var presetMenuOpen by remember { mutableStateOf(false) }
                                     Box(
                                         modifier = Modifier
-                                            .size(32.dp)
+                                            .size(36.dp)
                                             .background(AppColors.accentTeal, RoundedCornerShape(4.dp))
                                             .clickable { presetMenuOpen = true },
                                         contentAlignment = Alignment.Center
@@ -1400,7 +1483,8 @@ private fun V2ProfileCard(
                                                         Text(
                                                             text = "${if (isCurrent) "✓ " else ""}${preset.label} [${preset.order.joinToString(",")}]",
                                                             color = if (isCurrent) AppColors.accentTealLight else AppColors.textPrimary,
-                                                            fontSize = 11.sp
+                                                            fontSize = 11.sp,
+                                                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
                                                         )
                                                     },
                                                     onClick = {
@@ -1414,7 +1498,7 @@ private fun V2ProfileCard(
 
                                     Box(
                                         modifier = Modifier
-                                            .size(32.dp)
+                                            .size(36.dp)
                                             .background(AppColors.accentTealDark, RoundedCornerShape(4.dp))
                                             .clickable { onRequestSavePreset(profile.promptOrder) },
                                         contentAlignment = Alignment.Center
@@ -1539,7 +1623,7 @@ private fun V2AddModelSelectionDialog(
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            modifier = Modifier.fillMaxWidth(0.95f).fillMaxHeight(0.85f),
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.85f),
             shape = RoundedCornerShape(8.dp),
             color = AppColors.surfaceDark,
             tonalElevation = 8.dp
@@ -1705,17 +1789,48 @@ fun V2InputArea(
     maxLines: Int = 10,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
-    Box(
-        modifier = modifier
+    val stopNestedScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource
+            ): Offset {
+                // 入力欄内のスクロールが末尾に達しても、親ダイアログが連動スクロールしないよう余剰デルタを消費
+                return available
+            }
+
+            override suspend fun onPostFling(
+                consumed: Velocity,
+                available: Velocity
+            ): Velocity {
+                return available
+            }
+        }
+    }
+
+    val boxModifier = if (singleLine) {
+        modifier
+            .height(36.dp)
+            .background(AppColors.backgroundDark, RoundedCornerShape(4.dp))
+            .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp)
+    } else {
+        modifier
+            .nestedScroll(stopNestedScrollConnection)
             .background(AppColors.backgroundDark, RoundedCornerShape(4.dp))
             .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
             .padding(6.dp)
+    }
+    Box(
+        modifier = boxModifier,
+        contentAlignment = if (singleLine) Alignment.CenterStart else Alignment.TopStart
     ) {
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
             singleLine = singleLine,
-            minLines = minLines,
+            minLines = if (singleLine) 1 else minLines,
             maxLines = if (singleLine) 1 else maxLines,
             textStyle = TextStyle(
                 color = AppColors.textPrimary,

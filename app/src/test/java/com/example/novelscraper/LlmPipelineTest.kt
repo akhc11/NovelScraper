@@ -1372,6 +1372,73 @@ class LlmPipelineTest {
     }
 
     @Test
+    fun testErrorClassifier_FixtureTable() {
+        // rewrite受入用fixture表：(code, body) → (kind, configKind?)
+        val classify = com.example.novelscraper.translation.llm.api.ErrorClassifier::classifyHttpStatus
+        val K = com.example.novelscraper.translation.llm.api.ApiFailureKind.entries.associateBy { it.name }
+        val C = com.example.novelscraper.translation.llm.api.ConfigErrorKind.entries.associateBy { it.name }
+        data class Row(val code: Int, val body: String, val kind: String, val config: String?)
+
+        val rows = listOf(
+            Row(403, "", "CONFIG", "AUTH_FAILED"),
+            Row(410, "", "CONFIG", "MODEL_NOT_FOUND"),
+            Row(500, "", "TRANSIENT", null),
+            Row(502, "bad gateway", "TRANSIENT", null),
+            Row(504, "", "TRANSIENT", null),
+            Row(400, "The model `gemini-9-flash` does not exist", "CONFIG", "MODEL_NOT_FOUND"),
+            Row(400, "Incorrect API key provided", "CONFIG", "AUTH_FAILED"),
+            Row(400, "permission_denied", "CONFIG", "AUTH_FAILED"),
+            Row(400, "Free tier is not available in your country", "CONFIG", "PAYMENT_REQUIRED"),
+            Row(400, "", "FATAL", null),
+            Row(429, "GenerateRequestsPerDayPerProjectPerModel-FreeTier", "QUOTA", null),
+            Row(429, "", "QUOTA", null)
+        )
+        for ((code, body, kind, config) in rows) {
+            val r = classify(code, body)
+            assertEquals("code=$code body=$body", K.getValue(kind), r.kind)
+            if (config != null) assertEquals("code=$code body=$body", C.getValue(config), r.configKind)
+        }
+    }
+
+    @Test
+    fun testGeminiApiClient_NormalizeThinkingLevel() {
+        val api = com.example.novelscraper.translation.llm.api.GeminiApiClient
+        // 3.7/3.8系のminimalはmediumへ正規化
+        assertEquals("medium", api.normalizeThinkingLevel("gemini-3.8-flash", "minimal"))
+        assertEquals("medium", api.normalizeThinkingLevel("gemini-3.7-flash", "MINIMAL"))
+        // 対応モデルは維持
+        assertEquals("minimal", api.normalizeThinkingLevel("gemini-3.5-flash", "minimal"))
+        assertEquals("minimal", api.normalizeThinkingLevel("gemini-3.6-flash", "minimal"))
+        assertEquals("minimal", api.normalizeThinkingLevel("gemini-3-flash-preview", "minimal"))
+        assertEquals("high", api.normalizeThinkingLevel("gemini-3.8-flash", "high"))
+        // null・空は透過
+        assertNull(api.normalizeThinkingLevel("gemini-3.8-flash", null))
+        assertEquals("", api.normalizeThinkingLevel("gemini-3.8-flash", ""))
+    }
+
+    @Test
+    fun testApiKeyPoolManager_ClaimRespectsModelPairs() = kotlinx.coroutines.runBlocking {
+        val lite = "gemini-3.1-flash-lite"
+        val flash = "gemini-3.5-flash"
+        val rpd = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+        val pool = com.example.novelscraper.translation.llm.rotation.ApiKeyPoolManager(listOf("k1", "k2"))
+        pool.reportQuotaExceeded(0, lite, rpd, 15)
+        pool.reportQuotaExceeded(1, lite, rpd, 15)
+        // lite全滅でもflash用には確保できる (起動スキップの誤爆防止)
+        val claimFlash = pool.claimNewKey(listOf(flash))
+        assertNotNull(claimFlash)
+        // lite用には確保できない (確保中0＋枯渇1)
+        assertNull(pool.claimNewKey(listOf(lite)))
+        pool.releaseKey(claimFlash!!.first)
+        // 全モデル全キー枯渇なら何用にも確保できない
+        pool.reportQuotaExceeded(0, flash, rpd, 15)
+        pool.reportQuotaExceeded(1, flash, rpd, 15)
+        assertNull(pool.claimNewKey(listOf(lite, flash)))
+        // モデル不明時は寛容 (他プロバイダー作業の足止め防止)
+        assertNotNull(pool.claimNewKey())
+    }
+
+    @Test
     fun testMapHttpError_OpenAiCompatible() {
         val map = com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient::mapHttpError
 

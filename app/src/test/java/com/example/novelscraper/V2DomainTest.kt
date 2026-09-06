@@ -1,0 +1,317 @@
+package com.example.novelscraper
+
+import com.example.novelscraper.translation.v2.domain.AcquireResult
+import com.example.novelscraper.translation.v2.domain.ConfigKind
+import com.example.novelscraper.translation.v2.domain.CostMeter
+import com.example.novelscraper.translation.v2.domain.FailureKind
+import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
+import com.example.novelscraper.translation.v2.domain.GeminiErrorMapper
+import com.example.novelscraper.translation.v2.domain.GenericErrorMapper
+import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
+import com.example.novelscraper.translation.v2.domain.QuotaPool
+import com.example.novelscraper.translation.v2.domain.SamplingParam
+import com.example.novelscraper.translation.v2.domain.ThinkingSupport
+import com.example.novelscraper.translation.v2.domain.capabilitiesFor
+import com.example.novelscraper.translation.v2.domain.resolveDouble
+import com.example.novelscraper.translation.v2.domain.resolveInt
+import com.example.novelscraper.translation.v2.domain.resolveOption
+import com.example.novelscraper.translation.v2.infra.buildGeminiBody
+import com.example.novelscraper.translation.v2.infra.buildOpenRouterBody
+import com.example.novelscraper.translation.v2.infra.parseGeminiResponse
+import com.example.novelscraper.translation.v2.infra.parseOpenRouterResponse
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import org.junit.Assert.*
+import org.junit.Test
+
+class V2DomainTest {
+
+    @Test
+    fun testFailureMapper_FixtureTable() {
+        val kinds = FailureKind.entries.associateBy { it.name }
+        val configs = ConfigKind.entries.associateBy { it.name }
+        data class Row(val code: Int, val body: String, val kind: String, val config: String?)
+
+        val rows = listOf(
+            Row(403, "", "CONFIG", "AUTH_FAILED"),
+            Row(410, "", "CONFIG", "MODEL_NOT_FOUND"),
+            Row(500, "", "RETRYABLE_AFTER", null),
+            Row(503, "overloaded", "RETRYABLE_AFTER", null),
+            Row(400, "The model `x` does not exist", "CONFIG", "MODEL_NOT_FOUND"),
+            Row(400, "Incorrect API key provided", "CONFIG", "AUTH_FAILED"),
+            Row(400, "Free tier is not available in your country", "CONFIG", "PAYMENT_REQUIRED"),
+            Row(400, "", "FATAL", null),
+            Row(429, "too many requests", "QUOTA_MINUTE", null),
+            Row(418, "", "FATAL", null)
+        )
+        for ((code, body, kind, config) in rows) {
+            val r = GenericErrorMapper.map(code, body)
+            assertEquals("code=$code", kinds.getValue(kind), r.kind)
+            if (config != null) assertEquals("code=$code", configs.getValue(config), r.configKind)
+        }
+    }
+
+    @Test
+    fun testGeminiMapper_DailySplit() {
+        assertEquals(
+            FailureKind.QUOTA_DAILY,
+            GeminiErrorMapper.map(429, "GenerateRequestsPerDayPerProjectPerModel-FreeTier").kind
+        )
+        assertEquals(FailureKind.QUOTA_MINUTE, GeminiErrorMapper.map(429, "GenerateRequestsPerMinutePerProjectPerModel").kind)
+        assertEquals(FailureKind.QUOTA_MINUTE, GeminiErrorMapper.map(429, "").kind)
+        assertTrue(GeminiErrorMapper.isDailyQuotaExceeded("per day quota exceeded"))
+        assertFalse(GeminiErrorMapper.isDailyQuotaExceeded("per minute quota exceeded"))
+    }
+
+    @Test
+    fun testCapabilities_Lookup() {
+        // 3.8はLOW/MEDIUM/HIGHのみ
+        val flash38 = GEMINI_DESCRIPTOR.capabilitiesFor("gemini-3.8-flash").thinking
+        assertTrue(flash38 is ThinkingSupport.Levels)
+        assertEquals(setOf("low", "medium", "high"), (flash38 as ThinkingSupport.Levels).supported)
+
+        // preview既定high・4値対応
+        val preview = GEMINI_DESCRIPTOR.capabilitiesFor("gemini-3-flash-preview").thinking
+        assertTrue(preview is ThinkingSupport.Levels)
+        assertEquals("high", (preview as ThinkingSupport.Levels).default)
+
+        // Gemma系は未収録→None（送らない・出さない）
+        assertEquals(ThinkingSupport.None, GEMINI_DESCRIPTOR.capabilitiesFor("gemma-4-31b-it").thinking)
+        // 大文字・空白つきも正規化
+        assertEquals(ThinkingSupport.None, GEMINI_DESCRIPTOR.capabilitiesFor("  GEMMA-3-27B-IT ").thinking)
+        // OpenRouter未知IDは控えめ既定（思考なし・温度のみ）
+        val unknown = OPENROUTER_DESCRIPTOR.capabilitiesFor("some/new-model")
+        assertEquals(ThinkingSupport.None, unknown.thinking)
+        assertNotNull(unknown.sampling["temperature"])
+        // 枠帰属：Geminiはモデル別、OpenRouterは共有
+        assertEquals("gemini-3.5-flash", GEMINI_DESCRIPTOR.quotaScopeOf("gemini-3.5-flash"))
+        assertEquals("shared", OPENROUTER_DESCRIPTOR.quotaScopeOf("anything"))
+    }
+
+    @Test
+    fun testParams_Resolution() {
+        // 選択肢：上書き優先→既定→空、非対応は落とす
+        assertEquals(null, resolveOption(setOf("a"), null, null))
+        assertEquals("b", resolveOption(setOf("a", "b"), "a", "b"))
+        assertEquals("a", resolveOption(setOf("a", "b"), "a", null))
+        assertEquals(null, resolveOption(setOf("a"), "a", "zzz"))
+        assertEquals("a", resolveOption(null, "a", null))
+        // 数値：上書き優先、範囲丸め
+        val range = SamplingParam(0.0, 1.0)
+        assertEquals(0.5, resolveDouble(range, 0.5, null).value)
+        val over = resolveDouble(range, null, 2.0)
+        assertEquals(1.0, over.value)
+        assertTrue(over.coerced)
+        assertEquals(null, resolveDouble(range, null, null).value)
+        val intOver = resolveInt(1..10, null, 99)
+        assertEquals(10, intOver.value)
+        assertTrue(intOver.coerced)
+    }
+
+    @Test
+    fun testQuotaPool_Semantics() = kotlinx.coroutines.runBlocking {
+        val pool = QuotaPool(listOf("k1", "k2"))
+        // 初期確保
+        val first = pool.claimNew(listOf("m-a"))
+        assertNotNull(first)
+        // 一時冷却は枯渇にしない
+        pool.reportQuota(0, "m-a", daily = false, cooldownSec = 60)
+        assertFalse(pool.isExhausted(listOf("m-a")))
+        // 全資格情報×対象スコープ枯渇で真
+        pool.reportQuota(0, "m-a", daily = true, cooldownSec = 15)
+        assertFalse(pool.isExhausted(listOf("m-a")))
+        pool.reportQuota(1, "m-a", daily = true, cooldownSec = 15)
+        assertTrue(pool.isExhausted(listOf("m-a")))
+        // 他スコープは継続可
+        assertFalse(pool.isExhausted(listOf("m-b")))
+        assertTrue(pool.claimNew(listOf("m-b")) != null)
+        assertTrue(pool.isScopeDead(0, "m-a"))
+        assertFalse(pool.isScopeDead(0, "m-b"))
+        // 空資格情報は枯渇
+        val empty = QuotaPool(emptyList())
+        assertTrue(empty.isExhausted(listOf("m-a")))
+        val acq = empty.acquire(listOf("m-a"))
+        assertTrue(acq is AcquireResult.Exhausted)
+        // リセットで復活
+        pool.reset()
+        assertFalse(pool.isExhausted(listOf("m-a")))
+    }
+
+    @Test
+    fun testCostMeter_Guard() {        val meter = CostMeter(maxTokens = 100, maxCost = 1.0)
+        assertTrue(meter.add(tokens = 60, cost = 0.4))
+        assertTrue(meter.add(tokens = 40, cost = 0.5))
+        // 上限超過は拒否し、計数は進めない
+        assertFalse(meter.add(tokens = 1))
+        assertFalse(meter.add(cost = 0.2))
+        assertEquals(100L to 0.9, meter.snapshot())
+        // 上限なしは常に許可
+        val free = CostMeter()
+        assertTrue(free.add(tokens = Long.MAX_VALUE / 2))
+    }
+
+    @Test
+    fun testInMemoryFileStore_CRUD() = kotlinx.coroutines.runBlocking {
+        val store = com.example.novelscraper.translation.v2.infra.InMemoryFileStore()
+        val root = store.createRoot("novel")
+        assertEquals(emptyList<String>(), store.children("mem://missing").map { it.name })
+
+        val sub = store.createDir(root.uri, "parts")
+        assertNotNull(sub)
+        val file = store.createFile(sub!!.uri, "a.txt", "text/plain")
+        assertNotNull(file)
+        assertTrue(store.writeText(file!!.uri, "hello"))
+        assertEquals("hello", store.readText(file.uri))
+        assertEquals(listOf("a.txt"), store.children(sub.uri).map { it.name })
+        assertEquals("a.txt", store.findChild(sub.uri, "a.txt")?.name)
+        assertNull(store.findChild(sub.uri, "b.txt"))
+        // ディレクトリへの書込・ファイル扱いは拒否
+        assertFalse(store.writeText(sub.uri, "x"))
+        assertNull(store.readText(sub.uri))
+        assertFalse(store.deleteFile(sub.uri))
+        // 削除
+        assertTrue(store.deleteFile(file.uri))
+        assertNull(store.readText(file.uri))
+        assertTrue(store.deleteRecursively(sub.uri))
+        assertEquals(emptyList<String>(), store.children(root.uri).map { it.name })
+    }
+
+    @Test
+    fun testLegacyImport_Validation() {
+        val importLegacy =
+            com.example.novelscraper.translation.v2.settings.DataStoreSettingsRepository::importLegacySettings
+        // 空・破損は既定値＋警告
+        val empty = importLegacy("")
+        assertTrue(empty.warnings.isNotEmpty())
+        assertEquals(1, empty.settings.profiles.size)
+        val broken = importLegacy("{not json")
+        assertTrue(broken.warnings.isNotEmpty())
+
+        // 正常系：採用＋除外の分岐
+        val raw = """
+        {
+          "geminiApiKeys": ["k1", "", "k2"],
+          "openRouterApiKey": "or-key",
+          "modelProfiles": [
+            {"id": "1", "provider": "GEMINI", "modelName": "gemini-3.5-flash", "temperature": 0.5, "promptOrder": [1, 1], "maxOutputChars": 20000},
+            {"provider": "GROQ", "modelName": "llama-x"},
+            {"provider": "GEMINI", "modelName": "  "},
+            {"provider": "GEMINI", "modelName": "gemini-3.8-flash", "thinkingLevel": "medium", "topP": 9.9}
+          ],
+          "enableDictGen": true,
+          "dictProvider": "OPENROUTER",
+          "dictGeminiModel": "gemini-3.1-flash-lite",
+          "dictWorkerCount": 99,
+          "parallelWorkers": 99,
+          "outputSubDir": ""
+        }
+        """.trimIndent()
+        val ok = importLegacy(raw)
+        assertEquals(listOf("k1", "k2"), ok.settings.geminiKeys)
+        assertEquals("or-key", ok.settings.openRouterKey)
+        assertEquals(2, ok.settings.profiles.size)
+        assertEquals("gemini-3.5-flash", ok.settings.profiles[0].model)
+        assertEquals(0.5, ok.settings.profiles[0].temperature)
+        assertEquals(20000, ok.settings.profiles[0].maxOutputChars)
+        assertEquals("gemini-3.8-flash", ok.settings.profiles[1].model)
+        assertEquals(9.9, ok.settings.profiles[1].topP)
+        assertTrue(ok.settings.dict.enabled)
+        assertEquals("openrouter", ok.settings.dict.providerId)
+        assertEquals(30, ok.settings.dict.workerCount)
+        assertEquals(6, ok.settings.limits.parallelWorkers)
+        assertEquals("翻訳完了_LLM", ok.settings.limits.outputSubDir)
+        // GROQ除外＋空名除外の警告2件
+        assertEquals(2, ok.warnings.size)
+    }
+
+    @Test
+    fun testHandlerBuilders_OmitNulls() {
+        val req = com.example.novelscraper.translation.v2.domain.LlmRequest(
+            providerId = "gemini",
+            model = "gemini-3.5-flash",
+            systemPrompt = "sys",
+            userText = "hello",
+            options = com.example.novelscraper.translation.v2.domain.RequestOptions(
+                thinkingLevel = "low"
+            )
+        )
+        val geminiBody = buildGeminiBody(req)
+        assertTrue(geminiBody.contains("thinkingLevel"))
+        assertTrue(!geminiBody.contains("temperature"))
+        assertTrue(!geminiBody.contains("thinkingBudget"))
+
+        val orBody = buildOpenRouterBody(req)
+        assertTrue(orBody.contains("gemini-3.5-flash"))
+        assertTrue(!orBody.contains("reasoning"))
+        val orReasoning = buildOpenRouterBody(
+            req, reasoningEffort = "high"
+        )
+        assertTrue(orReasoning.contains("\"effort\":\"high\""))
+    }
+
+    @Test
+    fun testHandlerParsers_Blocks() {
+        // 思考パート除外＋本文結合
+        val ok = parseGeminiResponse(
+            200,
+            """{"candidates": [{"content": {"parts": [
+              {"text": "考え", "thought": true},
+              {"text": "本文"}
+            ]}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5}}"""
+        )
+        assertTrue(ok is com.example.novelscraper.translation.v2.domain.LlmResult.Success)
+        assertEquals("本文", (ok as com.example.novelscraper.translation.v2.domain.LlmResult.Success).text)
+        assertEquals(10, ok.promptTokens)
+        // プロンプト拒否は確定失敗
+        val blocked = parseGeminiResponse(200, """{"promptFeedback": {"blockReason": "SAFETY"}}""")
+        assertTrue(blocked is com.example.novelscraper.translation.v2.domain.LlmResult.Failure)
+        val bf = (blocked as com.example.novelscraper.translation.v2.domain.LlmResult.Failure).failure
+        assertEquals(
+            com.example.novelscraper.translation.v2.domain.FailureKind.BLOCKED_DETERMINISTIC,
+            bf.kind
+        )
+        // 429日次分離
+        val daily = parseGeminiResponse(429, "GenerateRequestsPerDayPerProjectPerModel")
+        val df = (daily as com.example.novelscraper.translation.v2.domain.LlmResult.Failure).failure
+        assertEquals(com.example.novelscraper.translation.v2.domain.FailureKind.QUOTA_DAILY, df.kind)
+
+        val orOk = parseOpenRouterResponse(
+            200,
+            """{"choices": [{"message": {"content": "訳文"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 7}}"""
+        )
+        assertTrue(orOk is com.example.novelscraper.translation.v2.domain.LlmResult.Success)
+        assertEquals(7, (orOk as com.example.novelscraper.translation.v2.domain.LlmResult.Success).completionTokens)
+        val orCut = parseOpenRouterResponse(200, """{"choices": [{"message": {}, "finish_reason": "length"}]}""")
+        val cf = (orCut as com.example.novelscraper.translation.v2.domain.LlmResult.Failure).failure
+        assertEquals(com.example.novelscraper.translation.v2.domain.FailureKind.FATAL, cf.kind)
+    }
+
+    @Test
+    fun testSendGate_Serializes() = kotlinx.coroutines.runBlocking {
+        val gate = com.example.novelscraper.translation.v2.domain.V2SendGate()
+        val testScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
+        val start = System.currentTimeMillis()
+        val jobs = listOf(1, 2, 3).map {
+            testScope.async {
+                gate.acquire(100)
+            }
+        }
+        jobs.awaitAll()
+        // 3 serialized slots with 100ms interval take at least 200ms.
+        assertTrue(System.currentTimeMillis() - start >= 150)
+    }
+
+    @Test
+    fun testSendGate_NoWaitWhenIdle() = kotlinx.coroutines.runBlocking {
+        var now = 1_000_000L
+        val gate = com.example.novelscraper.translation.v2.domain.V2SendGate(clockMs = { now })
+        gate.acquire(10_000)
+        now += 20_000
+        val start = System.currentTimeMillis()
+        gate.acquire(10_000)
+        // Interval already elapsed: returns without real delay.
+        assertTrue(System.currentTimeMillis() - start < 5_000)
+    }
+}

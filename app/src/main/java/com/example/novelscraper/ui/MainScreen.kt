@@ -36,6 +36,8 @@ import com.example.novelscraper.*
 import com.example.novelscraper.scraper.*
 import com.example.novelscraper.translation.llm.engine.LlmEngineState
 import com.example.novelscraper.translation.llm.ui.LlmSettingsDialog
+import com.example.novelscraper.translation.v2.ui.V2TranslationPanel
+import com.example.novelscraper.translation.v2.ui.V2TranslationViewModel
 import com.example.novelscraper.ui.components.*
 import com.example.novelscraper.ui.theme.AppColors
 import kotlinx.coroutines.flow.debounce
@@ -431,9 +433,11 @@ fun MainScreen(
                         )
                     }
                     PanelType.TRANSLATION -> {
+                        val v2ViewModel: V2TranslationViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
                         TranslationPanel(
                             uiState = uiState,
                             llmConfig = viewModel.getLlmConfig(),
+                            v2Content = { V2TranslationPanel(viewModel = v2ViewModel) },
                             onSelectEngineTab = { engine -> viewModel.setActiveTranslationEngine(engine) },
                             onSelectFolderClick = { folderLauncher.launch(null) },
                             onRemoveFolderClick = { engine, index -> viewModel.removeTranslationFolder(engine, index) },

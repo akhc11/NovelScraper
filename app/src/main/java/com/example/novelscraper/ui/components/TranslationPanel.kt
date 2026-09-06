@@ -4,6 +4,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -53,7 +54,8 @@ fun TranslationPanel(
     onToggleWebSplit: ((Boolean) -> Unit)? = null,
     onUpdateWebSplitSize: ((Int) -> Unit)? = null,
     onUpdateInputEncoding: ((String) -> Unit)? = null,
-    onCloseClick: () -> Unit
+    onCloseClick: () -> Unit,
+    v2Content: @Composable ColumnScope.() -> Unit = {}
 ) {
     val activeEngine = uiState.activeTranslationEngine
     val engineState = uiState.currentEngineState
@@ -184,7 +186,7 @@ fun TranslationPanel(
             Spacer(modifier = Modifier.height(10.dp))
 
             if (activeEngine == TranslationEngine.LLM_API) {
-                // LLM 専用パネル
+                // LLM 専用パネル（旧実装。v2切替までは維持し、新旧比較用にv2入口を並べる）
                 LlmTranslationPanel(
                     uiState = uiState,
                     config = llmConfig,
@@ -195,6 +197,8 @@ fun TranslationPanel(
                     onStartClick = { onStartTranslationClick(TranslationEngine.LLM_API) },
                     onStopClick = { onStopTranslationClick(TranslationEngine.LLM_API) }
                 )
+                Spacer(modifier = Modifier.height(10.dp))
+                v2Content()
             } else {
                 // Web 翻訳パネル (Google / DeepL)
                 Row(

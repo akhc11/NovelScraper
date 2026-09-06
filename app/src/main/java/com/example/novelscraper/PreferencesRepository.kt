@@ -49,6 +49,7 @@ class PreferencesRepository(private val context: Context) {
         val PAPAGO_FILE_DELAY = stringPreferencesKey("papago_file_delay")
         val WEB_SPLIT_ENABLED = stringPreferencesKey("web_split_enabled")
         val WEB_SPLIT_SIZE_CHARS = stringPreferencesKey("web_split_size_chars")
+        val INPUT_ENCODING = stringPreferencesKey("input_encoding")
         val LLM_CONFIG = stringPreferencesKey("llm_translation_config_v2")
     }
 
@@ -133,6 +134,17 @@ class PreferencesRepository(private val context: Context) {
     suspend fun saveWebSplitSizeChars(sizeChars: Int) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.WEB_SPLIT_SIZE_CHARS] = sizeChars.coerceAtLeast(500).toString()
+        }
+    }
+
+    val inputEncodingFlow: Flow<String> = context.dataStore.data
+        .distinctUntilChangedBy { it[PreferencesKeys.INPUT_ENCODING] }
+        .map { it[PreferencesKeys.INPUT_ENCODING] ?: "AUTO" }
+        .flowOn(Dispatchers.IO)
+
+    suspend fun saveInputEncoding(value: String) = withContext(Dispatchers.IO) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.INPUT_ENCODING] = value
         }
     }
 

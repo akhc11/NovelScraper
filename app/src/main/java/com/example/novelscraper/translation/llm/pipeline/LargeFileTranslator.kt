@@ -248,7 +248,7 @@ object LargeFileTranslator {
                                     retryCount++
                                     continue
                                 } else {
-                                    // OpenRouter/Groq等：Retry-After指定があれば従い、なければ5秒
+                                    // OpenRouter等：Retry-After指定があれば従い、なければ5秒
                                     val waitSec = apiResult.retryAfterSec
                                         .takeIf { it > 0 }?.toLong()?.coerceIn(5, 120) ?: RETRY_DELAY_SEC.toLong()
                                     onLog("    ⏳ 再試行待機 (${waitSec}秒)...")

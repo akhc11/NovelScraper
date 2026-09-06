@@ -276,7 +276,7 @@ fun LlmTranslationPanel(
         // 開始プリフライト: モデル0件・キー未設定では開始不可
         val hasModel = config.modelProfiles.isNotEmpty()
         val hasKey = config.geminiApiKeys.any { it.isNotBlank() } ||
-                config.openRouterApiKey.isNotBlank() || config.groqApiKey.isNotBlank()
+                config.openRouterApiKey.isNotBlank()
         val startBlockedReason = when {
             !hasModel -> "モデル未登録のため開始できません (詳細設定で追加)"
             !hasKey -> "APIキー未設定のため開始できません (詳細設定で入力)"

@@ -4,8 +4,11 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
-import com.example.novelscraper.translation.common.UniversalCharsetDetector
+import com.example.novelscraper.PreferencesRepository
+import com.example.novelscraper.translation.common.ingest.DeclaredEncoding
+import com.example.novelscraper.translation.common.ingest.TextIngest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -114,7 +117,8 @@ class TranslationFileStore(
     }
 
     /**
-     * 指定されたファイルのテキストを万能文字コード自動判別（Unicode / 韓国語 / 中国語 / 日本語）で読み込む。
+     * 指定されたファイルのテキストを取込エンジン (BOM / UTF-8 / 韓中日 / 単バイト族) で読み込む。
+     * 判定不能時は例外 (Result.failure) とし、化けたテキストを残さない。
      */
     suspend fun readTextFile(fileUri: Uri): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
@@ -127,7 +131,12 @@ class TranslationFileStore(
                 } ?: throw IllegalStateException("Failed to open input stream for: $fileUri")
             }
 
-            UniversalCharsetDetector.decodeBytes(bytes)
+            val declared = try {
+                DeclaredEncoding.parseOrNull(PreferencesRepository(context).inputEncodingFlow.first())
+            } catch (_: Exception) {
+                null
+            }
+            TextIngest.ingest(bytes, declared).getOrThrow()
         }
     }
 

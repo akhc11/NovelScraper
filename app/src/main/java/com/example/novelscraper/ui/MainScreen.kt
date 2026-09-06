@@ -444,6 +444,7 @@ fun MainScreen(
                             onStopTranslationClick = { engine -> viewModel.stopTranslation(engine) },
                             onToggleWebSplit = { enabled -> viewModel.toggleWebSplit(enabled) },
                             onUpdateWebSplitSize = { sizeChars -> viewModel.updateWebSplitSizeChars(sizeChars) },
+                            onUpdateInputEncoding = { value -> viewModel.updateInputEncoding(value) },
                             onOpenWebTranslateClick = { engine ->
                                 val targetUrl = when (engine) {
                                     TranslationEngine.GOOGLE -> "https://translate.google.com/?sl=auto&tl=ja&op=translate"

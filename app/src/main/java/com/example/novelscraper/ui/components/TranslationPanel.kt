@@ -13,6 +13,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,6 +33,7 @@ import com.example.novelscraper.MainUiState
 import com.example.novelscraper.TranslationEngine
 import com.example.novelscraper.translation.web.*
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
+import com.example.novelscraper.translation.common.ingest.ENCODING_OPTIONS
 import com.example.novelscraper.translation.llm.ui.LlmTranslationPanel
 import com.example.novelscraper.ui.theme.AppColors
 
@@ -50,6 +52,7 @@ fun TranslationPanel(
     onOpenWebTranslateClick: (TranslationEngine) -> Unit,
     onToggleWebSplit: ((Boolean) -> Unit)? = null,
     onUpdateWebSplitSize: ((Int) -> Unit)? = null,
+    onUpdateInputEncoding: ((String) -> Unit)? = null,
     onCloseClick: () -> Unit
 ) {
     val activeEngine = uiState.activeTranslationEngine
@@ -415,6 +418,56 @@ fun TranslationPanel(
                                 }
                             }
                         )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        var encodingMenuExpanded by remember { mutableStateOf(false) }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "入力文字コード:",
+                                color = AppColors.textSecondary,
+                                fontSize = 11.sp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .height(32.dp)
+                                    .background(AppColors.surfaceMedium, RoundedCornerShape(4.dp))
+                                    .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
+                                    .clickable(enabled = !engineState.isTranslating) { encodingMenuExpanded = true }
+                                    .padding(horizontal = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = ENCODING_OPTIONS.firstOrNull { it.first == uiState.inputEncoding }?.second
+                                            ?: "自動判定",
+                                        color = AppColors.textPrimary,
+                                        fontSize = 11.sp
+                                    )
+                                    Icon(Icons.Filled.ArrowDropDown, contentDescription = "入力文字コード", tint = Color.White, modifier = Modifier.size(18.dp))
+                                }
+                                DropdownMenu(
+                                    expanded = encodingMenuExpanded,
+                                    onDismissRequest = { encodingMenuExpanded = false },
+                                    modifier = Modifier.background(AppColors.surfaceDark)
+                                ) {
+                                    ENCODING_OPTIONS.forEach { option ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = "${if (option.first == uiState.inputEncoding) "✓ " else ""}${option.second}",
+                                                    color = if (option.first == uiState.inputEncoding) AppColors.accentTealLight else AppColors.textPrimary,
+                                                    fontSize = 11.sp
+                                                )
+                                            },
+                                            onClick = {
+                                                onUpdateInputEncoding?.invoke(option.first)
+                                                encodingMenuExpanded = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(6.dp))

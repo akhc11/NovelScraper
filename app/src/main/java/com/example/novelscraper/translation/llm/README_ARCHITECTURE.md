@@ -19,7 +19,7 @@
 8. [プロンプト構成 & 順序決定ロジック (TranslationPrompts / PromptBuilder)](#8-プロンプト構成--順序決定ロジック-translationprompts--promptbuilder)
 9. [品質検証バリデーション (TranslationQualityValidator)](#9-品質検証バリデーション-translationqualityvalidator)
 10. [APIキープール & モデルローテーション (耐障害性)](#10-apiキープール--モデルローテーション-耐障害性)
-11. [多言語LLM APIクライアント仕様 (Gemini / OpenRouter / Groq)](#11-多言語llm-apiクライアント仕様-gemini--openrouter--groq)
+11. [多言語LLM APIクライアント仕様 (Gemini / OpenRouter)](#11-多言語llm-apiクライアント仕様-gemini--openrouter)
 12. [過去のミスの教訓 & 絶対禁止事項 (アンチパターン集)](#12-過去のミスの教訓--絶対禁止事項-アンチパターン集)
 
 ---
@@ -290,24 +290,23 @@ APIから応答が返ってきた際、以下の5重チェックをパスした�
    - 一時的なレート制限（RPM / TPM）の場合は、指定秒数（`geminiCooldownSec`）のクールダウン後に自動復活。
    - 全キーが一時制限中の場合は、最短クールダウン解除まで自動待機してワーカーの即死・自滅を防止。
 3. **3重多層リトライ構造**:
-   - 第1層: **ドライバーループ**（Gemini ➔ OpenRouter ➔ Groq などのモデル巡回）
+    - 第1層: **ドライバーループ**（Gemini ➔ OpenRouter などのモデル巡回）
    - 第2層: **プロンプトループ**（通常プロンプト ➔ リトライ用プロンプト等）
    - 第3層: **ネットワークリトライループ**（同一モデル内でのキー切り替え・429待機）
 
 ---
 
-## 11. 多言語LLM APIクライアント仕様 (Gemini / OpenRouter / Groq)
+## 11. 多言語LLM APIクライアント仕様 (Gemini / OpenRouter)
 
 ### 11.1 Gemini (`GeminiApiClient`)
 - **排他制御**: `thinkingBudget` と `thinkingLevel` は Google API 仕様上、同時指定すると 400 エラーになるため完全排他制御。
 - **temperature 制御**: Gemini 3.x Flash などの temperature 非対応モデルでは、temperature パラメータを JSON に含めずに送信。
 - **429 解析**: エラーレスポンスを最大3,000文字取得し、`ApiKeyPoolManager` へ渡して高精度に RPD/RPM を判別。
 
-### 11.2 OpenRouter / Groq (`OpenAiCompatibleClient`)
+### 11.2 OpenRouter (`OpenAiCompatibleClient`)
 - **思考モード (Reasoning)**:
   - DeepSeek V3.2系: `reasoning: {enabled: false}`
   - DeepSeek V4系 / OpenAI o系: `reasoning: {effort: "none"|"low"|"medium"|"high"}`
-  - Groq系: トップレベルに `reasoning_effort` を送信（モデル名ではなくプロバイダーで判定）。
 - **プロバイダー固定**: `provider.order`（例: `["upstage", "together"]`）および `provider.allow_fallbacks` による安価・高速プロバイダーのルーティング制御。
 - **HTTP ヘッダー**: `HTTP-Referer` および `X-Title: NovelScraper2` を付与。
 

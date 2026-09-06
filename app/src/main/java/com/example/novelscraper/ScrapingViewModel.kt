@@ -104,6 +104,11 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 _uiState.update { it.copy(webSplitSizeChars = sizeChars) }
             }
         }
+        viewModelScope.launch {
+            translationManager.inputEncoding.collect { encoding ->
+                _uiState.update { it.copy(inputEncoding = encoding?.name ?: "AUTO") }
+            }
+        }
         translationManager.onActivityChanged = { syncServiceStatus() }
 
         viewModelScope.launch {
@@ -441,6 +446,10 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     fun updateWebSplitSizeChars(sizeChars: Int) {
         translationManager.updateWebSplitSizeChars(sizeChars)
+    }
+
+    fun updateInputEncoding(value: String) {
+        translationManager.updateInputEncoding(value)
     }
 
     fun updateTranslationDelays(engine: TranslationEngine, chunkDelay: String, fileDelay: String) {

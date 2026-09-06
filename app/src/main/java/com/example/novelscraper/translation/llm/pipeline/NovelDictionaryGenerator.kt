@@ -12,11 +12,14 @@ import com.example.novelscraper.translation.llm.api.LlmRetryPolicy
 import com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient
 import com.example.novelscraper.translation.llm.engine.DictSampleMode
 import com.example.novelscraper.translation.llm.engine.LlmProvider
+import com.example.novelscraper.translation.llm.rotation.ApiKeyPoolManager
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
 import java.util.concurrent.ConcurrentHashMap
@@ -26,6 +29,16 @@ data class NovelDictionary(
     val style: String = "カタカナ",
     val characters: Map<String, String> = emptyMap(),
     val genders: Map<String, String> = emptyMap() // 原文名 -> "男" | "女"
+)
+
+/**
+ * `.dict_building/manifest.json` の形式。バッチ番号→抽出元テキストのSHA-256。
+ * フォルダ変更による陳腐キャッシュ混入を検出するための対応表。
+ */
+@Serializable
+data class DictBuildManifest(
+    val version: Int = 1,
+    val batches: Map<String, String> = emptyMap()
 )
 /**
  * 辞書生成用 スレッドセーフなキークールダウントラッカー。
@@ -338,6 +351,42 @@ object NovelDictionaryGenerator {
     }
 
     /**
+     * 部分マージ可否の純粋判定 (単体テスト用に分離)。
+     * 1件以上の成功があり、欠けが確定的失敗のみ (一時的失敗なし) の場合のみ true。
+     */
+    fun shouldMergePartial(totalBatches: Int, completedCount: Int, hasTransientFailure: Boolean): Boolean {
+        return totalBatches > 0 && completedCount in 1 until totalBatches && !hasTransientFailure
+    }
+
+    /**
+     * 抽出元テキストのSHA-256 (16進64文字)。キャッシュ検証用。
+     */
+    fun sha256Hex(text: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        return digest.digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * バッチキャッシュ再利用可否の純粋判定 (単体テスト用に分離)。
+     * manifestなし・該当エントリなしは旧版キャッシュとして信頼 (移行時の全再生成を回避)。
+     * エントリありの不一致のみ再取得する。
+     */
+    fun isBatchCacheFresh(manifestBatches: Map<String, String>?, batchFileName: String, batchText: String): Boolean {
+        if (manifestBatches == null) return true
+        val expected = manifestBatches[batchFileName] ?: return true
+        return expected == sha256Hex(batchText)
+    }
+
+    private fun parseBuildManifest(raw: String?): DictBuildManifest? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            LlmApiClient.json.decodeFromString(DictBuildManifest.serializer(), raw)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
      * 複数パートから辞書をキープール分散並列で抽出し、マージ＆最終レビューを経て確定する。
      * 途中で停止した場合の中断再開 (レジューム) と、不完全マージ防止ガードに対応。
      */
@@ -359,9 +408,23 @@ object NovelDictionaryGenerator {
         parallelCount: Int = 4,
         requestDelaySec: Int = 0,
         cooldown429Sec: Int = 60,
-        onLog: (String) -> Unit = {}
+        onLog: (String) -> Unit = {},
+        // 共有キー枯渇プール (GEMINI時のみ呼出側が渡す。辞書検知の429もRPD/RPM判別で登録し、
+        // RPD枯渇を翻訳側の中止判定に可視化する。null時は従来通りローカル追跡のみ)
+        sharedKeyPool: ApiKeyPoolManager? = null,
+        // 辞書生成の thinkingLevel (Geminiのみ有効。null=モデル既定。3.7/3.8系のminimalは送信時にmediumへ正規化)
+        thinkingLevel: String? = null
     ): NovelDictionary? = coroutineScope {
         val validApiKeys = apiKeys.filter { it.isNotBlank() }
+        // フィルタ後インデックス→プール(元リスト)インデックスの対応表。
+        // 技術的根拠1行: プールは元リスト基準で枯渇管理するため、空白混在時のズレ誤爆を防ぐ。
+        val poolIndexMap = apiKeys.mapIndexedNotNull { idx, key -> if (key.isNotBlank()) idx else null }
+        // 共有プールへの429報告 ((キー×モデル)ペアで記録。RPDは日次除外→中止判定に反映、RPMは一時冷却→自動復活)
+        suspend fun reportSharedQuota(filteredKeyIdx: Int, model: String, errorMessage: String) {
+            val pool = sharedKeyPool ?: return
+            val poolIdx = poolIndexMap.getOrNull(filteredKeyIdx) ?: return
+            pool.reportQuotaExceeded(poolIdx, model, errorMessage, cooldown429Sec)
+        }
         val targetFiles = selectSampleFiles(sampleFiles, maxTotalParts, sampleMode)
         if (targetFiles.isEmpty() || validApiKeys.isEmpty()) return@coroutineScope null
 
@@ -389,6 +452,37 @@ object NovelDictionaryGenerator {
 
         val keyTracker = DictKeyCooldownTracker(validApiKeys, cooldown429Sec)
 
+        // manifest対応表の読み込み (破損・旧版なしは空扱い→旧キャッシュ信頼で移行)。
+        // 技術的根拠1行: 番号と内容の対応ずれ (フォルダ変更) を検出して古い断片の混入を防ぐ。
+        val manifestFileName = "manifest.json"
+        val manifestCache = ConcurrentHashMap<String, String>()
+        runCatching {
+            val manifestDoc = dictBuildingDir.findFile(manifestFileName)
+            parseBuildManifest(manifestDoc?.let { readDocContent(context, it) })
+                ?.batches?.let { manifestCache.putAll(it) }
+        }
+        val manifestMutex = Mutex()
+        suspend fun persistManifest() {
+            try {
+                val doc = dictBuildingDir.findFile(manifestFileName)
+                    ?: dictBuildingDir.createFile("application/json", manifestFileName)
+                if (doc != null) {
+                    writeDocContent(
+                        context,
+                        doc,
+                        LlmApiClient.json.encodeToString(DictBuildManifest.serializer(), DictBuildManifest(batches = manifestCache.toMap()))
+                    )
+                }
+            } catch (e: Exception) {
+                // manifest保存失敗は検証持ち越しで続行 (従来動作に劣化、翻訳は止めない)
+                onLog("  ⚠️ 辞書生成: manifest保存失敗 (${e.message})。キャッシュ検証は次回持ち越し")
+            }
+        }
+
+        // 失敗種別の集計 (スレッドセーフ)。欠けが確定的失敗のみ→部分マージ可、一時的失敗混じり→次回持ち越し。
+        val deterministicFailedBatches = ConcurrentHashMap.newKeySet<Int>()
+        val transientFailedBatches = ConcurrentHashMap.newKeySet<Int>()
+
         // 各バッチの処理（キープール分散ラウンドロビン ＆ 共有クールダウントラッカー ＆ 自動リトライ）
         val deferredResults = smartBatches.mapIndexed { index, batchText ->
             val batchNum = index + 1
@@ -402,8 +496,12 @@ object NovelDictionaryGenerator {
                         if (!content.isNullOrBlank()) {
                             val parsed = parseDictionaryJson(content)
                             if (parsed != null && parsed.characters.isNotEmpty()) {
-                                onLog("  📖 辞書生成: バッチ $batchNum/$totalBatches (完了済 / スキップ [${parsed.characters.size}名])")
-                                return@withPermit content
+                                if (isBatchCacheFresh(manifestCache, batchFileName, batchText)) {
+                                    onLog("  📖 辞書生成: バッチ $batchNum/$totalBatches (完了済 / スキップ [${parsed.characters.size}名])")
+                                    return@withPermit content
+                                }
+                                onLog("  ⚠️ 辞書生成: バッチ $batchNum はフォルダ変更検知 (ハッシュ不一致) のため再取得します")
+                                try { existingBatchDoc.delete() } catch (_: Exception) {}
                             } else {
                                 onLog("  ⚠️ 辞書生成: バッチ $batchNum の既存キャッシュが破損/空のため再取得します")
                                 try { existingBatchDoc.delete() } catch (_: Exception) {}
@@ -416,6 +514,8 @@ object NovelDictionaryGenerator {
 
                     val maxRetries = (keyCount.coerceAtLeast(1) * 2).coerceIn(2, 6)
                     var preferredKeyIdx = (batchNum - 1) % keyCount
+                    var sawTransientFailure = false
+                    var sawDeterministicFailure = false
 
                     for (retry in 0..maxRetries) {
                         // 生存キーの探索（429中のキーは最初から1回も叩かず即スキップ！）
@@ -444,7 +544,8 @@ object NovelDictionaryGenerator {
                             prompt = BATCH_PROMPT,
                             sourceText = batchText,
                             providerOrder = providerOrder,
-                            providerAllowFallbacks = providerAllowFallbacks
+                            providerAllowFallbacks = providerAllowFallbacks,
+                            thinkingLevel = thinkingLevel
                         )
 
                         when (result) {
@@ -454,12 +555,18 @@ object NovelDictionaryGenerator {
                                 if (batchDoc != null) {
                                     writeDocContent(context, batchDoc, rawText)
                                 }
+                                manifestMutex.withLock {
+                                    manifestCache[batchFileName] = sha256Hex(batchText)
+                                    persistManifest()
+                                }
                                 onLog("  📖 辞書生成: バッチ $batchNum/$totalBatches 完了")
                                 return@withPermit rawText
                             }
                                                         is LlmApiResult.QuotaExceeded -> {
                                 // 429検知：全バッチに即座にクールダウンを共有！
+                                sawTransientFailure = true
                                 keyTracker.markCooldown(currentKeyIdx)
+                                reportSharedQuota(currentKeyIdx, model, result.message)
                                 if (retry < maxRetries) {
                                     val nextEntry = keyTracker.getAvailableKey(currentKeyIdx + 1)
                                     if (nextEntry != null) {
@@ -476,12 +583,20 @@ object NovelDictionaryGenerator {
                                     onLog("  ❌ [429 Quota Exceeded] バッチ $batchNum: 最大再試行回数に達しました")
                                 }
                             }
+                            is LlmApiResult.QualityError -> {
+                                // コンテンツブロック等は内容依存の確定的失敗 (他キーでも治らない) のため即切り上げ
+                                sawDeterministicFailure = true
+                                onLog("  🚫 [確定的失敗] バッチ $batchNum: 再試行せず除外候補に (${result.reason.take(120)})")
+                                break
+                            }
                             is LlmApiResult.ConfigError -> {
                                 // 設定不良はキー回ししても直らないため即中断（次回設定修正後に再開）
+                                sawDeterministicFailure = true
                                 onLog("  ⚙️ [設定エラー] バッチ $batchNum: (${result.kind}) ${result.kind.guidance()} ➔ ${result.message.take(200)}")
                                 break
                             }
                             else -> {
+                                sawTransientFailure = true
                                 if (retry < maxRetries) {
                                     // 503等の同時多発時は指数バックオフ＋ジッターで再送時刻を散らす
                                     delay(LlmRetryPolicy.backoffDelayMs(retry))
@@ -490,6 +605,8 @@ object NovelDictionaryGenerator {
                         }
                     }
 
+                    if (sawTransientFailure) transientFailedBatches.add(batchNum)
+                    else deterministicFailedBatches.add(batchNum)
                     onLog("  ⚠️ 辞書生成: バッチ $batchNum/$totalBatches 失敗")
                     null
                 }
@@ -505,10 +622,17 @@ object NovelDictionaryGenerator {
 
         val batchResults = deferredResults.awaitAll().filterNotNull()
 
-        // 【根本治療1】全バッチが100%揃っていない場合は不完全マージを固く禁止し、次回再開に安全保留する
-        if (batchResults.size < totalBatches) {
+        // 欠けあり時の振り分け。技術的根拠1行: ブロックは内容依存で再試行しても治らないため部分的成功で進め、
+        // 回復可能な一時的失敗(429・通信エラー)は品質確保のため次回持ち越しする (従来の不完全マージ防止を限定継承)。
+        if (batchResults.size < totalBatches &&
+            !shouldMergePartial(totalBatches, batchResults.size, transientFailedBatches.isNotEmpty())
+        ) {
             onLog("⚠️ 辞書生成: 未完了バッチが存在します (${batchResults.size}/$totalBatches バッチ完了)。辞書確定を保留し、次回未完了分から再開します。")
             return@coroutineScope null
+        }
+        if (batchResults.size < totalBatches) {
+            val skipped = deterministicFailedBatches.sorted().joinToString(",")
+            onLog("⚠️ 辞書生成: 確定的失敗バッチ[$skipped]を除外し ${batchResults.size}/$totalBatches 断片で部分マージします (除外範囲の人名は辞書漏れ→表記ゆれの可能性あり)")
         }
 
         // 1バッチのみの場合はレビューへ直接移行
@@ -543,7 +667,8 @@ object NovelDictionaryGenerator {
                     prompt = MERGE_PROMPT,
                     sourceText = mergeInput,
                     providerOrder = providerOrder,
-                    providerAllowFallbacks = providerAllowFallbacks
+                    providerAllowFallbacks = providerAllowFallbacks,
+                    thinkingLevel = thinkingLevel
                 )
 
                 when (mergeResult) {
@@ -559,6 +684,7 @@ object NovelDictionaryGenerator {
                     }
                     is LlmApiResult.QuotaExceeded -> {
                         keyTracker.markCooldown(mergeKeyIndex)
+                        reportSharedQuota(mergeKeyIndex, mergeModel, mergeResult.message)
                         if (mergeRetry < 2) {
                             onLog("  ⏳ [429 Quota Exceeded] 辞書マージ: キー[$mergeKeyDisplay]制限検知。別キーへ即時交代...")
                             delay(1000L)
@@ -606,7 +732,8 @@ object NovelDictionaryGenerator {
                 prompt = REVIEW_PROMPT,
                 sourceText = reviewInput,
                 providerOrder = providerOrder,
-                providerAllowFallbacks = providerAllowFallbacks
+                providerAllowFallbacks = providerAllowFallbacks,
+                thinkingLevel = thinkingLevel
             )
 
             when (reviewResult) {
@@ -619,6 +746,7 @@ object NovelDictionaryGenerator {
                 }
                 is LlmApiResult.QuotaExceeded -> {
                     keyTracker.markCooldown(reviewKeyIdx)
+                    reportSharedQuota(reviewKeyIdx, mergeModel, reviewResult.message)
                     if (reviewRetry < 1) {
                         onLog("  ⏳ [429 Quota Exceeded] 辞書レビュー: キー[$reviewKeyIndex]制限検知。別キーへ即時交代...")
                         delay(1000L)
@@ -661,7 +789,8 @@ object NovelDictionaryGenerator {
         prompt: String,
         sourceText: String,
         providerOrder: List<String> = emptyList(),
-        providerAllowFallbacks: Boolean? = null
+        providerAllowFallbacks: Boolean? = null,
+        thinkingLevel: String? = null
     ): LlmApiResult {
         // 辞書生成は短文出力のため10秒GATEをバイパスし、待機0秒・実効並行送信を可能にする
         return when (provider) {
@@ -670,10 +799,11 @@ object NovelDictionaryGenerator {
                     apiKey = apiKey,
                     model = model,
                     prompt = prompt,
-                    sourceText = sourceText
+                    sourceText = sourceText,
+                    thinkingLevel = thinkingLevel
                 )
             }
-            LlmProvider.OPENROUTER, LlmProvider.GROQ -> {
+            LlmProvider.OPENROUTER -> {
                 OpenAiCompatibleClient.chatCompletion(
                     apiKey = apiKey,
                     model = model,

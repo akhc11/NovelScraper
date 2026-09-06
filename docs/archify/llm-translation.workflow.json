@@ -115,8 +115,8 @@
       "lane": "input_lane",
       "col": 1,
       "type": "frontend",
-      "label": "Charset & Cleanse",
-      "sublabel": "UTF8/GBK/EUC-KR",
+      "label": "TextIngest",
+      "sublabel": "BOM/UTF8/Hypothesis/Gate",
       "width": 140
     },
     {

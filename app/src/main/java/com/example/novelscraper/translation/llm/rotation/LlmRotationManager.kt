@@ -6,8 +6,8 @@ import kotlinx.coroutines.delay
 /**
  * 1ワーカー専有型の Gemini ローテーションマネージャー。
  *
- * - 429発生時、専有中のキーのままモデルプロファイルを巡回。
- * - 全モデルを一周したら、現在のキーを 429 (RPD日次上限 or RPM一時制限) として登録し、新キーを確保。
+ * - 429発生時、専有中のキーのままモデルプロファイルを巡回 (枯渇ペアはスキップ)。
+ * - 全モデルを一周したら、現在のキー×モデルを 429 (RPD日次上限 or RPM一時制限) として登録し、新キーを確保。
  * - 一時制限で全キー待機中の場合は最短待機時間を自動待機して復活 (即死自滅を防止)。
  * - 当日枠が完全に枯渇した場合のみ isExhausted = true でワーカーを安全終了。
  */
@@ -45,8 +45,19 @@ class LlmRotationManager(
     ): Boolean {
         if (isExhausted || profiles.isEmpty()) return false
 
-        currentProfileIndex++
-        if (currentProfileIndex < profiles.size) {
+        // 429を出したモデル名を捕捉 ((キー×モデル)ペア報告用)
+        val failedModel = profiles.getOrNull(currentProfileIndex)?.modelName ?: ""
+        val profileModels = profiles.map { it.modelName }
+
+        // 同一キーで未枯渇の次モデルへ (枯渇ペアは飛ばして無駄打ち防止)
+        while (true) {
+            currentProfileIndex++
+            if (currentProfileIndex >= profiles.size) break
+            val candidate = profiles[currentProfileIndex].modelName
+            if (keyPoolManager?.isPairDead(currentKeyIndex, candidate) == true) {
+                onLog("⏭ [W#$workerId] 枯渇済みのためスキップ → キー[${currentKeyIndex + 1}] / $candidate")
+                continue
+            }
             val active = profiles[currentProfileIndex]
             onLog("🔁 [W#$workerId] モデル切替 → キー[${currentKeyIndex + 1}] / ${active.modelName}")
             return true
@@ -56,7 +67,7 @@ class LlmRotationManager(
         currentProfileIndex = 0
 
         if (keyPoolManager != null) {
-            val isDaily = keyPoolManager.reportQuotaExceeded(currentKeyIndex, errorMessage, switchCooldownSec)
+            val isDaily = keyPoolManager.reportQuotaExceeded(currentKeyIndex, failedModel, errorMessage, switchCooldownSec)
             if (isDaily) {
                 onLog("🛑 [W#$workerId] Gemini キー[${currentKeyIndex + 1}] は本日上限(RPD)に達しました (当日除外)")
             } else {
@@ -65,7 +76,7 @@ class LlmRotationManager(
 
             // 新しいキーの確保を試行 (一時クールダウン中は待機して自動復活)
             while (!isExhausted) {
-                when (val claimResult = keyPoolManager.claimAvailableKey(null)) {
+                when (val claimResult = keyPoolManager.claimAvailableKey(null, profileModels)) {
                     is KeyClaimResult.Success -> {
                         currentKeyIndex = claimResult.keyIndex
                         currentKey = claimResult.apiKey

@@ -6,12 +6,6 @@ import com.example.novelscraper.translation.llm.engine.ModelProfile
 import com.example.novelscraper.translation.llm.rotation.LlmRotationManager
 import kotlinx.serialization.json.JsonElement
 
-/** 推論パラメータの送り方（モデル名ではなくプロバイダー仕様で決める） */
-enum class ReasoningStyle {
-    STANDARD,
-    TOP_LEVEL_NONE
-}
-
 /**
  * プロバイダー差異の単一集約点。
  * 呼び出し側（engine/large）は provider による分岐を持たず、このハンドラーに聞くこと。
@@ -22,8 +16,6 @@ interface LlmProviderHandler {
 
     /** キーローテーション管理対象か（現状Gemini＋有効時のみtrue） */
     fun managesKeyRotation(config: LlmTranslationConfig): Boolean
-
-    fun reasoningStyle(): ReasoningStyle
 
     suspend fun call(
         config: LlmTranslationConfig,
@@ -38,8 +30,7 @@ interface LlmProviderHandler {
 
 fun handlerFor(provider: LlmProvider): LlmProviderHandler = when (provider) {
     LlmProvider.GEMINI -> GeminiHandler
-    LlmProvider.OPENROUTER -> OpenAiCompatibleHandler(LlmProvider.OPENROUTER)
-    LlmProvider.GROQ -> OpenAiCompatibleHandler(LlmProvider.GROQ)
+    LlmProvider.OPENROUTER -> OpenRouterHandler
 }
 
 object GeminiHandler : LlmProviderHandler {
@@ -47,8 +38,6 @@ object GeminiHandler : LlmProviderHandler {
 
     override fun managesKeyRotation(config: LlmTranslationConfig): Boolean =
         config.geminiRotationEnabled
-
-    override fun reasoningStyle(): ReasoningStyle = ReasoningStyle.STANDARD
 
     override suspend fun call(
         config: LlmTranslationConfig,
@@ -78,11 +67,10 @@ object GeminiHandler : LlmProviderHandler {
     }
 }
 
-class OpenAiCompatibleHandler(override val provider: LlmProvider) : LlmProviderHandler {
-    override fun managesKeyRotation(config: LlmTranslationConfig): Boolean = false
+object OpenRouterHandler : LlmProviderHandler {
+    override val provider: LlmProvider = LlmProvider.OPENROUTER
 
-    override fun reasoningStyle(): ReasoningStyle =
-        if (provider == LlmProvider.GROQ) ReasoningStyle.TOP_LEVEL_NONE else ReasoningStyle.STANDARD
+    override fun managesKeyRotation(config: LlmTranslationConfig): Boolean = false
 
     override suspend fun call(
         config: LlmTranslationConfig,
@@ -93,14 +81,10 @@ class OpenAiCompatibleHandler(override val provider: LlmProvider) : LlmProviderH
         responseMimeType: String?,
         responseSchema: JsonElement?
     ): LlmApiResult {
-        val (apiKey, endpoint) = when (provider) {
-            LlmProvider.OPENROUTER -> config.openRouterApiKey to config.openRouterEndpoint
-            else -> config.groqApiKey to config.groqEndpoint
-        }
         return OpenAiCompatibleClient.chatCompletion(
-            apiKey = apiKey,
+            apiKey = config.openRouterApiKey,
             model = profile.modelName,
-            endpoint = endpoint,
+            endpoint = config.openRouterEndpoint,
             prompt = prompt,
             sourceText = sourceText,
             temperature = profile.temperature,
@@ -109,8 +93,7 @@ class OpenAiCompatibleHandler(override val provider: LlmProvider) : LlmProviderH
             providerOrder = profile.providerOrder,
             providerAllowFallbacks = profile.providerAllowFallbacks,
             reasoningEffort = profile.reasoningEffort,
-            reasoningEnabled = profile.reasoningEnabled,
-            topLevelReasoningNone = reasoningStyle() == ReasoningStyle.TOP_LEVEL_NONE
+            reasoningEnabled = profile.reasoningEnabled
         )
     }
 }

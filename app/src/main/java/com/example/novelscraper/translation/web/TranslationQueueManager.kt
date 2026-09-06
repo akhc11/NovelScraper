@@ -6,6 +6,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.common.NovelPhysicalSplitter
+import com.example.novelscraper.translation.common.ingest.DeclaredEncoding
 import com.example.novelscraper.translation.llm.engine.LlmEngineState
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.llm.engine.LlmTranslationEngine
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -75,6 +77,10 @@ class TranslationQueueManager(
     val webSplitSizeChars: StateFlow<Int> = repository.webSplitSizeCharsFlow
         .stateIn(scope, SharingStarted.Eagerly, 8000)
 
+    val inputEncoding: StateFlow<DeclaredEncoding?> = repository.inputEncodingFlow
+        .map { DeclaredEncoding.parseOrNull(it) }
+        .stateIn(scope, SharingStarted.Eagerly, null)
+
     init {
         // 待機時間設定の購読（DataStore の保存値を常に反映）
         scope.launch {
@@ -124,6 +130,12 @@ class TranslationQueueManager(
     fun updateWebSplitSizeChars(sizeChars: Int) {
         scope.launch {
             repository.saveWebSplitSizeChars(sizeChars)
+        }
+    }
+
+    fun updateInputEncoding(value: String) {
+        scope.launch {
+            repository.saveInputEncoding(value)
         }
     }
 
@@ -340,6 +352,7 @@ class TranslationQueueManager(
                         fileDoc = currentDoc,
                         splitRootDir = splitRootDir,
                         splitSizeChars = webSplitSizeChars.value,
+                        declared = inputEncoding.value,
                         onLog = { msg -> onShowMessage?.invoke(msg, false) }
                     )
 

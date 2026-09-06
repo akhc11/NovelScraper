@@ -781,6 +781,102 @@ class LlmPipelineTest {
     }
 
     @Test
+    fun testApiKeyPoolManager_PermanentExhaustion() = kotlinx.coroutines.runBlocking {
+        // キー未登録は枯渇扱い
+        assertTrue(com.example.novelscraper.translation.llm.rotation.ApiKeyPoolManager(emptyList()).isPermanentlyExhausted(listOf("gemini-3.5-flash")))
+
+        val lite = "gemini-3.1-flash-lite"
+        val flash = "gemini-3.5-flash"
+        val pool = com.example.novelscraper.translation.llm.rotation.ApiKeyPoolManager(listOf("key-1", "key-2"))
+        // 初期状態・専有のみでは枯渇しない
+        assertFalse(pool.isPermanentlyExhausted(listOf(lite, flash)))
+        pool.claimNewKey()
+        pool.claimNewKey()
+        assertFalse(pool.isPermanentlyExhausted(listOf(lite, flash)))
+
+        // RPM一時制限のみでは枯渇しない (復活見込みあり)
+        pool.reportQuotaExceeded(0, lite, "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", 15)
+        assertFalse(pool.isPermanentlyExhausted(listOf(lite, flash)))
+
+        // liteがキー0でRPD枯渇 → liteはキー1で生存、flashは無傷
+        pool.reportQuotaExceeded(0, lite, "GenerateRequestsPerDayPerProjectPerModel-FreeTier", 15)
+        assertTrue(pool.isPairDead(0, lite))
+        assertFalse(pool.isPairDead(1, lite))
+        assertFalse(pool.isPairDead(0, flash))
+        assertFalse(pool.isPermanentlyExhausted(listOf(lite)))
+        assertFalse(pool.isPermanentlyExhausted(listOf(flash)))
+        assertFalse(pool.isPermanentlyExhausted(listOf(lite, flash)))
+
+        // liteが全キー枯渇 → liteのみ枯渇扱い (同キー上のflashは継続可)
+        pool.reportQuotaExceeded(1, lite, "GenerateRequestsPerDayPerProjectPerModel-FreeTier", 15)
+        assertTrue(pool.isPermanentlyExhausted(listOf(lite)))
+        assertFalse(pool.isPermanentlyExhausted(listOf(flash)))
+        assertFalse(pool.isPermanentlyExhausted(listOf(lite, flash)))
+
+        // 全モデル×全キー枯渇で初めて全体枯渇
+        pool.reportQuotaExceeded(0, flash, "GenerateRequestsPerDayPerProjectPerModel-FreeTier", 15)
+        pool.reportQuotaExceeded(1, flash, "GenerateRequestsPerDayPerProjectPerModel-FreeTier", 15)
+        assertTrue(pool.isPermanentlyExhausted(listOf(lite, flash)))
+    }
+
+    @Test
+    fun testGeminiApiClient_ThinkingSupported() {
+        val api = com.example.novelscraper.translation.llm.api.GeminiApiClient
+        // Gemma系は thinking 非対応 (送信時400報告あり)
+        assertFalse(api.thinkingSupported("gemma-4-31b-it"))
+        assertFalse(api.thinkingSupported("  GEMMA-3-27B-IT "))
+        // Gemini系は対応
+        assertTrue(api.thinkingSupported("gemini-3.5-flash"))
+        assertTrue(api.thinkingSupported("gemini-3.8-flash"))
+        assertTrue(api.thinkingSupported("gemini-3-flash-preview"))
+        assertTrue(api.thinkingSupported("gemini-3.1-flash-lite"))
+    }
+
+    @Test
+    fun testLlmTranslationConfig_DictThinkingDefault() {
+        // 既定は未指定(null)＝従来のモデル既定動作を維持
+        assertNull(com.example.novelscraper.translation.llm.engine.LlmTranslationConfig().dictThinkingLevel)
+    }
+
+    @Test
+    fun testDictBuildManifest_HashValidation() {
+        val gen = com.example.novelscraper.translation.llm.pipeline.NovelDictionaryGenerator
+        // SHA-256既知ベクトル (空文字)
+        assertEquals(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            gen.sha256Hex("")
+        )
+        val text = "これは勇者に関する物語です"
+        val hash = gen.sha256Hex(text)
+        assertEquals(64, hash.length)
+        assertEquals(hash, gen.sha256Hex(text))
+        assertTrue(hash != gen.sha256Hex("$text。"))
+
+        // manifestなし・該当エントリなしは旧版キャッシュとして信頼
+        assertTrue(gen.isBatchCacheFresh(null, "batch_0001.json", text))
+        assertTrue(gen.isBatchCacheFresh(emptyMap(), "batch_0001.json", text))
+        // 一致は再利用、不一致は再取得
+        assertTrue(gen.isBatchCacheFresh(mapOf("batch_0001.json" to hash), "batch_0001.json", text))
+        assertFalse(gen.isBatchCacheFresh(mapOf("batch_0001.json" to hash), "batch_0001.json", "$text。"))
+    }
+
+    @Test
+    fun testNovelDictionaryGenerator_ShouldMergePartial() {
+        val gen = com.example.novelscraper.translation.llm.pipeline.NovelDictionaryGenerator
+        // 全件成功時は部分マージ枠ではなく通常進行 (false)
+        assertFalse(gen.shouldMergePartial(totalBatches = 3, completedCount = 3, hasTransientFailure = false))
+        // 1件も成功なしは不可
+        assertFalse(gen.shouldMergePartial(totalBatches = 3, completedCount = 0, hasTransientFailure = false))
+        // 確定的失敗のみの欠け＋1件以上成功は部分マージ可
+        assertTrue(gen.shouldMergePartial(totalBatches = 3, completedCount = 2, hasTransientFailure = false))
+        assertTrue(gen.shouldMergePartial(totalBatches = 5, completedCount = 1, hasTransientFailure = false))
+        // 一時的失敗(429・通信エラー)混じりは次回持ち越し (false)
+        assertFalse(gen.shouldMergePartial(totalBatches = 3, completedCount = 2, hasTransientFailure = true))
+        // 異常系
+        assertFalse(gen.shouldMergePartial(totalBatches = 0, completedCount = 0, hasTransientFailure = false))
+    }
+
+    @Test
     fun testTranslationQualityValidator_ValidJapanese() {
         val src = "这是一个关于勇者的故事。他为了拯救王国踏上了旅程。"
         val translation = "これは勇者に関する物語です。彼は王国を救うために旅に出ました。"
@@ -796,9 +892,7 @@ class LlmPipelineTest {
             dictOpenRouterModel = "google/gemma-4-31b-it:free",
             dictOpenRouterMergeModel = "meta-llama/llama-3.3-70b-instruct:free",
             dictOpenRouterProviderOrder = listOf("upstage", "baidu/fp8"),
-            dictOpenRouterProviderAllowFallbacks = true,
-            dictGroqModel = "llama-3.3-70b-versatile",
-            dictGroqMergeModel = ""
+            dictOpenRouterProviderAllowFallbacks = true
         )
 
         // Gemini
@@ -808,10 +902,6 @@ class LlmPipelineTest {
         // OpenRouter
         assertEquals("google/gemma-4-31b-it:free", config.getEffectiveDictModel(com.example.novelscraper.translation.llm.engine.LlmProvider.OPENROUTER))
         assertEquals("meta-llama/llama-3.3-70b-instruct:free", config.getEffectiveDictMergeModel(com.example.novelscraper.translation.llm.engine.LlmProvider.OPENROUTER))
-
-        // Groq (空欄時は抽出モデルと同じ)
-        assertEquals("llama-3.3-70b-versatile", config.getEffectiveDictModel(com.example.novelscraper.translation.llm.engine.LlmProvider.GROQ))
-        assertEquals("llama-3.3-70b-versatile", config.getEffectiveDictMergeModel(com.example.novelscraper.translation.llm.engine.LlmProvider.GROQ))
 
         // OpenRouter ルーティング
         val openRouterConfig = config.copy(dictProvider = com.example.novelscraper.translation.llm.engine.LlmProvider.OPENROUTER)
@@ -878,22 +968,22 @@ class LlmPipelineTest {
     }
 
     @Test
-    fun testOpenAiReasoningPayload_TopLevelIsolation() {
-        // Groq方式（トップレベルnone）は effort があっても reasoning JSON を作らない
-        val (topReasoning, topEffort) =
-            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("high", null, topLevelNone = true)
-        assertNull(topReasoning)
-        assertEquals("none", topEffort)
-
-        // 通常モデルは effort JSON を組み立てる
+    fun testOpenAiReasoningPayload_Builds() {
+        // effort 指定は effort JSON を組み立てる
         val (reasoning, effort) =
             com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("high", null)
         assertNotNull(reasoning)
         assertEquals("high", effort)
 
-        // 明示の reasoning.enabled は方式に関わらず透過する
+        // none は reasoning JSON を作らない
+        val (noneReasoning, noneEffort) =
+            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("none", null)
+        assertNull(noneReasoning)
+        assertEquals("none", noneEffort)
+
+        // 明示の reasoning.enabled は透過する
         val (explicit, _) =
-            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("high", false, topLevelNone = true)
+            com.example.novelscraper.translation.llm.api.OpenAiCompatibleClient.reasoningPayload("high", false)
         assertNotNull(explicit)
     }
 
@@ -905,19 +995,9 @@ class LlmPipelineTest {
 
         assertTrue(handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.GEMINI).managesKeyRotation(config))
         assertFalse(handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.OPENROUTER).managesKeyRotation(config))
-        assertFalse(handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.GROQ).managesKeyRotation(config))
 
         val noRotation = config.copy(geminiRotationEnabled = false)
         assertFalse(handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.GEMINI).managesKeyRotation(noRotation))
-
-        assertEquals(
-            com.example.novelscraper.translation.llm.api.ReasoningStyle.TOP_LEVEL_NONE,
-            handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.GROQ).reasoningStyle()
-        )
-        assertEquals(
-            com.example.novelscraper.translation.llm.api.ReasoningStyle.STANDARD,
-            handlerFor(com.example.novelscraper.translation.llm.engine.LlmProvider.OPENROUTER).reasoningStyle()
-        )
     }
 
     @Test

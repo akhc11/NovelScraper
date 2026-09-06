@@ -33,6 +33,7 @@ import com.example.novelscraper.translation.llm.engine.LlmProvider
 import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.llm.engine.ModelProfile
 import com.example.novelscraper.translation.llm.engine.PromptOrderPreset
+import com.example.novelscraper.translation.common.ingest.ENCODING_OPTIONS
 import com.example.novelscraper.translation.llm.api.LlmHealthResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -72,7 +73,6 @@ fun LlmSettingsDialog(
     // 共通・APIキー設定
     var geminiKeysText by remember { mutableStateOf(currentConfig.geminiApiKeys.joinToString("\n")) }
     var openRouterKey by remember { mutableStateOf(currentConfig.openRouterApiKey) }
-    var groqKey by remember { mutableStateOf(currentConfig.groqApiKey) }
 
     var geminiRotationEnabled by remember { mutableStateOf(currentConfig.geminiRotationEnabled) }
     var geminiCooldownSecText by remember { mutableStateOf(currentConfig.geminiCooldownSec.toString()) }
@@ -81,6 +81,8 @@ fun LlmSettingsDialog(
     var enableCompletionMarker by remember { mutableStateOf(currentConfig.enableCompletionMarker) }
     var enableTextSplit by remember { mutableStateOf(currentConfig.enableTextSplit) }
     var textSplitSizeCharsText by remember { mutableStateOf(currentConfig.textSplitSizeChars.coerceAtLeast(500).toString()) }
+    var inputEncoding by remember { mutableStateOf(currentConfig.inputEncoding) }
+    var inputEncodingMenuExpanded by remember { mutableStateOf(false) }
 
     var enableDictGen by remember { mutableStateOf(currentConfig.enableDictGen) }
     var dictProvider by remember { mutableStateOf(currentConfig.dictProvider) }
@@ -93,8 +95,8 @@ fun LlmSettingsDialog(
     var dictOpenRouterProviderOrderText by remember { mutableStateOf(currentConfig.dictOpenRouterProviderOrder.joinToString(", ")) }
     var dictOpenRouterProviderAllowFallbacks by remember { mutableStateOf(currentConfig.dictOpenRouterProviderAllowFallbacks == true) }
 
-    var dictGroqModel by remember { mutableStateOf(currentConfig.dictGroqModel) }
-    var dictGroqMergeModel by remember { mutableStateOf(currentConfig.dictGroqMergeModel) }
+    var dictThinkingLevel by remember { mutableStateOf(currentConfig.dictThinkingLevel) }
+
     var dictSampleMode by remember { mutableStateOf(currentConfig.dictSampleMode) }
     var dictWorkerCountText by remember { mutableStateOf(currentConfig.dictWorkerCount.toString()) }
     var dictConcurrencyText by remember { mutableStateOf(currentConfig.dictConcurrencyPerWorker.toString()) }
@@ -197,7 +199,7 @@ fun LlmSettingsDialog(
                                     .padding(8.dp)
                             ) {
                                 Text(
-                                    text = "💡 リストの並び順がフォールバック（リトライ）優先順になります。\n例: #1 (Gemini) で失敗した場合、自動的に #2 (OpenRouter) や #3 (Groq) へ切り替えて同じファイルを再試行します。",
+                                    text = "💡 リストの並び順がフォールバック（リトライ）優先順になります。\n例: #1 (Gemini) で失敗した場合、自動的に #2 (OpenRouter) へ切り替えて同じファイルを再試行します。",
                                     color = AppColors.accentTealLight,
                                     fontSize = 10.sp,
                                     lineHeight = 14.sp
@@ -455,7 +457,6 @@ fun LlmSettingsDialog(
                                             val snapshot = currentConfig.copy(
                                                 geminiApiKeys = geminiKeysText.lines().map { it.trim() }.filter { it.isNotBlank() },
                                                 openRouterApiKey = openRouterKey.trim(),
-                                                groqApiKey = groqKey.trim()
                                             )
                                             com.example.novelscraper.translation.llm.api.LlmHealthCheck.ping(snapshot, target)
                                         },
@@ -511,16 +512,8 @@ fun LlmSettingsDialog(
                             }
 
                             Spacer(modifier = Modifier.height(4.dp))
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("OpenRouter APIキー:", color = AppColors.textSecondary, fontSize = 10.sp)
-                                    BasicInputArea(value = openRouterKey, onValueChange = { openRouterKey = it }, minLines = 1)
-                                }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("Groq APIキー:", color = AppColors.textSecondary, fontSize = 10.sp)
-                                    BasicInputArea(value = groqKey, onValueChange = { groqKey = it }, minLines = 1)
-                                }
-                            }
+                            Text("OpenRouter APIキー:", color = AppColors.textSecondary, fontSize = 10.sp)
+                            BasicInputArea(value = openRouterKey, onValueChange = { openRouterKey = it }, minLines = 1)
 
                             Spacer(modifier = Modifier.height(8.dp))
                             HorizontalDivider(color = Color.DarkGray)
@@ -586,6 +579,49 @@ fun LlmSettingsDialog(
                                 Text("物理分割文字数 (文字):", color = AppColors.textSecondary, fontSize = 9.sp)
                                 BasicInputArea(value = textSplitSizeCharsText, onValueChange = { textSplitSizeCharsText = it })
                                 Text("※例: 7000 ➔ 約7,000文字 (約2〜3話相当) 毎にパート分割", color = AppColors.textTertiary, fontSize = 8.sp)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text("入力文字コード (自動判定で化ける時のみ指定):", color = AppColors.textSecondary, fontSize = 9.sp)
+                                Box(
+                                    modifier = Modifier
+                                        .height(36.dp)
+                                        .background(AppColors.surfaceMedium, RoundedCornerShape(4.dp))
+                                        .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
+                                        .clickable { inputEncodingMenuExpanded = true }
+                                        .padding(horizontal = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = ENCODING_OPTIONS.firstOrNull { it.first == inputEncoding }?.second
+                                                ?: "自動判定",
+                                            color = AppColors.textPrimary,
+                                            fontSize = 11.sp
+                                        )
+                                        Icon(Icons.Default.ArrowDropDown, contentDescription = "入力文字コード", tint = Color.White, modifier = Modifier.size(18.dp))
+                                    }
+                                    DropdownMenu(
+                                        expanded = inputEncodingMenuExpanded,
+                                        onDismissRequest = { inputEncodingMenuExpanded = false },
+                                        modifier = Modifier.background(AppColors.surfaceDark)
+                                    ) {
+                                        ENCODING_OPTIONS.forEach { option ->
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        text = "${if (option.first == inputEncoding) "✓ " else ""}${option.second}",
+                                                        color = if (option.first == inputEncoding) AppColors.accentTealLight else AppColors.textPrimary,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = if (option.first == inputEncoding) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                },
+                                                onClick = {
+                                                    inputEncoding = option.first
+                                                    inputEncodingMenuExpanded = false
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(checked = enablePrevSrcContext, onCheckedChange = { enablePrevSrcContext = it })
@@ -676,7 +712,6 @@ fun LlmSettingsDialog(
                                     val currentDisplayModel = when (dictProvider) {
                                         LlmProvider.GEMINI -> dictGeminiModel
                                         LlmProvider.OPENROUTER -> dictOpenRouterModel
-                                        LlmProvider.GROQ -> dictGroqModel
                                     }
                                     Box(
                                         modifier = Modifier
@@ -693,7 +728,6 @@ fun LlmSettingsDialog(
                                                 when (dictProvider) {
                                                     LlmProvider.GEMINI -> dictGeminiModel = newVal
                                                     LlmProvider.OPENROUTER -> dictOpenRouterModel = newVal
-                                                    LlmProvider.GROQ -> dictGroqModel = newVal
                                                 }
                                             },
                                             singleLine = true,
@@ -729,7 +763,6 @@ fun LlmSettingsDialog(
                                     val currentDisplayMerge = when (dictProvider) {
                                         LlmProvider.GEMINI -> dictGeminiMergeModel
                                         LlmProvider.OPENROUTER -> dictOpenRouterMergeModel
-                                        LlmProvider.GROQ -> dictGroqMergeModel
                                     }
                                     Box(
                                         modifier = Modifier
@@ -746,7 +779,6 @@ fun LlmSettingsDialog(
                                                 when (dictProvider) {
                                                     LlmProvider.GEMINI -> dictGeminiMergeModel = newVal
                                                     LlmProvider.OPENROUTER -> dictOpenRouterMergeModel = newVal
-                                                    LlmProvider.GROQ -> dictGroqMergeModel = newVal
                                                 }
                                             },
                                             singleLine = true,
@@ -768,6 +800,38 @@ fun LlmSettingsDialog(
                                     ) {
                                         Text("モデル選択", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                     }
+                                }
+
+                                if (dictProvider == LlmProvider.GEMINI &&
+                                    com.example.novelscraper.translation.llm.api.GeminiApiClient.thinkingSupported(dictGeminiModel)
+                                ) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text("Thinking Level (辞書用):", color = AppColors.textSecondary, fontSize = 10.sp)
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        listOf(null to "未指定", "minimal" to "minimal", "low" to "low", "medium" to "medium", "high" to "high").forEach { (lvl, label) ->
+                                            val isSel = (dictThinkingLevel == lvl)
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .background(if (isSel) AppColors.accentTeal else AppColors.backgroundDark, RoundedCornerShape(3.dp))
+                                                    .clickable { dictThinkingLevel = lvl }
+                                                    .padding(vertical = 3.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(label, color = if (isSel) Color.White else AppColors.textSecondary, fontSize = 9.sp)
+                                            }
+                                        }
+                                    }
+                                    // 対応可否の判定は GeminiApiClient.supportsThinkingLevel に一本化 (二重定義禁止)
+                                    if (!com.example.novelscraper.translation.llm.api.GeminiApiClient.supportsThinkingLevel(dictGeminiModel, dictThinkingLevel)) {
+                                        Text(
+                                            "※このモデルはminimal未対応のため送信時にmediumとして扱われます",
+                                            color = Color(0xFFFFAA66),
+                                            fontSize = 8.sp
+                                        )
+                                    }
+                                    Text("※未指定はモデル既定 (現状維持)。短文抽出は low 推奨", color = AppColors.textTertiary, fontSize = 8.sp)
                                 }
 
                                 if (dictProvider == LlmProvider.OPENROUTER) {
@@ -918,7 +982,6 @@ fun LlmSettingsDialog(
                                 geminiRotationEnabled = geminiRotationEnabled,
                                 geminiCooldownSec = geminiCooldownSecText.toIntOrNull() ?: 15,
                                 openRouterApiKey = openRouterKey.trim(),
-                                groqApiKey = groqKey.trim(),
                                 modelProfiles = modelProfiles.map { it.copy(promptOrder = it.promptOrder.ifEmpty { listOf(1, 1) }) },
                                 promptPresets = promptPresets.toList(),
                                 customPrompts = customPromptsMap.toMap(),
@@ -926,17 +989,16 @@ fun LlmSettingsDialog(
                                 enableCompletionMarker = enableCompletionMarker,
                                 enableTextSplit = enableTextSplit,
                                 textSplitSizeChars = (textSplitSizeCharsText.toIntOrNull() ?: 7000).coerceAtLeast(500),
+                                inputEncoding = inputEncoding,
                                 enableDictGen = enableDictGen,
                                 dictProvider = dictProvider,
                                 dictModel = when (dictProvider) {
                                     LlmProvider.GEMINI -> dictGeminiModel.trim().ifBlank { "gemini-3.1-flash-lite" }
                                     LlmProvider.OPENROUTER -> dictOpenRouterModel.trim().ifBlank { "google/gemma-4-31b-it:free" }
-                                    LlmProvider.GROQ -> dictGroqModel.trim().ifBlank { "llama-3.3-70b-versatile" }
                                 },
                                 dictMergeModel = when (dictProvider) {
                                     LlmProvider.GEMINI -> dictGeminiMergeModel.trim()
                                     LlmProvider.OPENROUTER -> dictOpenRouterMergeModel.trim()
-                                    LlmProvider.GROQ -> dictGroqMergeModel.trim()
                                 },
                                 dictGeminiModel = dictGeminiModel.trim().ifBlank { "gemini-3.1-flash-lite" },
                                 dictGeminiMergeModel = dictGeminiMergeModel.trim(),
@@ -944,8 +1006,6 @@ fun LlmSettingsDialog(
                                 dictOpenRouterMergeModel = dictOpenRouterMergeModel.trim(),
                                 dictOpenRouterProviderOrder = dictOpenRouterProviderOrderText.split(Regex("[,、，\\s]+")).map { it.trim() }.filter { it.isNotBlank() },
                                 dictOpenRouterProviderAllowFallbacks = dictOpenRouterProviderAllowFallbacks,
-                                dictGroqModel = dictGroqModel.trim().ifBlank { "llama-3.3-70b-versatile" },
-                                dictGroqMergeModel = dictGroqMergeModel.trim(),
                                 dictSampleMode = dictSampleMode,
                                 dictTotalParts = dictTotalPartsText.toIntOrNull()?.coerceAtLeast(0) ?: 100,
                                 dictBatchMaxBytes = ((dictBatchMaxKbText.toIntOrNull() ?: 50) * 1000).coerceIn(4000, 200000),
@@ -954,6 +1014,7 @@ fun LlmSettingsDialog(
                                 dictParallelCount = ((dictWorkerCountText.toIntOrNull() ?: 6) * (dictConcurrencyText.toIntOrNull() ?: 5)).coerceIn(1, 30),
                                 dictRequestDelaySec = dictRequestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
                                 dict429CooldownSec = dict429CooldownSecText.toIntOrNull()?.coerceIn(5, 300) ?: 60,
+                                dictThinkingLevel = dictThinkingLevel,
                                 parallelWorkers = parallelWorkersText.toIntOrNull()?.coerceIn(1, 6) ?: 3,
                                 enablePrevSrcContext = enablePrevSrcContext,
                                 requestDelaySec = requestDelaySecText.toIntOrNull()?.coerceAtLeast(0) ?: 10,
@@ -1065,29 +1126,27 @@ fun LlmSettingsDialog(
                         modelProfiles.add(newProf.copy(promptOrder = currentBatchOrder, useCustomPromptOrder = false))
                         expandedModelId = newProf.id
                     }
-                    "DICT_EXTRACT" -> {
-                        dictProvider = newProf.provider
-                        when (newProf.provider) {
-                            LlmProvider.GEMINI -> dictGeminiModel = newProf.modelName
-                            LlmProvider.OPENROUTER -> {
-                                dictOpenRouterModel = newProf.modelName
-                                if (newProf.providerOrder.isNotEmpty()) {
-                                    dictOpenRouterProviderOrderText = newProf.providerOrder.joinToString(", ")
-                                }
-                                if (newProf.providerAllowFallbacks != null) {
-                                    dictOpenRouterProviderAllowFallbacks = newProf.providerAllowFallbacks
+                            "DICT_EXTRACT" -> {
+                                dictProvider = newProf.provider
+                                when (newProf.provider) {
+                                    LlmProvider.GEMINI -> dictGeminiModel = newProf.modelName
+                                    LlmProvider.OPENROUTER -> {
+                                        dictOpenRouterModel = newProf.modelName
+                                        if (newProf.providerOrder.isNotEmpty()) {
+                                            dictOpenRouterProviderOrderText = newProf.providerOrder.joinToString(", ")
+                                        }
+                                        if (newProf.providerAllowFallbacks != null) {
+                                            dictOpenRouterProviderAllowFallbacks = newProf.providerAllowFallbacks
+                                        }
+                                    }
                                 }
                             }
-                            LlmProvider.GROQ -> dictGroqModel = newProf.modelName
-                        }
-                    }
-                    "DICT_MERGE" -> {
-                        when (newProf.provider) {
-                            LlmProvider.GEMINI -> dictGeminiMergeModel = newProf.modelName
-                            LlmProvider.OPENROUTER -> dictOpenRouterMergeModel = newProf.modelName
-                            LlmProvider.GROQ -> dictGroqMergeModel = newProf.modelName
-                        }
-                    }
+                            "DICT_MERGE" -> {
+                                when (newProf.provider) {
+                                    LlmProvider.GEMINI -> dictGeminiMergeModel = newProf.modelName
+                                    LlmProvider.OPENROUTER -> dictOpenRouterMergeModel = newProf.modelName
+                                }
+                            }
                 }
                 modelSelectionTarget = null
             },
@@ -1178,8 +1237,10 @@ private fun ModelProfileCard(
                     HorizontalDivider(color = Color.DarkGray)
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    // Thinking Level
-                    if (profile.provider == LlmProvider.GEMINI) {
+                    // Thinking Level (効果のないモデルには表示しない。表示＝変更が反映される)
+                    if (profile.provider == LlmProvider.GEMINI &&
+                        com.example.novelscraper.translation.llm.api.GeminiApiClient.thinkingSupported(profile.modelName)
+                    ) {
                         Text("Thinking Level (推論レベル):", color = AppColors.textSecondary, fontSize = 10.sp)
                         Spacer(modifier = Modifier.height(2.dp))
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1196,6 +1257,15 @@ private fun ModelProfileCard(
                                     Text(lvl, color = if (isSel) Color.White else AppColors.textSecondary, fontSize = 9.sp)
                                 }
                             }
+                        }
+                        // 対応可否の判定は GeminiApiClient.supportsThinkingLevel に一本化 (二重定義禁止)。
+                        // 3.7/3.8系のminimalは送信時にmediumへ自動正規化される
+                        if (!com.example.novelscraper.translation.llm.api.GeminiApiClient.supportsThinkingLevel(profile.modelName, profile.thinkingLevel)) {
+                            Text(
+                                "※このモデルはminimal未対応のため送信時にmediumとして扱われます",
+                                color = Color(0xFFFFAA66),
+                                fontSize = 8.sp
+                            )
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                     }
@@ -1594,8 +1664,10 @@ private fun AddModelSelectionDialog(
                         Spacer(modifier = Modifier.height(4.dp))
                         listOf(
                             PresetModelItem("Gemini 3.5 Flash (標準・安定)", ModelProfile(modelName = "gemini-3.5-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium")),
-                            PresetModelItem("Gemini 3.6 Flash (最新Flash)", ModelProfile(modelName = "gemini-3.6-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium")),
-                            PresetModelItem("Gemini 3.7 Flash (最上位Flash)", ModelProfile(modelName = "gemini-3.7-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium")),
+                            PresetModelItem("Gemini 3.6 Flash (安定)", ModelProfile(modelName = "gemini-3.6-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium")),
+                            PresetModelItem("Gemini 3.7 Flash (安定・高性能)", ModelProfile(modelName = "gemini-3.7-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium")),
+                            PresetModelItem("Gemini 3.8 Flash (最新・最上位Flash)", ModelProfile(modelName = "gemini-3.8-flash", provider = LlmProvider.GEMINI, thinkingLevel = "medium")),
+                            PresetModelItem("Gemini 3 Flash Preview (旧世代・互換用)", ModelProfile(modelName = "gemini-3-flash-preview", provider = LlmProvider.GEMINI, thinkingLevel = "medium")),
                             PresetModelItem("Gemini 3.1 Flash Lite (高速・軽量)", ModelProfile(modelName = "gemini-3.1-flash-lite", provider = LlmProvider.GEMINI, thinkingLevel = "medium", temperature = 1.0)),
                             PresetModelItem("Gemini 3.5 Flash Lite (最新Lite)", ModelProfile(modelName = "gemini-3.5-flash-lite", provider = LlmProvider.GEMINI, thinkingLevel = "medium", temperature = 1.0)),
                             PresetModelItem("Gemma 4 31B (辞書・高品質)", ModelProfile(modelName = "gemma-4-31b-it", provider = LlmProvider.GEMINI, thinkingLevel = "medium", temperature = 1.0))
@@ -1614,22 +1686,6 @@ private fun AddModelSelectionDialog(
                         listOf(
                             PresetModelItem("DeepSeek V3.2", ModelProfile(modelName = "deepseek/deepseek-v3.2", provider = LlmProvider.OPENROUTER, temperature = 0.5, reasoningEnabled = false)),
                             PresetModelItem("GLM 5.3 Flash", ModelProfile(modelName = "z-ai/glm-5.3-flash", provider = LlmProvider.OPENROUTER, temperature = 0.5))
-                        ).forEach { item ->
-                            PresetModelButton(label = item.label, onClick = { onAdd(item.profile) })
-                            Spacer(modifier = Modifier.height(4.dp))
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-                        HorizontalDivider(color = Color.DarkGray)
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        // Groq
-                        Text("Groq:", color = AppColors.accentTealLight, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        listOf(
-                            PresetModelItem("Llama 3.3 70B (Versatile)", ModelProfile(modelName = "llama-3.3-70b-versatile", provider = LlmProvider.GROQ, temperature = 0.5)),
-                            PresetModelItem("Qwen 3.6 27B", ModelProfile(modelName = "qwen/qwen3.6-27b", provider = LlmProvider.GROQ, temperature = 0.5)),
-                            PresetModelItem("Llama 3.1 8B (Instant)", ModelProfile(modelName = "llama-3.1-8b-instant", provider = LlmProvider.GROQ, temperature = 0.5))
                         ).forEach { item ->
                             PresetModelButton(label = item.label, onClick = { onAdd(item.profile) })
                             Spacer(modifier = Modifier.height(4.dp))
@@ -1698,7 +1754,6 @@ private fun AddModelSelectionDialog(
                             when (customProvider) {
                                 LlmProvider.GEMINI -> "※例: gemini-3.1-flash-lite, gemma-4-31b-it"
                                 LlmProvider.OPENROUTER -> "※例: google/gemma-4-31b-it:free, anthropic/claude-3.5-sonnet"
-                                LlmProvider.GROQ -> "※例: llama-3.3-70b-versatile, mixtral-8x7b-32768"
                             },
                             color = AppColors.textTertiary,
                             fontSize = 9.sp

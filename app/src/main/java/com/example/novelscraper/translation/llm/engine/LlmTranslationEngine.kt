@@ -11,6 +11,7 @@ import com.example.novelscraper.translation.llm.api.LlmRequestRunner
 import com.example.novelscraper.translation.llm.api.LlmRetryPolicy
 import com.example.novelscraper.translation.common.NovelPhysicalSplitter
 import com.example.novelscraper.translation.common.SafDocIO
+import com.example.novelscraper.translation.common.ingest.DeclaredEncoding
 import com.example.novelscraper.translation.llm.pipeline.*
 import com.example.novelscraper.translation.llm.prompt.PromptBuilder
 import com.example.novelscraper.translation.llm.rotation.ApiKeyPoolManager
@@ -56,6 +57,55 @@ class LlmTranslationEngine(
         }
     }
 
+    /**
+     * 登録モデルに対応するプロバイダーのキーが1つでも有効か。
+     * 例: 全てGeminiモデルなのにGeminiキー空＋OpenRouterキーのみ、は翻訳不可のため false。
+     */
+    private fun hasUsableTranslationKey(): Boolean {
+        val profiles = config.modelProfiles
+        if (profiles.isEmpty()) return false
+        if (profiles.any { it.provider == LlmProvider.GEMINI } && config.geminiApiKeys.any { it.isNotBlank() }) return true
+        if (profiles.any { it.provider == LlmProvider.OPENROUTER } && config.openRouterApiKey.isNotBlank()) return true
+        return false
+    }
+
+    /**
+     * Geminiプール壊滅時に翻訳を継続できる非Gemini代替キーがあるか。
+     * 技術的根拠1行: プール枯渇＝Gemini経路の死であり、他社フォールバック可能時は全体中止しない。
+     */
+    private fun hasNonGeminiFallbackKey(): Boolean {
+        val profiles = config.modelProfiles
+        return (profiles.any { it.provider == LlmProvider.OPENROUTER } && config.openRouterApiKey.isNotBlank())
+    }
+
+    /**
+     * Gemini翻訳プロファイルのモデル名一覧 (プール照会用)。
+     */
+    private fun geminiTranslationModels(): List<String> =
+        config.modelProfiles.filter { it.provider == LlmProvider.GEMINI }.map { it.modelName }
+
+    /**
+     * 必要なモデル枠が永続枯渇した場合は run全体を中止する。RPM一時制限のみなら false。
+     * 辞書必須のため、辞書モデル (抽出＋マージ) が全キー枯渇の場合も中止する (辞書なし翻訳は禁止)。
+     * 技術的根拠1行: 枯渇は (キー×モデル) 単位で判定し、辞書・翻訳のどちらかが進めないなら全体を止める。
+     */
+    private suspend fun shouldAbortForKeyExhaustion(keyPoolManager: ApiKeyPoolManager): Boolean {
+        val geminiModels = geminiTranslationModels()
+        if (geminiModels.isNotEmpty() &&
+            keyPoolManager.isPermanentlyExhausted(geminiModels) && !hasNonGeminiFallbackKey()
+        ) {
+            return true
+        }
+        if (config.enableDictGen && config.dictProvider == LlmProvider.GEMINI) {
+            val dictModels = listOf(
+                config.getEffectiveDictModel(LlmProvider.GEMINI),
+                config.getEffectiveDictMergeModel(LlmProvider.GEMINI)
+            ).distinct()
+            if (keyPoolManager.isPermanentlyExhausted(dictModels)) return true
+        }
+        return false
+    }
+
     fun startTranslation(folderUris: List<Uri>, onCompleted: () -> Unit = {}) {
         if (_engineState.value.isTranslating) return
         isStopRequested = false
@@ -73,8 +123,20 @@ class LlmTranslationEngine(
             val keyPoolManager = ApiKeyPoolManager(config.geminiApiKeys)
 
             try {
+                // preflight: 翻訳に使えるキーが1つもなければ分割・辞書・ワーカーの全てを行わず中止
+                if (!hasUsableTranslationKey()) {
+                    addLog("🛑 翻訳に使えるAPIキーがないため開始を中止します (登録モデルに対応するプロバイダーのキーを設定してください。分割・辞書生成も行いません)")
+                    return@launch
+                }
                 for ((folderIndex, folderUri) in folderUris.withIndex()) {
                     if (isStopRequested || !isActive) break
+
+                    // 前フォルダで必要モデル枠が日次枯渇 → 分割・辞書・翻訳を行わず全体を中止
+                    if (shouldAbortForKeyExhaustion(keyPoolManager)) {
+                        addLog("🛑 必要モデル枠の本日上限枯渇のため翻訳全体を中止します (翻訳モデル全滅 or 辞書モデル全滅。分割・辞書生成も行いません)")
+                        isStopRequested = true
+                        break
+                    }
 
                     val docFolder = DocumentFile.fromTreeUri(context, folderUri) ?: continue
                     val folderName = docFolder.name ?: "Unknown"
@@ -103,15 +165,22 @@ class LlmTranslationEngine(
                                     if (isStopRequested || !isActive) break
                                     val novelName = rawFile.name?.replace(Regex("""\.[tT][xX][tT]$"""), "") ?: "小説"
                                     addLog("✂️ [小説 ${rawIndex + 1}/${rawFiles.size}] 翻訳直前分割中: ${rawFile.name}")
-                                    val rawLang = detectLanguageOfFile(rawFile)
-                                    addLog("🔤 言語検出: ${rawLang.displayName} (${rawFile.name})")
+                                    // 取込済みテキストを使い回して言語検出 (生ファイルの二重全読みを排除)。
+                                    // 既存分割ショートカット時は検出なし→null継承でパート側再検出に委ねる。
+                                    var rawLang: SourceLanguage? = null
                                     val splitSubFolder = NovelPhysicalSplitter.splitSingleTextFile(
                                         context = context,
                                         fileDoc = rawFile,
                                         splitRootDir = splitRootDir,
                                         splitSizeChars = config.textSplitSizeChars,
-                                        onLog = { addLog(it) }
+                                        declared = DeclaredEncoding.parseOrNull(config.inputEncoding),
+                                        onLog = { addLog(it) },
+                                        onIngestedText = { text -> rawLang = LanguageDetector.detect(text).language }
                                     )
+                                    val detectedLang = rawLang
+                                    if (detectedLang != null) {
+                                        addLog("🔤 言語検出: ${detectedLang.displayName} (${rawFile.name})")
+                                    }
                                     if (splitSubFolder != null && !isStopRequested && isActive) {
                                         addLog("📂 [小説 ${rawIndex + 1}/${rawFiles.size}] 分割済みサブフォルダ翻訳開始: ${splitSubFolder.name}")
                                         processFolder(splitSubFolder, keyPoolManager, rawLang)
@@ -190,15 +259,6 @@ class LlmTranslationEngine(
         return true
     }
 
-    /**
-     * 単一ファイルの内容から言語を判定する（キャッシュを作らない純粋判定。API不要）。
-     * 物理分割前の raw ファイル毎に呼び、混在フォルダでも作品別の言語を使う。
-     */
-    private fun detectLanguageOfFile(fileDoc: DocumentFile): SourceLanguage {
-        val content = readFileContent(fileDoc) ?: ""
-        return LanguageDetector.detect(content).language
-    }
-
     private fun detectOrLoadLanguage(
         folderDoc: DocumentFile,
         sampleFiles: List<DocumentFile>
@@ -266,6 +326,13 @@ class LlmTranslationEngine(
             return
         }
 
+        // 分割済みサブフォルダ連鎖中の枯渇対策: 辞書生成・翻訳を行わず全体を中止
+        if (shouldAbortForKeyExhaustion(keyPoolManager)) {
+            addLog("🛑 必要モデル枠の本日上限枯渇のため $folderName を中断し全体を中止します (辞書生成・ワーカー起動なし)")
+            isStopRequested = true
+            return
+        }
+
         // 出力先サブフォルダの作成
         val outputDir = folderDoc.findFile(outSubDirName) ?: folderDoc.createDirectory(outSubDirName)
         if (outputDir == null) {
@@ -287,6 +354,26 @@ class LlmTranslationEngine(
         }
         if (zeroByteCount > 0) {
             addLog("⚠️ サイズ0の出力 $zeroByteCount 件は未翻訳扱いで再処理します")
+        }
+
+        // 全件翻訳済みの早期スキップ (O(1) メモリ照合のみで追加I/Oなし)。
+        // 作業ディレクトリ (.parts_) が残る大ファイルはレジューム優先で未完了扱い (既存スキップ意味と同一)。
+        // 技術的根拠1行: 言語検出・辞書生成・ワーカー起動より前に確定済み分を数え、全完了なら重処理を全て飛ばす。
+        val totalCount = files.size
+        var preCompleted = 0
+        for (f in files) {
+            val fname = f.name ?: continue
+            val hasWorkDir = existingOutputNames.contains(".parts_${fname}")
+            if (!hasWorkDir && (existingOutputNames.contains(fname) || existingOutputNames.contains("$fname.failed"))) {
+                preCompleted++
+            }
+        }
+        if (preCompleted >= totalCount) {
+            _engineState.update { it.copy(
+                progress = totalCount to totalCount
+            ) }
+            addLog("✅ $folderName: 全${totalCount}件翻訳済みのためスキップ (言語検出・辞書生成・ワーカー起動なし)")
+            return
         }
 
         // 言語判定 (継承時は再検出せず再利用するが、キャッシュ欠落時は補完作成する)
@@ -332,14 +419,13 @@ class LlmTranslationEngine(
                 val providerAllowFallbacks = config.getEffectiveDictProviderAllowFallbacks()
 
                 val dictApiKeys = when (dictProvider) {
-                    LlmProvider.GEMINI -> config.geminiApiKeys.filter { it.isNotBlank() }.ifEmpty { listOf("") }
+                    // 未フィルタで渡す (generate内部で空白除去＋プール索引対応表を同リスト基準で作るため)
+                    LlmProvider.GEMINI -> config.geminiApiKeys
                     LlmProvider.OPENROUTER -> listOf(config.openRouterApiKey)
-                    LlmProvider.GROQ -> listOf(config.groqApiKey)
                 }
                 val dictEndpoint = when (dictProvider) {
                     LlmProvider.GEMINI -> ""
                     LlmProvider.OPENROUTER -> config.openRouterEndpoint
-                    LlmProvider.GROQ -> config.groqEndpoint
                 }
 
                 novelDict = NovelDictionaryGenerator.generate(
@@ -348,6 +434,8 @@ class LlmTranslationEngine(
                     sampleFiles = files,
                     provider = dictProvider,
                     apiKeys = dictApiKeys,
+                    sharedKeyPool = if (dictProvider == LlmProvider.GEMINI) keyPoolManager else null,
+                    thinkingLevel = config.dictThinkingLevel,
                     model = dictModel,
                     mergeModel = mergeModel,
                     endpoint = dictEndpoint,
@@ -377,19 +465,8 @@ class LlmTranslationEngine(
             }
         }
 
-        val totalCount = files.size
-        val completedCounter = AtomicInteger(0)
+        val completedCounter = AtomicInteger(preCompleted)
         val folderProcessedCounter = AtomicInteger(0)
-
-        // 翻訳済みファイルの事前カウント (O(1) メモリ照合)。
-        // 作業ディレクトリ (.parts_) が残る大ファイルはレジューム優先で未完了扱い。
-        for (f in files) {
-            val fname = f.name ?: continue
-            val hasWorkDir = existingOutputNames.contains(".parts_${fname}")
-            if (!hasWorkDir && (existingOutputNames.contains(fname) || existingOutputNames.contains("$fname.failed"))) {
-                completedCounter.incrementAndGet()
-            }
-        }
 
         _engineState.update { it.copy(
             progress = completedCounter.get() to totalCount
@@ -407,7 +484,7 @@ class LlmTranslationEngine(
 
                 for (wId in 1..requestedWorkerCount) {
                     val keyClaim = if (config.geminiRotationEnabled) {
-                        keyPoolManager.claimNewKey()
+                        keyPoolManager.claimNewKey(geminiTranslationModels())
                     } else {
                         (0 to (config.geminiApiKeys.firstOrNull() ?: ""))
                     }
@@ -881,7 +958,7 @@ class LlmTranslationEngine(
                                 if (!advanced) return BatchOutcome(0, 0)
                                 retry++
                             } else {
-                                // OpenRouter/Groq等：Retry-After指定があれば従い、なければ5秒
+                                // OpenRouter等：Retry-After指定があれば従い、なければ5秒
                                 val waitSec = apiResult.retryAfterSec
                                     .takeIf { it > 0 }?.toLong()?.coerceIn(5, 120) ?: 5
                                 addLog("[W#$workerId] ⏳ バッチ制限待機 (429・${waitSec}秒): ${apiResult.message.take(80)}...")
@@ -1192,7 +1269,7 @@ class LlmTranslationEngine(
                                 }
                                 retry++
                             } else {
-                                // OpenRouter/Groq等：Retry-After指定があれば従い、なければ5秒
+                                // OpenRouter等：Retry-After指定があれば従い、なければ5秒
                                 val waitSec = apiResult.retryAfterSec
                                     .takeIf { it > 0 }?.toLong()?.coerceIn(5, 120) ?: 5
                                 delay(waitSec * 1000L)

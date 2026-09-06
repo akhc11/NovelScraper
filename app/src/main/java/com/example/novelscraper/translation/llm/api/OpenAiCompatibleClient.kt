@@ -23,8 +23,7 @@ object OpenAiCompatibleClient {
         providerOrder: List<String>? = null,
         providerAllowFallbacks: Boolean? = null,
         reasoningEffort: String? = null,
-        reasoningEnabled: Boolean? = null,
-        topLevelReasoningNone: Boolean = false
+        reasoningEnabled: Boolean? = null
     ): LlmApiResult = withContext(Dispatchers.IO) {
         try {
             val provider = if (!providerOrder.isNullOrEmpty()) {
@@ -35,7 +34,7 @@ object OpenAiCompatibleClient {
             } else null
 
             val (reasoning, finalReasoningEffort) =
-                reasoningPayload(reasoningEffort, reasoningEnabled, topLevelReasoningNone)
+                reasoningPayload(reasoningEffort, reasoningEnabled)
 
             val reqBodyObj = OpenAiChatRequest(
                 model = model,
@@ -145,26 +144,22 @@ object OpenAiCompatibleClient {
     }
 
     /**
-     * 推論パラメータ組立（モデル名ではなく呼び出し側指定の方式に従う）。
-     * Groq系はトップレベルに reasoning_effort を送る仕様のため、
-     * 方式判定は handler 側で行い、モデル名の接頭辞判定はしない。
+     * 推論パラメータ組立 (OpenRouter用)。
      * @return reasoning JSON とトップレベル reasoning_effort のペア
      */
     fun reasoningPayload(
         reasoningEffort: String?,
-        reasoningEnabled: Boolean?,
-        topLevelNone: Boolean = false
+        reasoningEnabled: Boolean?
     ): Pair<kotlinx.serialization.json.JsonElement?, String?> {
         val reasoning = when {
             reasoningEnabled != null -> {
                 LlmApiClient.json.parseToJsonElement("""{"enabled":$reasoningEnabled}""")
             }
-            reasoningEffort != null && reasoningEffort != "none" && !topLevelNone -> {
+            reasoningEffort != null && reasoningEffort != "none" -> {
                 LlmApiClient.json.parseToJsonElement("""{"effort":"$reasoningEffort"}""")
             }
             else -> null
         }
-        val finalReasoningEffort = if (topLevelNone) "none" else reasoningEffort
-        return reasoning to finalReasoningEffort
+        return reasoning to reasoningEffort
     }
 }

@@ -48,7 +48,6 @@ object LlmHealthCheck {
         val firstKey = when (profile.provider) {
             LlmProvider.GEMINI -> config.geminiApiKeys.firstOrNull { it.isNotBlank() } ?: ""
             LlmProvider.OPENROUTER -> config.openRouterApiKey
-            LlmProvider.GROQ -> config.groqApiKey
         }
         if (firstKey.isBlank()) {
             return LlmHealthResult(

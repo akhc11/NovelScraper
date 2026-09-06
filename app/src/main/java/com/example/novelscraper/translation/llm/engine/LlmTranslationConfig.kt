@@ -13,8 +13,7 @@ enum class DictSampleMode(val displayName: String) {
 
 enum class LlmProvider(val displayName: String) {
     GEMINI("Google AI Studio (Gemini)"),
-    OPENROUTER("OpenRouter"),
-    GROQ("Groq")
+    OPENROUTER("OpenRouter")
 }
 
 @Serializable
@@ -60,9 +59,6 @@ data class LlmTranslationConfig(
     val openRouterApiKey: String = "",
     val openRouterEndpoint: String = "https://openrouter.ai/api/v1/chat/completions",
 
-    val groqApiKey: String = "",
-    val groqEndpoint: String = "https://api.groq.com/openai/v1/chat/completions",
-
     // モデル毎の個別プロファイルリスト (巡回順)
     val modelProfiles: List<ModelProfile> = listOf(
         ModelProfile(
@@ -99,6 +95,25 @@ data class LlmTranslationConfig(
             thinkingLevel = "medium",
             temperature = 1.0,
             promptOrder = listOf(1, 1)
+        ),
+        // 公式Stable (ai.google.dev/models): gemini-3.8-flash。thinkingはLOW/MEDIUM/HIGHのみ
+        // (MINIMALは400エラー)・既定MEDIUM・temperature等は送信しない推奨のためtemperature=null。
+        ModelProfile(
+            modelName = "gemini-3.8-flash",
+            provider = LlmProvider.GEMINI,
+            thinkingLevel = "medium",
+            temperature = null,
+            promptOrder = listOf(1, 1)
+        ),
+        // 公式Preview (gemini-3.5-flash頁Versions表): gemini-3-flash-preview。安定版の
+        // gemini-3-flashは存在しないためPreview IDを使う。thinkingは4値対応・既定HIGHだが
+        // 翻訳はコスト/速度バランスのためmediumを既定とし、temperatureは送らない。
+        ModelProfile(
+            modelName = "gemini-3-flash-preview",
+            provider = LlmProvider.GEMINI,
+            thinkingLevel = "medium",
+            temperature = null,
+            promptOrder = listOf(1, 1)
         )
     ),
 
@@ -118,6 +133,8 @@ data class LlmTranslationConfig(
     val enableBatchJsonSchema: Boolean = false, // バッチ翻訳のJSON Schema優先試行 (OFF時はXMLのみ)
     val enableTextSplit: Boolean = false,
     val textSplitSizeChars: Int = 7000,
+    // 入力文字コード指定 ("AUTO"＝自動判定、それ以外は DeclaredEncoding 名)
+    val inputEncoding: String = "AUTO",
 
     val enableDictGen: Boolean = false,
     val dictProvider: LlmProvider = LlmProvider.GEMINI,
@@ -131,8 +148,6 @@ data class LlmTranslationConfig(
     val dictOpenRouterMergeModel: String = "",
     val dictOpenRouterProviderOrder: List<String> = emptyList(),
     val dictOpenRouterProviderAllowFallbacks: Boolean? = false,
-    val dictGroqModel: String = DEFAULT_DICT_GROQ_MODEL,
-    val dictGroqMergeModel: String = "",
 
     val dictTotalParts: Int = 100, // 0 = 全ファイル
     val dictSampleMode: DictSampleMode = DictSampleMode.UNIFORM, // 抽出範囲モード (先頭 / 全編均等)
@@ -143,6 +158,8 @@ data class LlmTranslationConfig(
     val dictParallelCount: Int = 30, // 辞書生成並列数 (互換用: dictWorkerCount * dictConcurrencyPerWorker)
     val dictRequestDelaySec: Int = 0, // 辞書生成 1リクエストごとの待機秒数 (0=待機なし, Gemma等TPM制限時は10〜15秒推奨)
     val dict429CooldownSec: Int = 60, // 辞書生成 429 Quota Exceeded 検知時の待機秒数 (デフォルト60秒)
+    // 辞書生成の thinkingLevel (Geminiのみ有効。null=未指定でモデル既定・現状維持)
+    val dictThinkingLevel: String? = null,
 
     val enablePrevSrcContext: Boolean = false,
     val prevSrcContextLines: Int = 20,
@@ -194,13 +211,11 @@ data class LlmTranslationConfig(
         val model = when (targetProvider) {
             LlmProvider.GEMINI -> dictGeminiModel.ifBlank { dictModel }
             LlmProvider.OPENROUTER -> dictOpenRouterModel.ifBlank { dictModel }
-            LlmProvider.GROQ -> dictGroqModel.ifBlank { dictModel }
         }
         return model.trim().ifBlank {
             when (targetProvider) {
                 LlmProvider.GEMINI -> DEFAULT_DICT_GEMINI_MODEL
                 LlmProvider.OPENROUTER -> DEFAULT_DICT_OPENROUTER_MODEL
-                LlmProvider.GROQ -> DEFAULT_DICT_GROQ_MODEL
             }
         }
     }
@@ -212,7 +227,6 @@ data class LlmTranslationConfig(
         val mergeModel = when (targetProvider) {
             LlmProvider.GEMINI -> dictGeminiMergeModel.ifBlank { dictMergeModel }
             LlmProvider.OPENROUTER -> dictOpenRouterMergeModel
-            LlmProvider.GROQ -> dictGroqMergeModel
         }
         return mergeModel.trim().ifBlank { getEffectiveDictModel(targetProvider) }
     }
@@ -280,7 +294,6 @@ data class LlmTranslationConfig(
     companion object {
         const val DEFAULT_DICT_GEMINI_MODEL = "gemini-3.1-flash-lite"
         const val DEFAULT_DICT_OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
-        const val DEFAULT_DICT_GROQ_MODEL = "llama-3.3-70b-versatile"
 
         /**
          * 目標日本語出力文字数から言語別の実効入力分割閾値（バイト）を逆算する単一管理点。

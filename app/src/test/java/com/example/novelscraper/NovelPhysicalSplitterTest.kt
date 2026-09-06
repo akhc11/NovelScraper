@@ -1,11 +1,17 @@
 package com.example.novelscraper
 
 import com.example.novelscraper.translation.common.NovelPhysicalSplitter
+import com.example.novelscraper.translation.common.ingest.ChunkVerifier
+import com.example.novelscraper.translation.common.ingest.HypothesisId
 import org.junit.Assert.*
 import org.junit.Test
 import java.nio.charset.Charset
-import java.nio.charset.StandardCharsets
 
+/**
+ * 分割機構＋塊検証器のテスト (Ingest v2 世代の正本)。
+ * 分割挙動の契約 (1000字前後・有害文字除去・超長行・空・単行) を固定し、
+ * 検証器の3層 (FFFD・確定・軟) を golden で縛る。
+ */
 class NovelPhysicalSplitterTest {
 
     @Test
@@ -20,7 +26,6 @@ class NovelPhysicalSplitterTest {
 
         assertTrue("Should split into multiple chunks", chunks.size >= 3)
         for (chunk in chunks) {
-            // 末尾以外のチャンクは1,000文字前後であること
             assertTrue("Chunk should have content", chunk.isNotEmpty())
         }
 
@@ -78,90 +83,77 @@ class NovelPhysicalSplitterTest {
     }
 
     @Test
-    fun testIsMojibakeChunk_CleanText() {
-        val clean = "동해 물과 백두산이 마르고 닳도록 하느님이 보우하사 우리나라 만세.\n".repeat(100) +
-            "これは冒険の物語です。主人公は荒野を歩き続けました。\n".repeat(100)
-        assertFalse(NovelPhysicalSplitter.isMojibakeChunk(clean))
+    fun testVerifier_FffdFlood() {
+        val mojibake = "동해 물과 백두산이 ".repeat(50) + "�".repeat(500)
+        assertNotNull(ChunkVerifier.verify(mojibake, HypothesisId.CP949))
+        assertNull(ChunkVerifier.verify("短いテキスト�。", HypothesisId.UTF8))
+        assertNull(ChunkVerifier.verify("", HypothesisId.CP949))
     }
 
     @Test
-    fun testIsMojibakeChunk_Mojibake() {
-        // 誤Charset復号の再現: 大量のU+FFFD混じりテキスト
-        val mojibake = "동해 물과 백두산이 ".repeat(50) + "\uFFFD".repeat(500)
-        assertTrue(NovelPhysicalSplitter.isMojibakeChunk(mojibake))
-    }
-
-    @Test
-    fun testIsMojibakeChunk_IsolatedFffdIsNotMojibake() {
-        // 原文由来の孤立した置換文字はスキップ対象にしない
-        assertFalse(NovelPhysicalSplitter.isMojibakeChunk("短いテキスト�。"))
-        assertFalse(NovelPhysicalSplitter.isMojibakeChunk(""))
-    }
-
-    @Test
-    fun testMojibakeReason_DeterministicImpossibleScript() {
+    fun testVerifier_DeterministicImpossibleScript() {
         // charsetが原理的に出せない文字種＝確定文字化け (長さ不問)
-        val cp949 = Charset.forName("x-windows-949")
-        val sjis = Charset.forName("Windows-31J")
-        val gb = Charset.forName("GB18030")
-        val w1252 = Charset.forName("windows-1252")
-        assertTrue(NovelPhysicalSplitter.isMojibakeChunk("漢字とカタカナと한글混じり".repeat(10), w1252))
-        assertTrue(NovelPhysicalSplitter.isMojibakeChunk("あいうえお中文测试".repeat(10), gb))
-        assertTrue(NovelPhysicalSplitter.isMojibakeChunk("한글混じりテスト".repeat(10), sjis))
-        assertTrue(NovelPhysicalSplitter.isMojibakeChunk("ひらがな混じり테스트".repeat(10), cp949))
+        val cp949 = HypothesisId.CP949
+        assertNotNull(ChunkVerifier.verify("漢字とカタカナと한글混じり".repeat(10), HypothesisId.W1252))
+        assertNotNull(ChunkVerifier.verify("あいうえお中文测试".repeat(10), HypothesisId.GB18030))
+        assertNotNull(ChunkVerifier.verify("한글混じりテスト".repeat(10), HypothesisId.SJIS))
+        assertNotNull(ChunkVerifier.verify("ひらがな混じり테스트".repeat(10), cp949))
         // 正規文は通る
-        assertFalse(
-            NovelPhysicalSplitter.isMojibakeChunk(
-                "Bonjour le monde! Café crème naïve. ".repeat(40), w1252
-            )
-        )
-        assertFalse(
-            NovelPhysicalSplitter.isMojibakeChunk(
+        assertNull(ChunkVerifier.verify("Bonjour le monde! Café crème naïve. ".repeat(40), HypothesisId.W1252))
+        assertNull(
+            ChunkVerifier.verify(
                 "무간의 지배자는 어둠 속에서 검을 들었다.\n".repeat(100), cp949
             )
         )
-        assertFalse(
-            NovelPhysicalSplitter.isMojibakeChunk(
-                "吾輩は猫である。名前はまだ無い。\n".repeat(100), sjis
+        assertNull(
+            ChunkVerifier.verify(
+                "吾輩は猫である。名前はまだ無い。\n".repeat(100), HypothesisId.SJIS
             )
         )
-        assertFalse(
-            NovelPhysicalSplitter.isMojibakeChunk(
-                "这是关于中国古典小说的故事。\n".repeat(100), gb
+        assertNull(
+            ChunkVerifier.verify(
+                "这是关于中国古典小说的故事。\n".repeat(100), HypothesisId.GB18030
             )
         )
     }
 
     @Test
-    fun testMojibakeReason_SoftMissingExpectedScript() {
-        val cp949 = Charset.forName("x-windows-949")
-        // 期待文字種ゼロ＋ASCII非主体＝化け (ラテン拡張密文をCP949と誤認した場合)
+    fun testVerifier_SoftMissingExpectedScript() {
+        // 期待文字種ゼロ＋ASCII非主体＝化け
         val latinDense = "àáâãäåçèéêëìíîïñòóôõöøùúûüýÿ ".repeat(8)
-        assertTrue(NovelPhysicalSplitter.isMojibakeChunk(latinDense, cp949))
+        assertNotNull(ChunkVerifier.verify(latinDense, HypothesisId.CP949))
         // ASCII主体 (英語引用) と漢字混じり (漢文引用) は正当のため通す
         val englishPassage = "Hello world. This is a quoted song lyric. ".repeat(30) +
             "한국어 문장입니다. ".repeat(5)
-        assertFalse(NovelPhysicalSplitter.isMojibakeChunk(englishPassage, cp949))
+        assertNull(ChunkVerifier.verify(englishPassage, HypothesisId.CP949))
         val hanjaPassage = "大韓民國 萬歲 檀君神話 ".repeat(20)
-        assertFalse(NovelPhysicalSplitter.isMojibakeChunk(hanjaPassage, cp949))
+        assertNull(ChunkVerifier.verify(hanjaPassage, HypothesisId.CP949))
     }
 
     @Test
-    fun testMojibakeReason_LatinGibberishDensity() {
-        val w1252 = Charset.forName("windows-1252")
+    fun testVerifier_LatinGibberishDensity() {
         val cp949 = Charset.forName("x-windows-949")
+        val w1252 = Charset.forName("windows-1252")
         // 実デコード経路の再現: CP949韓国語を1252で読んだ7000字チャンク
         val bogusBytes = "무간의 지배자는 어둠 속에서 검을 들었다.\n".repeat(1500).toByteArray(cp949)
         val bogus = String(bogusBytes, w1252).take(7000)
-        assertTrue(NovelPhysicalSplitter.isMojibakeChunk(bogus, w1252))
-        assertTrue(NovelPhysicalSplitter.mojibakeReason(bogus, w1252)!!.contains("latin-gibberish"))
+        val reason = ChunkVerifier.verify(bogus, HypothesisId.W1252)
+        assertNotNull(reason)
+        assertTrue(reason!!.contains("latin-gibberish"))
         // 正規フランス語 (1252) は通る
         val french = "Bonjour le monde! Ceci est un texte d'exemple en français avec des accents: été, crème, naïve, cœur. Le héros marcha longtemps. ".repeat(40)
-        assertFalse(NovelPhysicalSplitter.isMojibakeChunk(french, w1252))
+        assertNull(ChunkVerifier.verify(french, HypothesisId.W1252))
         // 結合文字あり (分解ベトナム語) は除外
-        val w1258 = Charset.forName("windows-1258")
         val denseBase = "àáâãäå".repeat(30)
-        assertTrue(NovelPhysicalSplitter.isMojibakeChunk(denseBase, w1258))
-        assertFalse(NovelPhysicalSplitter.isMojibakeChunk(denseBase + "êẽ".repeat(5), w1258))
+        assertNotNull(ChunkVerifier.verify(denseBase, HypothesisId.W1258))
+        assertNull(ChunkVerifier.verify(denseBase + "éẽ".repeat(5), HypothesisId.W1258))
+    }
+
+    @Test
+    fun testVerifier_UnicodeSkipsScriptChecks() {
+        // UTF-8 は何語でもあり得るため FFFD のみ見る
+        val clean = "동해 물과 백두산이 마르고 닳도록 하느님이 보우하사 우리나라 만세.\n".repeat(100) +
+            "これは冒険の物語です。主人公は荒野を歩き続けました。\n".repeat(100)
+        assertNull(ChunkVerifier.verify(clean, HypothesisId.UTF8))
     }
 }

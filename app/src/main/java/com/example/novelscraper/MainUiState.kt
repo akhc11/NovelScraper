@@ -98,6 +98,7 @@ data class MainUiState(
     val isLiveTranslated: Boolean = false,
     val isWebSplitEnabled: Boolean = false,
     val webSplitSizeChars: Int = 8000,
+    val inputEncoding: String = "AUTO",
     
     // 翻訳関連の状態（エンジンごとに独立管理）
     val activeTranslationEngine: TranslationEngine = TranslationEngine.GOOGLE,

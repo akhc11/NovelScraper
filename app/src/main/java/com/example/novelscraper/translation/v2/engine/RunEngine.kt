@@ -14,7 +14,9 @@ import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.domain.V2DeclaredEncoding
 import com.example.novelscraper.translation.v2.domain.V2SendGate
 import com.example.novelscraper.translation.v2.domain.capabilitiesFor
+import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
 import com.example.novelscraper.translation.v2.infra.FileStore
+import com.example.novelscraper.translation.v2.infra.VDoc
 import com.example.novelscraper.translation.v2.infra.GeminiHandler
 import com.example.novelscraper.translation.v2.infra.OpenRouterHandler
 import com.example.novelscraper.translation.v2.pipeline.BatchOutcome
@@ -66,11 +68,16 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.coroutineContext
 
 data class EngineOptions(
+    /** 現在未使用（しきい値は目標出力からの逆算値を用いる）。将来の固定値運用のために残す */
     val splitThresholdBytes: Int = 30000,
     val batchMaxFiles: Int = 3,
+    /** 現在未使用（チャンク幅は逆算値の90%を用いる）。将来の固定値運用のために残す */
     val chunkSizeBytes: Int = 27000,
-    val maxInputBytes: Int = 200_000_000,
+    /** チャンク翻訳に渡す上限。これを超える入力はスキップ確定（.failed保存）する */
+    val maxInputBytes: Int = 1_000_000,
+    /** 現在未使用（末尾行数は設定の前文脈行数を用いる）。将来の固定値運用のために残す */
     val tailLines: Int = 20,
+    /** 現在未使用（サイズ比は設定の言語別比率を用いる）。将来の固定値運用のために残す */
     val sizeMinPct: Int = 50,
     val sizeMaxPct: Int = 300,
     val kanaFloor: Double = 0.2,
@@ -78,6 +85,8 @@ data class EngineOptions(
     val maxSameRetries: Int = 2,
     val switchCooldownSec: Int = 15,
     val workerStaggerSec: Long = 0,
+    /** 送信間隔の下限。0時は設定の要求間隔（requestDelaySec）をそのまま使う */
+    val minSendIntervalMs: Long = 0L,
     val basePrompts: Map<Int, String> = mapOf(
         1 to V2_PROMPT_1_ZH,
         2 to V2_PROMPT_2_EN,
@@ -102,8 +111,15 @@ data class EngineState(
 data class RunSummary(val folders: Int, val completedFiles: Int, val totalFiles: Int, val aborted: Boolean)
 
 /**
- * v2実行エンジン。フォルダ巡回・早期スキップ・辞書・ワーカー分配・中止判定を担う。
- * 物理事前分割は扱わない（大ファイルは翻訳時チャンクで処理する）。
+ * v2実行エンジン。フォルダ巡回・早期スキップ・事前物理分割・辞書・ワーカー分配・中止判定を担う。
+ *
+ * 【物理事前分割と実行時チャンク分割の役割分担（設計根拠）】:
+ * ・事前物理分割 (PreSplit): 超巨大な生テキストファイルを適度なサイズ（例: 7,000文字単位）に物理分割する。
+ *   実行時チャンク分割は1チャンクでも失敗（.failed）すると結合されずファイル全体が未完了となるため、
+ *   あらかじめ物理分割しておくことで、万一の失敗の影響をそのパート単体に局所化し、
+ *   他のパートは確実に完了・保存できるようにする（耐障害性と進捗保護の担保）。
+ * ・実行時チャンク分割 (translateLarge): 分割後のパートや中規模ファイルが目標出力からの逆算上限
+ *   （言語・モデルにより約26〜45KB）を超える場合に、安全にインメモリ分割翻訳してストリーミング結合する。
  */
 class RunEngine(
     private val store: FileStore,
@@ -129,7 +145,8 @@ class RunEngine(
     }
 
     private fun addLog(message: String) {
-        _state.update { it.copy(logs = (it.logs + message).takeLast(200)) }
+        val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+        _state.update { it.copy(logs = (it.logs + "[$time] $message").takeLast(200)) }
     }
 
     private fun geminiModels(profiles: List<V2ModelProfile>): List<String> =
@@ -147,7 +164,7 @@ class RunEngine(
         return settings.profiles.any { it.providerId == "openrouter" } && settings.openRouterKey.isNotBlank()
     }
 
-    /** 中止判定：翻訳全滅（代替なし）または辞書必須モデルの全滅 */
+    /** 中止判定：Gemini枠の枯渇（OpenRouter代替なし）または辞書用Geminiモデルの枯渇。OpenRouter単独構成はここでは止めない */
     private suspend fun shouldAbort(pool: QuotaPool, settings: V2Settings): Boolean {
         val gemini = geminiModels(settings.profiles)
         if (gemini.isNotEmpty() && pool.isExhausted(gemini) && !hasFallbackKey(settings)) return true
@@ -169,14 +186,17 @@ class RunEngine(
     private fun handlerFor(profile: V2ModelProfile, key: String, settings: V2Settings): com.example.novelscraper.translation.v2.domain.ProviderHandler {
         return when (profile.providerId) {
             "gemini" -> GeminiHandler(apiKey = key)
-            else -> OpenRouterHandler(
-                apiKey = key,
-                endpoint = settings.openRouterEndpoint,
-                reasoningEffort = profile.reasoningEffort,
-                reasoningEnabled = profile.reasoningEnabled,
-                providerOrder = profile.providerOrder,
-                providerAllowFallbacks = profile.providerAllowFallbacks
-            )
+            else -> {
+                val resolved = resolveOpenRouterParams(profile)
+                OpenRouterHandler(
+                    apiKey = key,
+                    endpoint = settings.openRouterEndpoint,
+                    reasoningEffort = resolved.reasoningEffort,
+                    reasoningEnabled = resolved.reasoningEnabled,
+                    providerOrder = resolved.providerOrder,
+                    providerAllowFallbacks = resolved.providerAllowFallbacks
+                )
+            }
         }
     }
 
@@ -193,10 +213,28 @@ class RunEngine(
         return sb.toString().replace(Regex("\n{3,}"), "\n\n")
     }
 
+    companion object {
+        fun extractReadableFolderName(uriString: String): String {
+            return try {
+                val decoded = java.net.URLDecoder.decode(uriString, "UTF-8")
+                val afterTree = if (decoded.contains("/tree/")) decoded.substringAfter("/tree/") else decoded
+                val afterDoc = if (afterTree.contains("/document/")) afterTree.substringAfter("/document/") else afterTree
+                val clean = afterDoc.substringAfterLast(':').substringAfterLast('/')
+                clean.ifBlank { "フォルダ" }
+            } catch (_: Exception) {
+                uriString.substringAfterLast('/').substringAfterLast(':').ifBlank { "フォルダ" }
+            }
+        }
+    }
+
     suspend fun run(folderUris: List<String>, settings: V2Settings): RunSummary {
+        return runWithNames(folderUris.map { it to extractReadableFolderName(it) }, settings)
+    }
+
+    suspend fun runWithNames(folderItems: List<Pair<String, String>>, settings: V2Settings): RunSummary {
         stopFlag.set(false)
         _state.update {
-            it.copy(isRunning = true, statusText = "starting", logs = emptyList())
+            it.copy(isRunning = true, statusText = "開始準備中...", logs = emptyList())
         }
         val meter = CostMeter(settings.cost.maxTokens, settings.cost.maxCost)
         val pool = QuotaPool(settings.geminiKeys.filter { it.isNotBlank() })
@@ -206,17 +244,20 @@ class RunEngine(
         try {
             if (!hasUsableKey(settings)) {
                 addLog("abort: no usable key (skip split/dict/workers)")
+                _state.update { it.copy(statusText = "⚠️ 利用可能なAPIキーがありません") }
                 return RunSummary(0, 0, 0, aborted = true)
             }
-            for ((folderIndex, folderUri) in folderUris.withIndex()) {
+            for ((folderIndex, item) in folderItems.withIndex()) {
+                val (folderUri, designatedName) = item
                 if (stopFlag.get() || !coroutineContext.isActive) break
                 if (shouldAbort(pool, settings)) {
                     addLog("abort: quota exhausted (skip split/dict/workers)")
+                    _state.update { it.copy(statusText = "⚠️ クォータ上限に達しました") }
                     stopFlag.set(true)
                     break
                 }
-                val folderName = folderUri.substringAfterLast('/').ifBlank { "folder${folderIndex + 1}" }
-                _state.update { it.copy(folderName = folderName, statusText = "folder: $folderName") }
+                val folderName = designatedName.ifBlank { extractReadableFolderName(folderUri).ifBlank { "folder${folderIndex + 1}" } }
+                _state.update { it.copy(folderName = folderName, statusText = "フォルダ「$folderName」を開始") }
                 addLog("folder start: $folderName")
                 val (done, total) = processFolder(folderUri, folderName, settings, pool, meter)
                 filesDone += done
@@ -225,18 +266,39 @@ class RunEngine(
             }
         } catch (e: CancellationException) {
             addLog("stopped by user")
+            _state.update { it.copy(statusText = "停止しました") }
         } catch (e: Exception) {
             addLog("unexpected: ${e.message}")
+            _state.update { it.copy(statusText = "⚠️ エラー: ${e.message}") }
         } finally {
             pool.reset()
-            _state.update { it.copy(isRunning = false, statusText = "stopped/done", fileName = "", chunkProgress = 0 to 0) }
+            _state.update { it.copy(isRunning = false, statusText = "完了・待機中", fileName = "", chunkProgress = 0 to 0) }
         }
         return RunSummary(foldersDone, filesDone, filesTotal, aborted = stopFlag.get())
     }
 
+    private suspend fun sampleTextForLanguage(
+        files: List<VDoc>,
+        targetChars: Int = 1200,
+        maxFiles: Int = 5
+    ): String {
+        val sb = StringBuilder()
+        for (f in files.take(maxFiles)) {
+            val text = store.readText(f.uri) ?: continue
+            for (line in text.lineSequence()) {
+                val trimmed = line.trim()
+                if (trimmed.length >= 2 && !trimmed.all { it in "*=-_#~ 　\t" }) {
+                    sb.append(trimmed).append('\n')
+                    if (sb.length >= targetChars) return sb.toString()
+                }
+            }
+        }
+        return sb.toString()
+    }
+
     private suspend fun detectOrLoadLanguage(
         outputDirUri: String,
-        firstContent: String,
+        files: List<VDoc>,
         inherited: SourceLang? = null
     ): SourceLang {
         val cache = store.findChild(outputDirUri, ".lang_cache")
@@ -255,16 +317,19 @@ class RunEngine(
             if (doc != null) store.writeText(doc.uri, inherited.name)
             return inherited
         }
-        val detected = detectLanguage(firstContent).language
+        val sample = sampleTextForLanguage(files)
+        val detected = detectLanguage(sample)
+        addLog("detected language: ${detected.language} (${detected.reason})")
         val doc = cache ?: store.createFile(outputDirUri, ".lang_cache", "text/plain")
-        if (doc != null) store.writeText(doc.uri, detected.name)
-        return detected
+        if (doc != null) store.writeText(doc.uri, detected.language.name)
+        return detected.language
     }
 
     /**
      * Physical pre-split pass. Returns accumulated (done, total) when at least
-     * one raw file was found (parent direct translation is then skipped),
-     * or null when there is nothing to split (normal path continues).
+     * one part was translated (parent direct translation is then skipped),
+     * or null when there is nothing to translate this way (normal path continues,
+     * e.g. no raw files, or raw files produced no translatable parts).
      * One blocked novel never stops the others: each part file translates and
      * resumes independently, so no combine step can get stuck mid-file.
      */
@@ -285,14 +350,15 @@ class RunEngine(
         val splitRoot = store.findChild(folderUri, "分割済み")
             ?: store.createDir(folderUri, "分割済み")
             ?: run {
-                addLog("pre-split root failed: $folderName")
-                return 0 to 0
+                addLog("❌ 「分割済み」フォルダの作成に失敗しました: $folderName")
+                return null
             }
         var done = 0
         var total = 0
         for ((rawIndex, raw) in rawFiles.withIndex()) {
             if (stopFlag.get() || !coroutineContext.isActive) break
-            addLog("pre-split novel ${rawIndex + 1}/${rawFiles.size}: ${raw.name}")
+            _state.update { it.copy(statusText = "📄 物理分割中: ${raw.name} (${rawIndex + 1}/${rawFiles.size})") }
+            addLog("📄 [物理分割開始] (${rawIndex + 1}/${rawFiles.size}) ${raw.name}")
             val result = splitSingleTextFile(
                 store = store,
                 fileUri = raw.uri,
@@ -305,14 +371,15 @@ class RunEngine(
             )
             if (result != null && !stopFlag.get() && coroutineContext.isActive) {
                 val lang = detectLanguage(result.sampleText).language
-                val subName = result.subfolderUri.substringAfterLast('/').ifBlank { result.novelName }
-                addLog("pre-split translate subfolder: $subName")
+                val subName = result.novelName
+                _state.update { it.copy(statusText = "🚀 分割完了・翻訳開始: $subName") }
+                addLog("🚀 [翻訳開始] サブフォルダ: $subName (${result.partCount} パート)")
                 val (d, t) = processFolder(result.subfolderUri, subName, settings, pool, meter, lang)
                 done += d
                 total += t
             }
         }
-        return done to total
+        return if (total > 0) (done to total) else null
     }
 
     private suspend fun processFolder(
@@ -324,7 +391,7 @@ class RunEngine(
         inheritedLang: SourceLang? = null
     ): Pair<Int, Int> {
         if (shouldAbort(pool, settings)) {
-            addLog("abort before folder work: $folderName")
+            addLog("⚠️ 利用可能なキー枠が枯渇したためフォルダ処理を中止: $folderName")
             stopFlag.set(true)
             return 0 to 0
         }
@@ -333,33 +400,36 @@ class RunEngine(
         // direct translation of the parent is skipped afterwards.
         if (settings.split.enabled && inheritedLang == null) {
             val splitResult = processPreSplit(folderUri, folderName, settings, pool, meter)
-            if (splitResult != null) return splitResult
+            if (splitResult != null && splitResult.second > 0) return splitResult
         }
         val outSubDir = settings.limits.outputSubDir.ifBlank { "翻訳完了_LLM" }
+        _state.update { it.copy(statusText = "📁 フォルダ内を検索中: $folderName") }
         val files = store.children(folderUri)
-            .filter { !it.isDirectory && it.name.endsWith(".txt") && !it.name.endsWith(".failed") }
+            .filter { !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) && !it.name.endsWith(".failed", ignoreCase = true) }
             .sortedBy { it.name }
         if (files.isEmpty()) {
-            addLog("no .txt files: $folderName")
+            addLog("⚠️ 対象ファイルなし: $folderName (直下に.txtファイルがありません)")
+            _state.update { it.copy(statusText = "⚠️ .txtファイルがありません: $folderName") }
             return 0 to 0
         }
         val outputDir = store.findChild(folderUri, outSubDir)
             ?: store.createDir(folderUri, outSubDir)
             ?: run {
-                addLog("output dir failed: $outSubDir")
+                addLog("❌ 出力フォルダ作成失敗: $outSubDir")
+                _state.update { it.copy(statusText = "⚠️ 出力フォルダ作成失敗: $outSubDir") }
                 return 0 to 0
             }
 
         val existing = Collections.synchronizedSet(mutableSetOf<String>())
         var zeroBytes = 0
         for (doc in store.children(outputDir.uri)) {
-            if (!doc.isDirectory && doc.name.endsWith(".txt") && doc.length == 0L) {
+            if (!doc.isDirectory && doc.name.endsWith(".txt", ignoreCase = true) && doc.length == 0L) {
                 zeroBytes++
                 continue
             }
             existing.add(doc.name)
         }
-        if (zeroBytes > 0) addLog("zero-byte outputs reprocess: $zeroBytes")
+        if (zeroBytes > 0) addLog("ℹ️ 0バイトの既存ファイルを再翻訳対象に含めます: ${zeroBytes}件")
 
         val total = files.size
         var preCompleted = 0
@@ -370,17 +440,18 @@ class RunEngine(
             }
         }
         if (preCompleted >= total) {
-            _state.update { it.copy(progress = total to total) }
-            addLog("skip completed folder: $folderName ($total/$total)")
+            _state.update { it.copy(progress = total to total, statusText = "✅ 全件翻訳済み: $folderName") }
+            addLog("✅ 全件翻訳済みのためスキップ: $folderName ($total/$total 件)")
             return total to total
         }
 
-        val firstContent = store.readText(files.first().uri) ?: ""
-        val sourceLang = detectOrLoadLanguage(outputDir.uri, firstContent, inheritedLang)
+        _state.update { it.copy(statusText = "🔍 言語判定中: $folderName") }
+        val sourceLang = detectOrLoadLanguage(outputDir.uri, files, inheritedLang)
 
         // 辞書
         var novelDict: NovelDict? = null
         if (settings.dict.enabled) {
+            _state.update { it.copy(statusText = "📖 登場人物辞書を生成中: $folderName") }
             val existingDict = store.findChild(folderUri, "dictionary.json")
             val dictJson = existingDict?.let { store.readText(it.uri) } ?: ""
             novelDict = parseDictJson(dictJson)
@@ -389,6 +460,7 @@ class RunEngine(
             }
             if (novelDict == null) {
                 addLog("dict incomplete, skip folder: $folderName")
+                _state.update { it.copy(statusText = "⚠️ 辞書生成が未完了のためスキップ: $folderName") }
                 return preCompleted to total
             }
         }
@@ -418,7 +490,20 @@ class RunEngine(
         val promptOrder = primaryOrder
         val claims = Collections.synchronizedSet(mutableSetOf<String>())
         val workerCount = settings.limits.parallelWorkers.coerceIn(1, 6)
-        val batchMaxBytes = (options.splitThresholdBytes * 0.9).toInt().coerceAtLeast(3000)
+        // 参加プロファイルの最小 maxOutputChars を採用（小型モデルへのローテーション時にもトークン溢れを完全防止）
+        val targetOutputChars = profiles.minOfOrNull { it.maxOutputChars } ?: 15000
+        val optimalInputBytes = V2Settings.calculateInputLimitBytes(sourceLang, targetOutputChars)
+        val splitThresholdBytes = optimalInputBytes
+        val chunkSizeBytes = (optimalInputBytes * 0.9).toInt().coerceAtLeast(3000)
+        val batchMaxBytes = (optimalInputBytes * 0.85).toInt().coerceAtLeast(3000)
+        addLog("capacity: limit=${optimalInputBytes}B, chunk=${chunkSizeBytes}B, batch=${batchMaxBytes}B (source=${sourceLang.name}, maxOutput=${targetOutputChars} chars)")
+
+        val contextTracker = SourceContextTracker(
+            files = files,
+            store = store,
+            contextLines = settings.prevContext.lines,
+            enabled = settings.prevContext.enabled
+        )
 
         val jobs = mutableListOf<Deferred<Unit>>()
         for (wId in 1..workerCount) {
@@ -440,10 +525,10 @@ class RunEngine(
                 descriptors = mapOf("gemini" to GEMINI_DESCRIPTOR, "openrouter" to OPENROUTER_DESCRIPTOR),
                 handlerFactory = { profile, key -> buildHandler(settings, profile, key) },
                 openRouterKey = settings.openRouterKey,
-                switchCooldownSec = 15,
+                switchCooldownSec = options.switchCooldownSec,
                 maxSameRetries = options.maxSameRetries,
                 sendGate = sendGate,
-                sendGateIntervalMs = maxOf(settings.limits.requestDelaySec * 1000L, 10_000L),
+                sendGateIntervalMs = if (options.minSendIntervalMs == 0L) settings.limits.requestDelaySec * 1000L else maxOf(settings.limits.requestDelaySec * 1000L, options.minSendIntervalMs),
                 stopped = { stopFlag.get() },
                 meter = meter,
                 log = { addLog("[W#$wId] $it") }
@@ -456,8 +541,11 @@ class RunEngine(
                     runWorker(
                         wId, files, outputDir.uri, existing, claims,
                         settings, rotation, novelDict,
-                        completed, total, batchMaxBytes, sourceLang, promptOrder,
-                        profiles, profilePromptOrders
+                        completed, total,
+                        batchMaxBytes, splitThresholdBytes, chunkSizeBytes,
+                        sourceLang, promptOrder,
+                        profiles, profilePromptOrders,
+                        contextTracker
                     )
                 } finally {
                     rotation.release()
@@ -488,30 +576,49 @@ class RunEngine(
         val workDir = store.findChild(folderUri, ".dict_building")
             ?: store.createDir(folderUri, ".dict_building")
             ?: return null
-        val texts = mutableListOf<Pair<String, String>>()
-        for (f in files) {
-            if (stopFlag.get()) return null
-            val raw = store.readText(f.uri) ?: continue
-            val clean = cleanseBasic(raw).trim()
-            if (clean.isNotBlank()) texts.add(f.name to clean)
-        }
+        // 技術的根拠: 1,000ファイル超の長編小説フォルダでメモリ枯渇（OOM）を起こさないよう、
+        // ファイル名だけ先に渡し、本文はサンプリング後に1件ずつ遅延読込する
+        val docByName = files.associateBy { it.name }
         val scopes = listOf(dict.model.ifBlank { "dict" })
+        // 技術的根拠1行：OpenRouterは単一キー共有でGeminiプールを使わない（空プールでの誤枯渇を防ぐ。送って作って統合するだけ）。
         val dictCall: suspend (String, String, String) -> LlmResult = { model, prompt, text ->
-            pooledCall(pool, scopes, settings.dict.cooldown429Sec) { key ->
-                val profile = V2ModelProfile(providerId = dict.providerId, model = model)
-                buildHandler(settings, profile, key).call(
-                    LlmRequest(
-                        dict.providerId, model, prompt, text,
-                        com.example.novelscraper.translation.v2.engine.resolveProfileOptions(
-                            profile.copy(thinkingLevel = dict.thinkingLevel),
-                            mapOf("gemini" to GEMINI_DESCRIPTOR, "openrouter" to OPENROUTER_DESCRIPTOR)[dict.providerId]
-                        )
-                    )
+            // 技術的根拠1行：辞書設定のproviderOrder/allowFallbacksが無視されるとOpenRouterの振分け指定が死に設定になるため引継ぐ（解決はhandlerFor側）。
+            val profile = V2ModelProfile(
+                providerId = dict.providerId,
+                model = model,
+                providerOrder = dict.providerOrder,
+                providerAllowFallbacks = dict.providerAllowFallbacks
+            )
+            fun dictRequest(key: String): LlmRequest = LlmRequest(
+                dict.providerId, model, prompt, text,
+                com.example.novelscraper.translation.v2.engine.resolveProfileOptions(
+                    profile.copy(thinkingLevel = dict.thinkingLevel),
+                    mapOf("gemini" to GEMINI_DESCRIPTOR, "openrouter" to OPENROUTER_DESCRIPTOR)[dict.providerId]
                 )
+            )
+            if (dict.providerId == "openrouter") {
+                try {
+                    buildHandler(settings, profile, settings.openRouterKey).call(dictRequest(settings.openRouterKey))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    LlmResult.Failure(ClassifiedFailure(FailureKind.RETRYABLE_AFTER, note = "io:${e.message}"))
+                }
+            } else {
+                pooledCall(pool, scopes, settings.dict.cooldown429Sec) { key ->
+                    buildHandler(settings, profile, key).call(dictRequest(key))
+                }
             }
         }
         val result = generateDictionary(
-            store, workDir.uri, texts, dictCall,
+            store, workDir.uri, files.map { it.name },
+            readText = { name ->
+                if (stopFlag.get()) null
+                else docByName[name]?.let { store.readText(it.uri) }
+                    ?.let { cleanseBasic(it).trim() }
+                    ?.takeIf { it.isNotBlank() }
+            },
+            dictCall,
             DictOptions(
                 model = dict.model,
                 mergeModel = dict.mergeModel,
@@ -596,6 +703,53 @@ class RunEngine(
         return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "pool-cap"))
     }
 
+    /**
+     * 【前文末尾注入の統一仕様】
+     * 1. 単体翻訳:
+     *    直前話（i - 1）の【原文末尾（設定行数）】を注入。
+     *    全ワーカー共有キャッシュ（ConcurrentHashMap）により、ワーカー数に関わらず直前話を特定する（設定無効・先頭話は注入なし）。
+     * 2. バッチ翻訳:
+     *    ・一括送信時: バッチ先頭ファイルに対する直前話（i - 1）の【原文末尾（設定行数）】を注入。
+     *    ・単体フォールバック時: 各話に対して直前話（i - 1）の【原文末尾（設定行数）】を注入（誤訳伝染防止）。
+     * 3. チャンク翻訳（大ファイル分割翻訳）:
+     *    ・先頭の未処理チャンクのみ直前話（i - 1）の【原文末尾（設定行数）】を注入。
+     *    ・後続チャンクは同一エピソード内の接続のため、直前チャンクの【翻訳後訳文末尾（設定行数）】を数珠つなぎ注入。
+     *    （訳文末尾と原文末尾の重ね注入はしない）
+     *
+     * 全ワーカー共有の原文コンテキスト管理（スレッドセーフ）。
+     * 並行ワーカー間での文脈欠落（null化）を抑止し、ファイル順（インデックス順）で直前話（i - 1）の
+     * クレンジング済み原文末尾N行を提供する（前文脈設定が無効の場合は提供しない）。
+     */
+    private inner class SourceContextTracker(
+        private val files: List<com.example.novelscraper.translation.v2.infra.VDoc>,
+        private val store: com.example.novelscraper.translation.v2.infra.FileStore,
+        private val contextLines: Int,
+        private val enabled: Boolean
+    ) {
+        private val cache = java.util.concurrent.ConcurrentHashMap<Int, String>()
+
+        suspend fun getPrevSourceTail(index: Int): String? {
+            if (!enabled || index <= 0 || index >= files.size) return null
+            val targetIdx = index - 1
+            val cached = cache[targetIdx]
+            if (cached != null) return cached.ifEmpty { null }
+
+            val file = files.getOrNull(targetIdx) ?: return null
+            val raw = store.readText(file.uri) ?: return null
+            val clean = cleanseBasic(raw)
+            if (clean.isBlank()) return null
+            val tail = clean.lines().takeLast(contextLines.coerceIn(1, 100)).joinToString("\n")
+            cache[targetIdx] = tail
+            return tail.ifEmpty { null }
+        }
+
+        fun putSource(index: Int, content: String) {
+            if (!enabled || index < 0 || index >= files.size) return
+            val tail = content.lines().takeLast(contextLines.coerceIn(1, 100)).joinToString("\n")
+            cache[index] = tail
+        }
+    }
+
     private suspend fun runWorker(
         workerId: Int,
         files: List<com.example.novelscraper.translation.v2.infra.VDoc>,
@@ -608,10 +762,13 @@ class RunEngine(
         completed: AtomicInteger,
         total: Int,
         batchMaxBytes: Int,
+        splitThresholdBytes: Int,
+        chunkSizeBytes: Int,
         sourceLang: SourceLang,
         promptOrder: List<Int>,
         profiles: List<V2ModelProfile>,
-        profilePromptOrders: Map<String, List<Int>>
+        profilePromptOrders: Map<String, List<Int>>,
+        contextTracker: SourceContextTracker
     ) {
         fun claim(name: String): Boolean = synchronized(claims) { claims.add(name) }
         fun unclaim(name: String) {
@@ -636,13 +793,16 @@ class RunEngine(
         )
         val allBasePrompts = options.basePrompts + settings.customPrompts
         val primaryPromptNum = promptOrder.firstOrNull() ?: 1
-        val ctx = TranslateContext(
-            basePrompts = allBasePrompts,
-            promptOrder = promptOrder,
-            driverNames = listOf("w$workerId"),
-            dictionary = novelDict,
-            verify = verify,
-            call = { _, prompt, source ->
+        // 技術的根拠: 構造化出力の適用範囲をバッチ枠に限定するため、枠種別で送信bindingを使い分ける
+        val useJsonBatch = profiles.any { profile ->
+            profile.useJsonSchema && when (profile.providerId) {
+                "gemini" -> GEMINI_DESCRIPTOR.capabilitiesFor(profile.model).structuredOutput
+                "openrouter" -> OPENROUTER_DESCRIPTOR.capabilitiesFor(profile.model).structuredOutput
+                else -> false
+            }
+        }
+        fun bindCall(forBatch: Boolean): suspend (String, String, String) -> LlmResult {
+            return { _, prompt, source ->
                 val profilePrompts = profiles.associate { profile ->
                     val order = profilePromptOrders[profile.id] ?: promptOrder
                     profile.id to order.map { targetPromptNum ->
@@ -654,80 +814,93 @@ class RunEngine(
                         )
                     }
                 }
-                rotation.execute(listOf(prompt), source, profilePrompts)
-            },
+                rotation.execute(listOf(prompt), source, profilePrompts, forBatch)
+            }
+        }
+        val ctx = TranslateContext(
+            basePrompts = allBasePrompts,
+            promptOrder = listOf(primaryPromptNum), // 技術的根拠: プロンプト順巡回はRotation側に一本化し、外側attemptDriversとの二重ループ(NxN)を防止
+            driverNames = listOf("w$workerId"),
+            dictionary = novelDict,
+            verify = verify,
+            call = bindCall(false),
+            callBatch = bindCall(true),
+            batchJsonFormat = useJsonBatch,
+            prevContextLines = settings.prevContext.lines,
+            prevContextEnabled = settings.prevContext.enabled,
             maxSameRetries = 0,
             stopped = { stopFlag.get() },
             meter = null,
             log = { addLog("[W#$workerId] $it") }
         )
-        // Previous-story raw tail, sliding window of 1 in file order.
-        // Workers run concurrently, so a previous *translation* is generally
-        // unavailable; the raw tail of the preceding file is used instead.
-        // Texts are reused from memory (no re-read); a cross-worker miss yields null.
-        var prevTailName: String? = null
-        var prevTailText: String? = null
-        fun prevTailFor(index: Int): String? {
-            if (!settings.prevContext.enabled) return null
-            if (index <= 0) return null
-            return if (prevTailName == files[index - 1].name) prevTailText else null
-        }
-        fun rememberTail(name: String, content: String) {
-            if (!settings.prevContext.enabled) return
-            prevTailName = name
-            prevTailText = content.lines()
-                .takeLast(settings.prevContext.lines.coerceIn(1, 100))
-                .joinToString("\n")
-        }
         for ((fileIdx, file) in files.withIndex()) {
             if (stopFlag.get() || rotation.exhausted) break
             val fileName = file.name
-            val hasWork = existing.contains(".parts_${fileName}")
-            if (!hasWork && (existing.contains(fileName) || existing.contains("$fileName.failed"))) continue
+            if (existing.contains(fileName) || existing.contains("${fileName}.failed")) continue
             if (!claim(fileName)) continue
+            _state.update { it.copy(fileName = fileName, statusText = "翻訳中: $fileName (${completed.get()}/$total)") }
 
             try {
                 val raw = store.readText(file.uri)
                 if (raw == null) {
-                    addLog("[W#$workerId] read failed: $fileName")
+                    addLog("❌ [W#$workerId] ファイル読込失敗: $fileName")
+                    writeFailed(store, outputDirUri, fileName, "unreadable file")
+                    existing.add("${fileName}.failed")
+                    bump(fileName)
                     continue
                 }
                 val content = cleanseBasic(raw)
+                contextTracker.putSource(fileIdx, content)
                 if (content.isBlank()) {
                     val out = store.findChild(outputDirUri, fileName)
                         ?: store.createFile(outputDirUri, fileName, "text/plain")
                     if (out != null && store.writeText(out.uri, "")) existing.add(fileName)
-                    rememberTail(fileName, content)
                     bump(fileName)
                     continue
                 }
                 val contentBytes = utf8Bytes(content)
 
-                if (contentBytes > options.splitThresholdBytes) {
+                if (contentBytes > splitThresholdBytes) {
+                    if (contentBytes > options.maxInputBytes) {
+                        // 技術的根拠1行：上限超えの巨大入力は実行時分割も事前分割への自動回送もせず、その場でスキップ確定する
+                        addLog("⏭️ [W#$workerId] 上限超過のためスキップ: $fileName (${contentBytes}B)")
+                        writeFailed(store, outputDirUri, fileName, content) { addLog(it) }
+                        existing.add("$fileName.failed")
+                        bump(fileName)
+                        continue
+                    }
                     val workDir = store.findChild(outputDirUri, ".parts_${fileName}")
                         ?: store.createDir(outputDirUri, ".parts_${fileName}")
                     if (workDir == null) {
-                        addLog("[W#$workerId] workdir failed: $fileName")
+                        addLog("❌ [W#$workerId] 大ファイル用作業フォルダ作成失敗: $fileName")
                     } else {
-                        addLog("[W#$workerId] large: $fileName (${contentBytes}B)")
+                        addLog("📦 [W#$workerId] 大ファイル分割翻訳開始: $fileName (${contentBytes}B)")
                         val ok = translateLarge(
                             store, workDir.uri, outputDirUri, fileName, content, ctx,
-                            LargeOptions(chunkSizeBytes = options.chunkSizeBytes, maxInputBytes = options.maxInputBytes),
-                            prevSourceTail = prevTailFor(fileIdx),
+                            LargeOptions(
+                                chunkSizeBytes = chunkSizeBytes,
+                                tailLines = settings.prevContext.lines.coerceIn(1, 100),
+                                maxInputBytes = options.maxInputBytes
+                            ),
+                            prevSourceTail = contextTracker.getPrevSourceTail(fileIdx),
                             onChunkProgress = { cur, total ->
                                 _state.update { it.copy(chunkProgress = cur to total) }
                             }
                         )
                         _state.update { it.copy(chunkProgress = 0 to 0) }
-                        if (ok) existing.add(fileName)
+                        if (ok) {
+                            existing.add(fileName)
+                            addLog("✅ [W#$workerId] 大ファイル翻訳完了: $fileName")
+                        }
                     }
-                    rememberTail(fileName, content)
                     bump(fileName)
                     continue
                 }
 
                 // バッチ束ね（後続のみ・最大件数・合計バイト上限）
                 val batch = mutableListOf(file to content)
+                // 各話の直前話末尾（全体文脈基準。フォールバック時の単体翻訳と同一にする）
+                val batchPrevTails = mutableListOf(contextTracker.getPrevSourceTail(fileIdx))
                 var batchBytes = contentBytes
                 for (nextIdx in fileIdx + 1 until files.size) {
                     if (batch.size >= options.batchMaxFiles) break
@@ -742,6 +915,7 @@ class RunEngine(
                         continue
                     }
                     val nextClean = cleanseBasic(nextRaw)
+                    contextTracker.putSource(nextIdx, nextClean)
                     if (nextClean.isBlank()) {
                         val out = store.findChild(outputDirUri, nextName)
                             ?: store.createFile(outputDirUri, nextName, "text/plain")
@@ -751,52 +925,53 @@ class RunEngine(
                         continue
                     }
                     val nextBytes = utf8Bytes(nextClean)
-                    if (nextBytes > options.splitThresholdBytes || batchBytes + nextBytes > batchMaxBytes) {
+                    // 技術的根拠: バッチ束ね判定でも固定デフォルト値 options.splitThresholdBytes ではなく最小モデル連動の動的 splitThresholdBytes を適用しトークン溢れを防止
+                    if (nextBytes > splitThresholdBytes || batchBytes + nextBytes > batchMaxBytes) {
                         unclaim(nextName)
                         break
                     }
                     batch.add(next to nextClean)
+                    batchPrevTails.add(contextTracker.getPrevSourceTail(nextIdx))
                     batchBytes += nextBytes
                 }
                 try {
                     if (batch.size > 1) {
-                        addLog("[W#$workerId] batch x${batch.size}: ${batch.map { it.first.name }}")
+                        addLog("📦 [W#$workerId] バッチ翻訳開始 (${batch.size}件): ${batch.map { it.first.name }.joinToString(", ")}")
                         val outcome = translateBatch(
                             store, outputDirUri,
                             batch.map { it.first.name to it.second },
                             ctx,
-                            prevSourceTail = prevTailFor(fileIdx)
+                            prevSourceTail = batchPrevTails.firstOrNull(),
+                            itemPrevTails = batchPrevTails
                         )
                         if (outcome.settled > 0) {
                             val done = completed.addAndGet(outcome.settled)
                             _state.update { it.copy(progress = done to total, fileName = fileName) }
+                            addLog("✅ [W#$workerId] バッチ翻訳完了 (${outcome.savedFiles.size}件保存)")
                         }
-                        // 保存系はstage内で完結するため、既存集合を実体と同期する
-                        for (item in batch) {
-                            val n = item.first.name
-                            if (store.findChild(outputDirUri, n) != null) existing.add(n)
-                            if (store.findChild(outputDirUri, "$n.failed") != null) existing.add("$n.failed")
-                        }
+                        // 保存系はstage内で完結するため、結果から既存集合を直接同期（不要なfindChild Binder IPCクエリを全廃）
+                        // 技術的根拠: SAFの findChild は O(N) の線形ディレクトリ走査・IPCクエリを伴うため、translateBatch の確定ファイル名で1工程同期する
+                        existing.addAll(outcome.savedFiles)
                         if (outcome.configBlocked) return
                     } else {
-                        addLog("[W#$workerId] single: $fileName (${contentBytes}B)")
-                        when (val r = translateSingle(content, ctx, prevSourceTail = prevTailFor(fileIdx))) {
+                        addLog("📝 [W#$workerId] 翻訳中: $fileName")
+                        when (val r = translateSingle(content, ctx, prevSourceTail = contextTracker.getPrevSourceTail(fileIdx))) {
                             is SingleResult.Translated -> {
                                 val out = store.findChild(outputDirUri, fileName)
                                     ?: store.createFile(outputDirUri, fileName, "text/plain")
                                 if (out != null && store.writeText(out.uri, r.text)) {
                                     existing.add(fileName)
+                                    addLog("✅ [W#$workerId] 翻訳完了・保存: $fileName")
                                 }
                             }
                             is SingleResult.Failed -> writeFailed(store, outputDirUri, fileName, content) { addLog(it) }
                             is SingleResult.ConfigOnly -> {
-                                addLog("[W#$workerId] config only, skip .failed: $fileName")
+                                addLog("⚠️ [W#$workerId] 設定エラーのためスキップ: $fileName")
                             }
                             is SingleResult.Stopped -> return
                         }
                         bump(fileName)
                     }
-                    for (item in batch) rememberTail(item.first.name, item.second)
                 } finally {
                     for (item in batch) unclaim(item.first.name)
                 }

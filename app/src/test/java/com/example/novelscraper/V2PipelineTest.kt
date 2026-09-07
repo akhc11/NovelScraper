@@ -26,13 +26,16 @@ import com.example.novelscraper.translation.v2.pipeline.buildSystemPrompt
 import com.example.novelscraper.translation.v2.pipeline.checkAndStripMarker
 import com.example.novelscraper.translation.v2.pipeline.detectLanguage
 import com.example.novelscraper.translation.v2.pipeline.generateDictionary
-import com.example.novelscraper.translation.v2.pipeline.hasBatchClosedTags
+import com.example.novelscraper.translation.v2.pipeline.buildBatchJsonSchema
+import com.example.novelscraper.translation.v2.pipeline.detectBatchSwap
 import com.example.novelscraper.translation.v2.pipeline.joinOutputsStreaming
 import com.example.novelscraper.translation.v2.pipeline.kanaRate
 import com.example.novelscraper.translation.v2.pipeline.matchDictionaryEntries
 import com.example.novelscraper.translation.v2.pipeline.meetsKanaFloor
+import com.example.novelscraper.translation.v2.settings.V2Settings
 import com.example.novelscraper.translation.v2.pipeline.mergeDecision
 import com.example.novelscraper.translation.v2.pipeline.parseBatchResponse
+import com.example.novelscraper.translation.v2.pipeline.parseBatchJsonResponse
 import com.example.novelscraper.translation.v2.pipeline.parseNovelDict
 import com.example.novelscraper.translation.v2.pipeline.routeFor
 import com.example.novelscraper.translation.v2.pipeline.selectSampleFiles
@@ -71,6 +74,40 @@ class V2PipelineTest {
         assertEquals(SourceLang.KO, detectLanguage("이것은 용사에 관한 이야기입니다. 그는 왕국을 구하기 위해 떠났다.").language)
         assertEquals(SourceLang.EN, detectLanguage("This is a story about a hero who left to save the kingdom.").language)
         assertEquals(SourceLang.JA, detectLanguage("これは勇者に関する物語です。彼は王国を救うために旅に出ました。").language)
+
+        // エッジケース1: 台湾繁体字（簡体字がなくてもZHと判定される）
+        assertEquals(SourceLang.ZH, detectLanguage("這是一個關於勇者的故事。他為了拯救王國踏上了旅程。").language)
+
+        // エッジケース2: 中国語＋日本の顔文字（カタカナノイズでJAに誤爆しない）
+        assertEquals(SourceLang.ZH, detectLanguage("这是一个关于勇者的故事(´・ω・｀)。他为了拯救王国踏上了旅程。").language)
+
+        // エッジケース3: 韓国語＋英語タイトル（英語タイトル混ざりでENに誤爆しない）
+        assertEquals(SourceLang.KO, detectLanguage("[PROLOGUE] 이것은 용사에 관한 이야기입니다. 그는 왕국을 구하기 위해 떠났다.").language)
+
+        // エッジケース4: ゲーム小説の英語ステータス画面混ざり（ステータス画面でENに誤爆しない）
+        assertEquals(SourceLang.ZH, detectLanguage("STATUS: HP 100/100, MP 50/50, LEVEL 1\n这是一个关于勇者的故事。他为了拯救王国踏上了旅程。").language)
+
+        // エッジケース5: 日本語の漢字多め・国字（峠、畑）混ざり
+        assertEquals(SourceLang.JA, detectLanguage("第一章 峠の決戦。彼らは畑を抜けて山へ向かった。").language)
+    }
+
+    @Test
+    fun testCalculateInputLimitBytes() {
+        val maxChars = 15000
+        val zhBytes = V2Settings.calculateInputLimitBytes(SourceLang.ZH, maxChars)
+        val koBytes = V2Settings.calculateInputLimitBytes(SourceLang.KO, maxChars)
+        val enBytes = V2Settings.calculateInputLimitBytes(SourceLang.EN, maxChars)
+        val jaBytes = V2Settings.calculateInputLimitBytes(SourceLang.JA, maxChars)
+
+        assertEquals(28125, zhBytes)
+        assertEquals(40909, koBytes)
+        assertEquals(26785, enBytes)
+        assertEquals(45000, jaBytes)
+
+        val (zhKb, koKb, enKb) = V2Settings.inputSizeEstimateKb(maxChars)
+        assertEquals(27, zhKb)
+        assertEquals(39, koKb)
+        assertEquals(26, enKb)
     }
 
     @Test
@@ -130,11 +167,36 @@ class V2PipelineTest {
     }
 
     @Test
+    fun testChunking_MergeTinyTail() {
+        // 1. 末尾がたった1行（極小）の場合: 直前チャンクにスマート吸収されて分割数が増えないこと
+        val longParagraph = "これは非常に長い文章の段落です。".repeat(200) // 約6,400バイト
+        val tinyTail = "\n\n最後の1行です。" // 約25バイト
+        val textWithTinyTail = longParagraph + tinyTail
+
+        // limitBytes = 6000: longParagraph (6400B) がまず分割されるか、または末尾の微小余りが直前に吸収される
+        val chunks = splitIntoChunks(textWithTinyTail, 6000)
+        val combinedText = chunks.joinToString("")
+        assertEquals(textWithTinyTail, combinedText) // 全文の欠損が一切ないこと
+        // 末尾チャンクが極小のまま孤立していないことを検証
+        if (chunks.size >= 2) {
+            val lastChunkBytes = chunks.last().toByteArray(Charsets.UTF_8).size
+            val threshold = (6000 * 0.15).toInt().coerceAtLeast(1000)
+            assertTrue("Last chunk should be at least threshold or absorbed: $lastChunkBytes", lastChunkBytes >= threshold)
+        }
+
+        // 2. 末尾が十分大きい場合（上限の15%以上）: 正常に独立チャンクとして維持されること
+        val partA = "段落Aの本文です。\n\n".repeat(100) // 約3,000バイト
+        val partB = "段落Bの本文です。\n\n".repeat(100) // 約3,000バイト
+        val chunksTwo = splitIntoChunks(partA + partB, 3200)
+        assertEquals(2, chunksTwo.size)
+        assertEquals(partA + partB, chunksTwo.joinToString(""))
+    }
+
+    @Test
     fun testBatchIO_Roundtrip() {
         val input = buildBatchInput(listOf("a.txt" to "你好", "b.txt" to "早上好"))
         assertTrue(input.contains("<doc id=\"1\">"))
         val resp = "<translations>\n<trans id=\"1\">\nこんにちは\n</trans>\n<trans id=\"2\">\nおはよう\n</trans>\n</translations>"
-        assertTrue(hasBatchClosedTags(resp))
         val parsed = parseBatchResponse(resp)!!
         assertEquals("こんにちは", parsed[1])
         assertEquals("おはよう", parsed[2])
@@ -289,6 +351,174 @@ class V2PipelineTest {
     }
 
     @Test
+    fun testBatchIO_JsonHybrid_And_RegexRescue() {
+        // 1. buildBatchJsonSchema
+        val schema = buildBatchJsonSchema()
+        assertTrue(schema.contains("\"translations\""))
+        assertTrue(schema.contains("\"id\""))
+        assertTrue(schema.contains("\"text\""))
+
+        // 2. 標準JSONパース (translations配列)
+        val jsonStandard = """
+            {
+              "translations": [
+                {"id": 1, "text": "こんにちは、世界！\n「元気ですか？」"},
+                {"id": 2, "text": "おはようございます。"}
+              ]
+            }
+        """.trimIndent()
+        val parsedStd = parseBatchResponse(jsonStandard)
+        assertNotNull(parsedStd)
+        assertEquals("こんにちは、世界！\n「元気ですか？」", parsedStd!![1])
+        assertEquals("おはようございます。", parsedStd[2])
+
+        // 3. トップレベル配列形式
+        val jsonArray = """[{"id": 1, "text": "第1話訳"}, {"id": 2, "text": "第2話訳"}]"""
+        val parsedArr = parseBatchResponse(jsonArray)
+        assertNotNull(parsedArr)
+        assertEquals("第1話訳", parsedArr!![1])
+        assertEquals("第2話訳", parsedArr[2])
+
+        // 4. キーマップ形式 {"1": "...", "2": "..."}
+        val jsonMap = """{"1": "マップ第1話", "2": "マップ第2話"}"""
+        val parsedMap = parseBatchResponse(jsonMap)
+        assertNotNull(parsedMap)
+        assertEquals("マップ第1話", parsedMap!![1])
+        assertEquals("マップ第2話", parsedMap[2])
+
+        // 5. 途絶・構文エラーJSONからの正規表現救済（末尾が切れて閉じ括弧がない）
+        val brokenJson = """
+            {
+              "translations": [
+                {"id": 1, "text": "完成した第1話訳文です"},
+                {"id": 2, "text": "途中で途切れた第2話
+        """.trimIndent()
+        val rescued = parseBatchResponse(brokenJson)
+        assertNotNull(rescued)
+        assertEquals("完成した第1話訳文です", rescued!![1])
+    }
+
+    @Test
+    fun testBatchIO_SwapDetection() {
+        // 1. 章見出しによるスワップ検知
+        val itemsChapter = listOf(
+            "ch1.txt" to "第1話\nむかしむかしあるところに...",
+            "ch2.txt" to "第2話\n次の日、旅に出た..."
+        )
+        // 正常：id 1 が第1話、id 2 が第2話
+        val normalTrans = mapOf(
+            1 to "第1話\n昔々あるところに...",
+            2 to "第2話\n翌日、旅に出た..."
+        )
+        assertFalse(detectBatchSwap(itemsChapter, normalTrans))
+
+        // スワップ：id 1 に第2話、id 2 に第1話が入っている
+        val swappedTrans = mapOf(
+            1 to "第2話\n翌日、旅に出た...",
+            2 to "第1話\n昔々あるところに..."
+        )
+        assertTrue(detectBatchSwap(itemsChapter, swappedTrans))
+
+        // 2. 固有数字セットによるスワップ検知
+        val itemsNumbers = listOf(
+            "fileA.txt" to "コード12345と998877のアイテムを購入した。",
+            "fileB.txt" to "ステータス554433と776611を確認した。"
+        )
+        // スワップ：Aの訳文にBの数字(554433, 776611)、Bの訳文にAの数字(12345, 998877)
+        val swappedNumbers = mapOf(
+            1 to "ステータス554433と776611を確認した。",
+            2 to "コード12345と998877のアイテムを購入した。"
+        )
+        assertTrue(detectBatchSwap(itemsNumbers, swappedNumbers))
+    }
+
+    @Test
+    fun testTranslateBatch_SequentialContextTracking_NoFutureLeak() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val root = store.createRoot("track_test")
+        val items = listOf(
+            "c1.txt" to "第1話の原文です。\n一行目\n二行目",
+            "c2.txt" to "第2話の原文です。\n三行目\n四行目",
+            "c3.txt" to "第3話の原文です。\n五行目\n六行目"
+        )
+
+        // バッチ応答では第1話と第3話のみ返し、第2話は欠落させる
+        val capturedPrompts = mutableListOf<String>()
+        val ctx = looseCtx(call = { _, prompt, source ->
+            if (source.contains("<documents>")) {
+                ok("""
+                    <translations>
+                    <trans id="1">
+                    第1話の訳文です。第1話の末尾行。
+                    </trans>
+                    <trans id="3">
+                    第3話の訳文です。第3話の末尾行。
+                    </trans>
+                    </translations>
+                """.trimIndent())
+            } else {
+                capturedPrompts.add(prompt)
+                ok("第2話の単訳です。")
+            }
+        })
+
+        val outcome = translateBatch(store, root.uri, items, ctx, prevSourceTail = "バッチ直前原文")
+        assertEquals(3, outcome.completed)
+        assertEquals("第1話の訳文です。第1話の末尾行。", store.readText(store.findChild(root.uri, "c1.txt")!!.uri))
+        assertEquals("第2話の単訳です。", store.readText(store.findChild(root.uri, "c2.txt")!!.uri))
+        assertEquals("第3話の訳文です。第3話の末尾行。", store.readText(store.findChild(root.uri, "c3.txt")!!.uri))
+
+        // 第2話の単体フォールバックプロンプトに「第1話の原文末尾（二行目）」が含まれ、「第3話（未来）」や「バッチ直前原文（先祖返り）」が含まれていないことを確認！
+        assertEquals(1, capturedPrompts.size)
+        val singlePrompt = capturedPrompts[0]
+        assertTrue(singlePrompt.contains("二行目"))
+        assertFalse(singlePrompt.contains("バッチ直前原文"))
+        assertFalse(singlePrompt.contains("六行目"))
+        assertFalse(singlePrompt.contains("第3話"))
+    }
+
+    @Test
+    fun testTranslateBatch_SwapTriggersFallback() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val root = store.createRoot("swap_test")
+        val items = listOf(
+            "s1.txt" to "第1話\nむかしむかし",
+            "s2.txt" to "第2話\nあるところに"
+        )
+
+        var batchCalled = false
+        val singleCalls = mutableListOf<String>()
+
+        val ctx = looseCtx(call = { _, _, source ->
+            if (source.contains("<documents>")) {
+                batchCalled = true
+                // スワップした応答（id 1 に第2話、id 2 に第1話）
+                ok("""
+                    <translations>
+                    <trans id="1">
+                    第2話の訳文です。
+                    </trans>
+                    <trans id="2">
+                    第1話の訳文です。
+                    </trans>
+                    </translations>
+                """.trimIndent())
+            } else {
+                singleCalls.add(source)
+                if (source.contains("むかしむかし")) ok("第1話の正しい単訳") else ok("第2話の正しい単訳")
+            }
+        })
+
+        val outcome = translateBatch(store, root.uri, items, ctx)
+        assertTrue(batchCalled)
+        assertEquals(2, outcome.completed)
+        // スワップが検知され、単体フォールバックで翻訳・保存されたこと
+        assertEquals("第1話の正しい単訳", store.readText(store.findChild(root.uri, "s1.txt")!!.uri))
+        assertEquals("第2話の正しい単訳", store.readText(store.findChild(root.uri, "s2.txt")!!.uri))
+        assertEquals(2, singleCalls.size)
+    }
+
+    @Test
     fun testTranslateLarge_Flow() = kotlinx.coroutines.runBlocking {
         val store = InMemoryFileStore()
         val root = store.createRoot("w")
@@ -317,9 +547,11 @@ class V2PipelineTest {
         val root = store.createRoot("d")
         val goodJson = """{"style":"カタカナ","characters":{"山田":"ヤマダ"},"genders":{}}"""
         val files = listOf("a.txt" to "山田の物語", "b.txt" to "BLOCK対象")
+        val byName = files.toMap()
         // bだけ確定的失敗 → 部分マージで確定（2バッチ化のため上限を小さく）
         val dict = generateDictionary(
-            store, root.uri, files,
+            store, root.uri, files.map { it.first },
+            readText = { byName[it] },
             call = { _, _, text ->
                 if (text.contains("BLOCK")) fail(FailureKind.BLOCKED_DETERMINISTIC) else ok(goodJson)
             },
@@ -331,11 +563,25 @@ class V2PipelineTest {
         // 一時的失敗のみ → 保留
         val root2 = store.createRoot("d2")
         val held = generateDictionary(
-            store, root2.uri, files,
+            store, root2.uri, files.map { it.first },
+            readText = { byName[it] },
             call = { _, _, _ -> fail(FailureKind.QUOTA_MINUTE) },
             DictOptions(maxRetriesPerBatch = 0, parallelism = 2)
         )
         assertNull(held)
+
+        // FATAL（JSON崩れ等）は再送するが全体保留にはしない → 部分マージで確定
+        val root3 = store.createRoot("d3")
+        val fatalPartial = generateDictionary(
+            store, root3.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = { _, _, text ->
+                if (text.contains("BLOCK")) fail(FailureKind.FATAL) else ok(goodJson)
+            },
+            DictOptions(maxBatchBytes = 25, maxRetriesPerBatch = 0, parallelism = 2)
+        )
+        assertNotNull(fatalPartial)
+        assertEquals("ヤマダ", fatalPartial!!.characters["山田"])
     }
 
     @Test
@@ -344,6 +590,7 @@ class V2PipelineTest {
         val root = store.createRoot("d")
         val goodJson = """{"style":"カタカナ","characters":{"山田":"ヤマダ"},"genders":{}}"""
         val files = listOf("a.txt" to "山田の物語")
+        val byName = files.toMap()
         val batchPrompt = DictOptions().prompts.batch
         var batchCalls = 0
         val countingCall: suspend (String, String, String) -> LlmResult = { _, prompt, _ ->
@@ -351,7 +598,8 @@ class V2PipelineTest {
             ok(goodJson)
         }
         val first = generateDictionary(
-            store, root.uri, files,
+            store, root.uri, files.map { it.first },
+            readText = { byName[it] },
             call = countingCall,
             DictOptions(maxRetriesPerBatch = 0)
         )
@@ -359,15 +607,19 @@ class V2PipelineTest {
         assertEquals(1, batchCalls)
         // 内容変更なし → 抽出はキャッシュ再利用（レビューは毎回走る）
         val second = generateDictionary(
-            store, root.uri, files,
+            store, root.uri, files.map { it.first },
+            readText = { byName[it] },
             call = countingCall,
             DictOptions(maxRetriesPerBatch = 0)
         )
         assertNotNull(second)
         assertEquals(1, batchCalls)
         // 内容変更 → ハッシュ不一致で抽出から再取得
+        val revised = listOf("a.txt" to "山田の物語・改訂版")
+        val revisedByName = revised.toMap()
         val third = generateDictionary(
-            store, root.uri, listOf("a.txt" to "山田の物語・改訂版"),
+            store, root.uri, revised.map { it.first },
+            readText = { revisedByName[it] },
             call = countingCall,
             DictOptions(maxRetriesPerBatch = 0)
         )
@@ -500,5 +752,65 @@ class V2PipelineTest {
         val final = store.readText(store.findChild(out.uri, "big.txt")!!.uri)!!
         assertTrue(final.contains("勇者"))
         assertFalse(final.contains("前話の原文末尾"))
+    }
+
+    @Test
+    fun testBatch_JsonResponseParsed() {
+        val jsonText = """
+            ```json
+            {
+              "translations": [
+                {"id": 1, "ja": "第一話の訳文です。"},
+                {"id": 2, "ja": "第二話の訳文です。"}
+              ]
+            }
+            ```
+        """.trimIndent()
+        val parsed = parseBatchJsonResponse(jsonText)
+        assertNotNull(parsed)
+        assertEquals("第一話の訳文です。", parsed!![1])
+        assertEquals("第二話の訳文です。", parsed[2])
+    }
+
+    @Test
+    fun testBatch_UnclosedTailSegmentRescued() {
+        val cutText = """
+            <trans id="1">第一話の訳文です。</trans>
+            <trans id="2">第二話の途中まで生成された訳文
+        """.trimIndent()
+        val parsed = parseBatchResponse(cutText)
+        assertNotNull(parsed)
+        assertEquals("第一話の訳文です。", parsed!![1])
+        assertEquals("第二話の途中まで生成された訳文", parsed[2])
+    }
+
+    @Test
+    fun testChunk_SurrogatePairProtected() {
+        // 𠮷 (U+20BB7, UTF-16: \uD842\uDFB7)
+        val surrogateChar = "\uD842\uDFB7"
+        val longLine = "あ".repeat(9) + surrogateChar + "い".repeat(10)
+        // 10文字境界で分割する場合、9文字目の直後にあるサロゲートペアが泣き別れにならないことを確認
+        val chunks = com.example.novelscraper.translation.v2.pipeline.splitSafeOversized(longLine, 10)
+        assertTrue(chunks.isNotEmpty())
+        for (chunk in chunks) {
+            // 不正な孤立サロゲート文字が含まれていないこと
+            for (i in chunk.indices) {
+                if (Character.isHighSurrogate(chunk[i])) {
+                    assertTrue(i + 1 < chunk.length && Character.isLowSurrogate(chunk[i + 1]))
+                }
+                if (Character.isLowSurrogate(chunk[i])) {
+                    assertTrue(i > 0 && Character.isHighSurrogate(chunk[i - 1]))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun testQuality_LineCountOkFailsOnEmptyOutput() {
+        val src = "1行目\n2行目\n3行目\n4行目\n5行目\n6行目"
+        val emptyDst = ""
+        assertFalse(com.example.novelscraper.translation.v2.pipeline.lineCountOk(src, emptyDst))
+        val blankDst = "   \n  \n  "
+        assertFalse(com.example.novelscraper.translation.v2.pipeline.lineCountOk(src, blankDst))
     }
 }

@@ -24,11 +24,13 @@ typealias HandlerFactory = (profile: V2ModelProfile, key: String) -> ProviderHan
 
 /**
  * プロファイルを解決済み要求オプションへ変換する（pure）。
- * 能力表にない項目は落とす（表示＝有効の送信側対応）。
+ * 技術的根拠1行：能力表に載らないサンプリング項目は落として400級誤爆を防ぐが、記述子自体が未知の場合は寛容に素通しする。
+ * 構造化出力はバッチ枠でのみ有効化する（単体・チャンクは素の訳文を返す必要があるため）。
  */
 fun resolveProfileOptions(
     profile: V2ModelProfile,
-    descriptor: ProviderDescriptor?
+    descriptor: ProviderDescriptor?,
+    forBatch: Boolean = false
 ): RequestOptions {
     val caps = descriptor?.capabilitiesFor(profile.model)
     val thinkingLevel = when (val t = caps?.thinking) {
@@ -39,15 +41,22 @@ fun resolveProfileOptions(
         is ThinkingSupport.Budget -> resolveInt(t.range, null, profile.thinkingBudget).value
         else -> null
     }
-    val sampling = caps?.sampling ?: emptyMap()
+    fun gateSampling(key: String, value: Double?): Double? {
+        if (value == null) return null
+        val table = caps?.sampling ?: return resolveDouble(null, null, value).value
+        val range = table[key] ?: return null
+        return resolveDouble(range, null, value).value
+    }
+    val modelMaxTokens = caps?.maxOutputTokens ?: 65536
+    val resolvedMaxTokens = profile.maxOutputTokens?.coerceIn(1000, modelMaxTokens) ?: modelMaxTokens
     return RequestOptions(
-        temperature = resolveDouble(sampling["temperature"], null, profile.temperature).value,
-        topP = resolveDouble(sampling["topP"], null, profile.topP).value,
-        repetitionPenalty = resolveDouble(sampling["repetitionPenalty"], null, profile.repetitionPenalty).value,
+        temperature = gateSampling("temperature", profile.temperature),
+        topP = gateSampling("topP", profile.topP),
+        repetitionPenalty = gateSampling("repetitionPenalty", profile.repetitionPenalty),
         thinkingLevel = thinkingLevel,
         thinkingBudget = thinkingBudget,
-        maxOutputTokens = profile.maxOutputTokens?.coerceIn(1000, 200000),
-        jsonSchema = if (profile.useJsonSchema && caps?.structuredOutput == true) "batch" else null
+        maxOutputTokens = resolvedMaxTokens,
+        jsonSchema = if (forBatch && profile.useJsonSchema && caps?.structuredOutput == true) "batch" else null
     )
 }
 
@@ -65,6 +74,8 @@ class Rotation(
     private val handlerFactory: HandlerFactory,
     private val openRouterKey: String,
     private val switchCooldownSec: Int = 15,
+    /** 非管理のみ構成（OpenRouter等）のエポック間待機。切替先キーがないための同一キー冷却 */
+    private val unmanagedCooldownSec: Int = 30,
     private val maxSameRetries: Int = 2,
     private val sendGate: V2SendGate? = null,
     private val sendGateIntervalMs: Long = 10_000L,
@@ -93,10 +104,10 @@ class Rotation(
         }
     }
 
-    private suspend fun callOnce(profile: V2ModelProfile, prompt: String, source: String): LlmResult {
+    private suspend fun callOnce(profile: V2ModelProfile, prompt: String, source: String, forBatch: Boolean): LlmResult {
         sendGate?.acquire(sendGateIntervalMs)
         val descriptor = descriptors[profile.providerId]
-        val options = resolveProfileOptions(profile, descriptor)
+        val options = resolveProfileOptions(profile, descriptor, forBatch)
             val handler = try {
                 handlerFactory(profile, keyFor(profile))
             } catch (e: Exception) {
@@ -125,7 +136,8 @@ class Rotation(
     suspend fun execute(
         prompts: List<String>,
         source: String,
-        profilePrompts: Map<String, List<String>>? = null
+        profilePrompts: Map<String, List<String>>? = null,
+        forBatch: Boolean = false
     ): LlmResult {
         if (profiles.isEmpty() || stopped() || exhausted) {
             return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "stopped"))
@@ -161,7 +173,7 @@ class Rotation(
                     while (true) {
                         if (stopped() || exhausted) break
                         attemptedAny = true
-                        when (val result = callOnce(profile, prompt, source)) {
+                        when (val result = callOnce(profile, prompt, source, forBatch)) {
                             is LlmResult.Success -> return result
                             is LlmResult.Failure -> {
                                 lastFailure = result
@@ -179,6 +191,8 @@ class Rotation(
                                                 dailyScopes.add(keyIndex to scope)
                                             }
                                         }
+                                        // 待ちは二層で役割が異なる：waitSecはサーバ指示の backoff（429/Retry-After 用）、
+                                        // callOnce 側の sendGate は通常時のユーザー指定ペーシング。制限時は合算される。
                                         val waitSec = result.failure.retryAfterSec
                                             ?.toLong()?.coerceIn(5, 120)
                                             ?: if (managed(profile)) 2L else 5L
@@ -204,6 +218,11 @@ class Rotation(
             }
             if (!quotaSeenThisEpoch) return lastFailure
                 ?: LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "no-attempt"))
+            // 技術的根拠1行：非管理のみ（OpenRouter等）に切替先キーはなく、空プールのacquireで誤枯渇させるより同一キーのbounded待機再送が正しい（上限はtotalGuard）。
+            if (!profiles.any { managed(it) }) {
+                delay(unmanagedCooldownSec.coerceIn(0, 300) * 1000L)
+                continue@keyEpoch
+            }
             // 制限系あり：失敗ペアを報告して新キーへ
             val pool = pool
             if (pool == null) {
@@ -217,17 +236,17 @@ class Rotation(
                 is AcquireResult.Ready -> {
                     keyIndex = claimed.credentialIndex
                     key = claimed.credential
-                    log("[W#$workerId] rotated to key[$keyIndex]")
+                    log("🔄 [W#$workerId] APIキー#${keyIndex + 1} に切り替えました")
                     continue@keyEpoch
                 }
                 is AcquireResult.Wait -> {
-                    log("[W#$workerId] pool cooling, wait ${claimed.waitMillis / 1000}s")
+                    log("⏳ [W#$workerId] レート制限のため ${claimed.waitMillis / 1000}秒待機中...")
                     delay(claimed.waitMillis)
                     continue@keyEpoch
                 }
                 is AcquireResult.Exhausted -> {
                     exhausted = true
-                    log("[W#$workerId] pool exhausted, worker ends")
+                    log("⚠️ [W#$workerId] 利用可能な全APIキーの上限に達しました")
                     return lastFailure
                         ?: LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "exhausted"))
                 }

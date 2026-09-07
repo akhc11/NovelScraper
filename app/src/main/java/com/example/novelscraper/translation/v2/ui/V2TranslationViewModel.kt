@@ -2,16 +2,21 @@ package com.example.novelscraper.translation.v2.ui
 
 import android.app.Application
 import android.net.Uri
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.RequestOptions
+import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
 import com.example.novelscraper.translation.v2.engine.EngineState
 import com.example.novelscraper.translation.v2.engine.RunEngine
+import com.example.novelscraper.translation.v2.engine.RunSummary
 import com.example.novelscraper.translation.v2.infra.GeminiHandler
 import com.example.novelscraper.translation.v2.infra.OpenRouterHandler
 import com.example.novelscraper.translation.v2.infra.SafFileStore
+import com.example.novelscraper.translation.v2.service.V2TranslationService
+import com.example.novelscraper.translation.v2.service.V2TranslationServiceController
 import com.example.novelscraper.translation.v2.settings.DataStoreSettingsRepository
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2Settings
@@ -28,13 +33,20 @@ import kotlinx.coroutines.withContext
 data class V2FolderItem(val uri: String, val name: String)
 
 /**
- * v2 UI状態・イベント中継のみ（判定・巡回・保存判定は下位層）。
+ * v2 UI状態・イベント中継と開始前ガード（判定・巡回・保存判定の本体は下位層）。
  * 技術的根拠1行：重い実行・保存はDispatchers.IO＋viewModelScopeに寄せ、旧TranslationQueueManagerと二重管理しない。
+ * フォアグラウンド通知の責務もここに集約する（開始直後に昇格→進捗追従→完了/停止で降格）。
  */
 class V2TranslationViewModel(application: Application) : AndroidViewModel(application) {
 
+    companion object {
+        private const val NOTIFICATION_TITLE = "LLM小説翻訳"
+        private const val NOTIFY_THROTTLE_MS = 1500L
+    }
+
     private val repository = DataStoreSettingsRepository(application)
     private val store = SafFileStore(application.applicationContext)
+    private val serviceController = V2TranslationServiceController(application.applicationContext)
 
     val settings: StateFlow<V2Settings> = repository.settings
         .stateIn(viewModelScope, SharingStarted.Eagerly, V2Settings())
@@ -49,6 +61,14 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
     val importWarnings: StateFlow<List<String>> = _importWarnings.asStateFlow()
 
     private var runJob: Job? = null
+    private var notifyJob: Job? = null
+
+    /** 通知バー停止ボタン→エンジン停止の結線（Serviceのstaticコールバックに自身を登録） */
+    private val serviceStopCallback: () -> Unit = { stopFromNotification() }
+
+    init {
+        V2TranslationService.onStopRequested = serviceStopCallback
+    }
 
     fun addFolder(uri: Uri, name: String) {
         val key = uri.toString()
@@ -97,14 +117,40 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
         if (engineState.value.isRunning) return
         val current = settings.value
         if (validateV2Settings(current).any { it.blocksSave }) return
-        val uris = _folders.value.map { it.uri }
-        if (uris.isEmpty()) return
+        val items = _folders.value.map { it.uri to it.name }
+        if (items.isEmpty()) return
         runJob?.cancel()
+        notifyJob?.cancel()
+        lastNotifyEmit = 0L
+        lastNotifySig = ""
+        // 即時フォアグラウンド昇格（startForegroundService後の10秒ANR制限内にstartForegroundさせる）
+        serviceController.updateNotification(NOTIFICATION_TITLE, "開始準備中...", 0, 0)
+        notifyJob = viewModelScope.launch(Dispatchers.IO) {
+            engineState.collect { s ->
+                if (!s.isRunning) return@collect
+                val (done, total) = s.progress
+                val msg = buildProgressMessage(s)
+                val sig = "$done/$total|$msg"
+                if (sig == lastNotifySig) return@collect
+                val now = SystemClock.elapsedRealtime()
+                val finished = total > 0 && done >= total
+                if (finished || lastNotifySig.isEmpty() || now - lastNotifyEmit >= NOTIFY_THROTTLE_MS) {
+                    lastNotifyEmit = now
+                    lastNotifySig = sig
+                    serviceController.updateNotification(NOTIFICATION_TITLE, msg, done, total)
+                }
+            }
+        }
         runJob = viewModelScope.launch(Dispatchers.IO) {
+            var summary: RunSummary? = null
             try {
-                engine.run(uris, current)
+                summary = engine.runWithNames(items, current)
             } catch (_: Exception) {
-                // 中断・失敗の詳細はEngineStateログ側に集約する
+                // エンジン内部でログ・状態更新済みのため、ここでは通知の後片付けのみ行う
+            } finally {
+                notifyJob?.cancel()
+                notifyJob = null
+                finishNotification(summary)
             }
         }
     }
@@ -112,10 +158,45 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
     fun stop() {
         engine.requestStop()
         runJob?.cancel()
+        runJob = null
+        notifyJob?.cancel()
+        notifyJob = null
+        serviceController.stopService()
+    }
+
+    /** 通知バー停止ボタン経由（Serviceは自前でstopForeground+stopSelf済みのため収集停止のみ） */
+    private fun stopFromNotification() {
+        engine.requestStop()
+        runJob?.cancel()
+        runJob = null
+        notifyJob?.cancel()
+        notifyJob = null
+    }
+
+    private var lastNotifyEmit = 0L
+    private var lastNotifySig = ""
+
+    private fun buildProgressMessage(s: EngineState): String {
+        val head = s.statusText.ifBlank { "翻訳を実行中..." }
+        val detail = listOf(s.folderName, s.fileName).filter { it.isNotBlank() }.joinToString(" / ")
+        val chunk = if (s.chunkProgress.second > 0) " [chunk ${s.chunkProgress.first}/${s.chunkProgress.second}]" else ""
+        val full = if (detail.isEmpty()) head + chunk else "$head: $detail$chunk"
+        return if (full.length > 120) full.take(120) else full
+    }
+
+    private fun finishNotification(summary: RunSummary?) {
+        if (summary != null && !summary.aborted) {
+            serviceController.showComplete(
+                "LLM翻訳完了",
+                "${summary.completedFiles}/${summary.totalFiles}ファイル完了"
+            )
+        } else {
+            serviceController.stopService()
+        }
     }
 
     /**
-     * 保存前の疎通テスト（単発・bounded）。成功時は使用量つきOK、失敗時は分類名を返す。
+     * 保存前の疎通テスト（単発・bounded）。成功時は応答先頭つきOK、失敗時は分類名を返す。
      * ゲート消費の二重化を避けるためRunEngineのプールとは独立した使い捨て呼び出しとする。
      */
     suspend fun testConnection(profile: V2ModelProfile): String = withContext(Dispatchers.IO) {
@@ -129,14 +210,17 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
             }
             val handler = when (profile.providerId) {
                 "gemini" -> GeminiHandler(apiKey = key)
-                else -> OpenRouterHandler(
-                    apiKey = key,
-                    endpoint = current.openRouterEndpoint,
-                    reasoningEffort = profile.reasoningEffort,
-                    reasoningEnabled = profile.reasoningEnabled,
-                    providerOrder = profile.providerOrder,
-                    providerAllowFallbacks = profile.providerAllowFallbacks
-                )
+                else -> {
+                    val resolved = resolveOpenRouterParams(profile)
+                    OpenRouterHandler(
+                        apiKey = key,
+                        endpoint = current.openRouterEndpoint,
+                        reasoningEffort = resolved.reasoningEffort,
+                        reasoningEnabled = resolved.reasoningEnabled,
+                        providerOrder = resolved.providerOrder,
+                        providerAllowFallbacks = resolved.providerAllowFallbacks
+                    )
+                }
             }
             val result = handler.call(
                 LlmRequest(
@@ -158,6 +242,13 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
 
     override fun onCleared() {
         runJob?.cancel()
+        runJob = null
+        notifyJob?.cancel()
+        notifyJob = null
+        if (V2TranslationService.onStopRequested === serviceStopCallback) {
+            V2TranslationService.onStopRequested = null
+        }
+        serviceController.stopService()
         super.onCleared()
     }
 }

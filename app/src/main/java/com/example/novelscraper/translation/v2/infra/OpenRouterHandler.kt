@@ -6,6 +6,7 @@ import com.example.novelscraper.translation.v2.domain.GenericErrorMapper
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
+import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -39,9 +40,10 @@ internal data class V2OrRequest(
     val temperature: Double? = null,
     val top_p: Double? = null,
     val repetition_penalty: Double? = null,
+    val max_tokens: Int? = null,
     val provider: V2OrProvider? = null,
     val reasoning: JsonElement? = null,
-    val reasoning_effort: String? = null
+    val response_format: JsonElement? = null
 )
 
 @Serializable
@@ -59,7 +61,7 @@ internal data class V2OrResponse(
     val usage: V2OrUsage? = null
 )
 
-/** 送信は解決済み値をそのまま送る（可否判断は能力層の責務） */
+/** 送信は解決済み値をそのまま送る（可否判断は能力層の責務）。reasoningはオブジェクト形式に一本化する */
 internal fun buildOpenRouterBody(
     req: LlmRequest,
     reasoningEffort: String? = null,
@@ -67,13 +69,23 @@ internal fun buildOpenRouterBody(
     providerOrder: List<String> = emptyList(),
     providerAllowFallbacks: Boolean? = null
 ): String {
+    // 技術的根拠1行：旧設定取込の表外値・空白要素を送信直前で正規化し、400級誤爆を未然に防ぐ。
+    val resolved = resolveOpenRouterParams(
+        reasoningEffort,
+        reasoningEnabled,
+        providerOrder,
+        providerAllowFallbacks
+    )
     val reasoning = when {
-        reasoningEnabled != null ->
-            JsonObject(mapOf("enabled" to JsonPrimitive(reasoningEnabled)))
-        reasoningEffort != null && reasoningEffort != "none" ->
-            JsonObject(mapOf("effort" to JsonPrimitive(reasoningEffort)))
+        resolved.reasoningEnabled != null ->
+            JsonObject(mapOf("enabled" to JsonPrimitive(resolved.reasoningEnabled)))
+        resolved.reasoningEffort != null ->
+            JsonObject(mapOf("effort" to JsonPrimitive(resolved.reasoningEffort)))
         else -> null
     }
+    val responseFormat = if (req.options.jsonSchema != null) {
+        JsonObject(mapOf("type" to JsonPrimitive("json_object")))
+    } else null
     return v2orJson.encodeToString(
         V2OrRequest.serializer(),
         V2OrRequest(
@@ -85,11 +97,13 @@ internal fun buildOpenRouterBody(
             temperature = req.options.temperature,
             top_p = req.options.topP,
             repetition_penalty = req.options.repetitionPenalty,
-            provider = if (providerOrder.isNotEmpty()) {
-                V2OrProvider(order = providerOrder, allow_fallbacks = providerAllowFallbacks)
+            max_tokens = req.options.maxOutputTokens,
+            provider = if (resolved.providerOrder.isNotEmpty()) {
+                // providerOrderが空の場合、allow_fallbacks単独指定は送出しない
+                V2OrProvider(order = resolved.providerOrder, allow_fallbacks = resolved.providerAllowFallbacks)
             } else null,
             reasoning = reasoning,
-            reasoning_effort = reasoningEffort
+            response_format = responseFormat
         )
     )
 }
@@ -139,7 +153,7 @@ class OpenRouterHandler(
     private val reasoningEnabled: Boolean? = null,
     private val providerOrder: List<String> = emptyList(),
     private val providerAllowFallbacks: Boolean? = null,
-    private val client: OkHttpClient = v2HttpClient()
+    private val client: OkHttpClient = sharedV2HttpClient
 ) : ProviderHandler {
 
     override suspend fun call(request: LlmRequest): LlmResult = withContext(Dispatchers.IO) {

@@ -2,13 +2,17 @@ package com.example.novelscraper.translation.v2.ui
 
 import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
+import com.example.novelscraper.translation.v2.domain.OPENROUTER_PROVIDER_NAME_MAX
+import com.example.novelscraper.translation.v2.domain.OPENROUTER_PROVIDER_ORDER_MAX
 import com.example.novelscraper.translation.v2.domain.ThinkingSupport
 import com.example.novelscraper.translation.v2.domain.capabilitiesFor
+import com.example.novelscraper.translation.v2.domain.resolveProviderOrder
+import com.example.novelscraper.translation.v2.domain.resolveReasoningEffort
 import com.example.novelscraper.translation.v2.settings.V2Settings
 
 /**
  * 設定保存前の範囲検査（pure・JVMテスト可）。
- * 技術的根拠1行：値解決則（既定＜上書き・空＝未送信）と能力表をUI保存点で強制し、無効送信を構造的に出さない。
+ * 技術的根拠1行：値解決則と能力表にもとづく警告を返し、保存ブロック級のみ開始を止める（送信時の最終ゲートはRotation側）。
  */
 data class V2SettingsIssue(val message: String, val blocksSave: Boolean)
 
@@ -60,11 +64,52 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
         if (profile.useJsonSchema && !caps.structuredOutput) {
             issues.add(V2SettingsIssue("$label: 構造化出力は未対応のため送られません", false))
         }
-        if (profile.maxOutputTokens != null && (profile.maxOutputTokens < 1000 || profile.maxOutputTokens > 200000)) {
-            issues.add(V2SettingsIssue("maxOutputTokens は1000〜200000に丸められます", false))
+        if (profile.maxOutputTokens != null && (profile.maxOutputTokens < 1000 || profile.maxOutputTokens > caps.maxOutputTokens)) {
+            issues.add(V2SettingsIssue("$label: maxOutputTokens は1000〜${caps.maxOutputTokens}に丸められます", false))
+        }
+        if (profile.providerId == "openrouter") {
+            val rawEffort = profile.reasoningEffort
+            if (!rawEffort.isNullOrBlank() && rawEffort.trim().lowercase() != "none" &&
+                resolveReasoningEffort(rawEffort) == null
+            ) {
+                issues.add(V2SettingsIssue("$label: reasoningEffort ${rawEffort} は非対応のため送られません", false))
+            }
+            if (profile.reasoningEnabled != null && resolveReasoningEffort(rawEffort) != null) {
+                issues.add(V2SettingsIssue("$label: reasoningEnabled優先のため reasoningEffort は無視されます", false))
+            }
+            val rawOrder = profile.providerOrder
+            if (rawOrder.any { it.isBlank() }) {
+                issues.add(V2SettingsIssue("$label: providerOrder の空要素は除去されます", false))
+            }
+            if (rawOrder.size != rawOrder.map { it.trim() }.filter { it.isNotBlank() }.distinct().size) {
+                issues.add(V2SettingsIssue("$label: providerOrder の重複は除去されます", false))
+            }
+            if (rawOrder.any { it.trim().length > OPENROUTER_PROVIDER_NAME_MAX }) {
+                issues.add(V2SettingsIssue("$label: providerOrder の長大な名前は除去されます", false))
+            }
+            if (resolveProviderOrder(rawOrder).size < rawOrder.map { it.trim() }.filter { it.isNotBlank() }.distinct().size) {
+                issues.add(
+                    V2SettingsIssue(
+                        "$label: providerOrder は先頭${OPENROUTER_PROVIDER_ORDER_MAX}件に切り詰められます",
+                        false
+                    )
+                )
+            }
+            if (profile.providerAllowFallbacks != null && resolveProviderOrder(rawOrder).isEmpty()) {
+                issues.add(V2SettingsIssue("$label: providerOrder空のため allow_fallbacks は送られません", false))
+            }
         }
         if (profile.promptOrder.isEmpty() || profile.promptOrder.any { it !in 1..7 }) {
             issues.add(V2SettingsIssue("$label: プロンプト番号は1〜7で指定してください", true))
+        }
+    }
+    if (settings.dict.providerId == "openrouter" && settings.dict.enabled) {
+        val rawOrder = settings.dict.providerOrder
+        if (rawOrder.any { it.isBlank() }) {
+            issues.add(V2SettingsIssue("辞書: providerOrder の空要素は除去されます", false))
+        }
+        if (settings.dict.providerAllowFallbacks != null && resolveProviderOrder(rawOrder).isEmpty()) {
+            issues.add(V2SettingsIssue("辞書: providerOrder空のため allow_fallbacks は送られません", false))
         }
     }
 
@@ -78,7 +123,7 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
         issues.add(V2SettingsIssue("OpenRouterキー未設定のため開始できません", true))
     }
     if (settings.dict.enabled && settings.dict.model.isBlank()) {
-        issues.add(V2SettingsIssue("辞書モデル未設定のため開始できません（辞書なし翻訳は禁止）", true))
+        issues.add(V2SettingsIssue("辞書モデル未設定のため開始できません（辞書有効時は辞書モデル必須）", true))
     }
     if (settings.limits.parallelWorkers !in 1..6) {
         issues.add(V2SettingsIssue("並列ワーカーは1〜6で指定してください", true))
@@ -148,6 +193,9 @@ fun coercedV2Settings(settings: V2Settings): V2Settings {
             lines = settings.prevContext.lines.coerceIn(1, 100)
         ),
         geminiCooldownSec = settings.geminiCooldownSec.coerceIn(5, 300),
+        profiles = settings.profiles.map {
+            it.copy(maxOutputChars = it.maxOutputChars.coerceIn(2000, 100000))
+        },
         sizeRatios = settings.sizeRatios.copy(
             zhMin = settings.sizeRatios.zhMin.coerceIn(10, 1000),
             zhMax = settings.sizeRatios.zhMax.coerceIn(10, 1000),

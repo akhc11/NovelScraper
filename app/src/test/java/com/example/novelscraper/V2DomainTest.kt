@@ -14,7 +14,10 @@ import com.example.novelscraper.translation.v2.domain.ThinkingSupport
 import com.example.novelscraper.translation.v2.domain.capabilitiesFor
 import com.example.novelscraper.translation.v2.domain.resolveDouble
 import com.example.novelscraper.translation.v2.domain.resolveInt
+import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
 import com.example.novelscraper.translation.v2.domain.resolveOption
+import com.example.novelscraper.translation.v2.domain.resolveProviderOrder
+import com.example.novelscraper.translation.v2.domain.resolveReasoningEffort
 import com.example.novelscraper.translation.v2.infra.buildGeminiBody
 import com.example.novelscraper.translation.v2.infra.buildOpenRouterBody
 import com.example.novelscraper.translation.v2.infra.parseGeminiResponse
@@ -75,7 +78,7 @@ class V2DomainTest {
         assertTrue(preview is ThinkingSupport.Levels)
         assertEquals("high", (preview as ThinkingSupport.Levels).default)
 
-        // Gemma系は未収録→None（送らない・出さない）
+        // Gemma系は思考なし（None）として収録（送らない・出さない）
         assertEquals(ThinkingSupport.None, GEMINI_DESCRIPTOR.capabilitiesFor("gemma-4-31b-it").thinking)
         // 大文字・空白つきも正規化
         assertEquals(ThinkingSupport.None, GEMINI_DESCRIPTOR.capabilitiesFor("  GEMMA-3-27B-IT ").thinking)
@@ -286,6 +289,57 @@ class V2DomainTest {
         val orCut = parseOpenRouterResponse(200, """{"choices": [{"message": {}, "finish_reason": "length"}]}""")
         val cf = (orCut as com.example.novelscraper.translation.v2.domain.LlmResult.Failure).failure
         assertEquals(com.example.novelscraper.translation.v2.domain.FailureKind.FATAL, cf.kind)
+    }
+
+    @Test
+    fun testOpenRouterParams_Gating() {
+        // reasoningEffort: 表外値・none・空白は落とす。大文字・前後空白は正規化する
+        assertEquals(null, resolveReasoningEffort(null))
+        assertEquals(null, resolveReasoningEffort(""))
+        assertEquals(null, resolveReasoningEffort("none"))
+        assertEquals(null, resolveReasoningEffort("ultra"))
+        assertEquals("high", resolveReasoningEffort("high"))
+        assertEquals("high", resolveReasoningEffort(" HIGH "))
+
+        // providerOrder: 空要素除去・重複除去・上限打切り
+        assertEquals(emptyList<String>(), resolveProviderOrder(emptyList()))
+        assertEquals(listOf("a", "b"), resolveProviderOrder(listOf(" a ", "", "b", "a")))
+        assertEquals(10, resolveProviderOrder((1..20).map { "p$it" }).size)
+        assertEquals(emptyList<String>(), resolveProviderOrder(listOf("x".repeat(65))))
+
+        // allow_fallbacksはorder空時に落とす
+        val dropped = resolveOpenRouterParams("high", null, emptyList(), true)
+        assertEquals(emptyList<String>(), dropped.providerOrder)
+        assertEquals(null, dropped.providerAllowFallbacks)
+        val kept = resolveOpenRouterParams("high", null, listOf("a"), true)
+        assertEquals(listOf("a"), kept.providerOrder)
+        assertEquals(true, kept.providerAllowFallbacks)
+    }
+
+    @Test
+    fun testOpenRouterBody_Gating() {
+        val req = com.example.novelscraper.translation.v2.domain.LlmRequest(
+            providerId = "openrouter",
+            model = "x/y",
+            systemPrompt = "sys",
+            userText = "hello"
+        )
+        // 表外effortはreasoningごと落ちる（400誤爆を防ぐ）
+        val invalid = buildOpenRouterBody(req, reasoningEffort = "ultra")
+        assertTrue(!invalid.contains("reasoning"))
+        // 大文字は正規化されて送られる
+        val normalized = buildOpenRouterBody(req, reasoningEffort = " HIGH ")
+        assertTrue(normalized.contains("\"effort\":\"high\""))
+        // enabled優先でeffortは無視される
+        val both = buildOpenRouterBody(req, reasoningEffort = "high", reasoningEnabled = true)
+        assertTrue(both.contains("\"enabled\":true"))
+        assertTrue(!both.contains("effort"))
+        // orderの空要素・重複は除去される
+        val order = buildOpenRouterBody(req, providerOrder = listOf(" b ", "", "b", "a"))
+        assertTrue(order.contains("\"order\":[\"b\",\"a\"]"))
+        // order空のallow_fallbacks単独指定は送出しない
+        val alone = buildOpenRouterBody(req, providerOrder = emptyList(), providerAllowFallbacks = true)
+        assertTrue(!alone.contains("allow_fallbacks"))
     }
 
     @Test

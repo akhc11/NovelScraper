@@ -188,32 +188,70 @@ class V2EngineTest {
     }
 
     @Test
+    fun testRotation_OpenRouterOnlyQuotaRecoversWithoutPool() = kotlinx.coroutines.runBlocking {
+        // S-2回帰：非管理のみ構成はGeminiプールに触れず、同一キー待機再送で復帰する（誤枯渇しない）
+        val pool = QuotaPool(emptyList())
+        val script: Map<String, MutableList<LlmResult>> = mapOf("x/y" to mutableListOf(quotaMinute()))
+        val handler = scriptedHandler(script)
+        val rotation = Rotation(
+            workerId = 1,
+            profiles = listOf(V2ModelProfile(providerId = "openrouter", model = "x/y")),
+            pool = pool,
+            keyIndex = 0,
+            key = "",
+            descriptors = mapOf("gemini" to GEMINI_DESCRIPTOR, "openrouter" to OPENROUTER_DESCRIPTOR),
+            handlerFactory = { _, _ -> handler },
+            openRouterKey = "or",
+            unmanagedCooldownSec = 0,
+            maxSameRetries = 0,
+            log = {}
+        )
+        val result = rotation.execute(listOf("prompt"), "src")
+        assertTrue(result is LlmResult.Success)
+        assertFalse(rotation.exhausted)
+    }
+
+    @Test
     fun testResolveProfileOptions_Gating() {
-        // Gemma系は思考を落とす
+        // Gemma系は思考を落とす。未指定時はGemmaの最大値8192がデフォルト適用
         val gemma = resolveProfileOptions(
             V2ModelProfile(providerId = "gemini", model = "gemma-4-31b-it", thinkingLevel = "high"),
             GEMINI_DESCRIPTOR
         )
         assertNull(gemma.thinkingLevel)
         assertNull(gemma.thinkingBudget)
-        // 3.8のminimalは非対応のため落とす（モデル既定に委ねる）
+        assertEquals(8192, gemma.maxOutputTokens)
+
+        // 3.8のminimalは非対応のため落とす（モデル既定に委ねる）。未指定時は3.8の最大値64000がデフォルト適用
         val flash38 = resolveProfileOptions(
             V2ModelProfile(providerId = "gemini", model = "gemini-3.8-flash", thinkingLevel = "minimal"),
             GEMINI_DESCRIPTOR
         )
         assertNull(flash38.thinkingLevel)
-        // 対応値は透過
+        assertEquals(64000, flash38.maxOutputTokens)
+
+        // 対応値は透過。未指定時は3.5の最大値65536がデフォルト適用
         val flash35 = resolveProfileOptions(
             V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash", thinkingLevel = "low", temperature = 0.5),
             GEMINI_DESCRIPTOR
         )
         assertEquals("low", flash35.thinkingLevel)
+        assertEquals(65536, flash35.maxOutputTokens)
+
+        // 手動でモデル上限を超える数値を指定した場合はモデルの最大値に安全にクランプ
+        val clamped = resolveProfileOptions(
+            V2ModelProfile(providerId = "gemini", model = "gemma-4-31b-it", maxOutputTokens = 999999),
+            GEMINI_DESCRIPTOR
+        )
+        assertEquals(8192, clamped.maxOutputTokens)
+
         // 記述子なしでも温度は通す（未知プロバイダーの寛容）
         val unknown = resolveProfileOptions(
             V2ModelProfile(providerId = "openrouter", model = "x/y", temperature = 0.5),
             null
         )
         assertEquals(0.5, unknown.temperature)
+        assertEquals(65536, unknown.maxOutputTokens)
     }
 
     @Test
@@ -234,12 +272,13 @@ class V2EngineTest {
         val engine = RunEngine(
             store = store,
             scope = CoroutineScope(Dispatchers.Unconfined),
-            options = EngineOptions(workerStaggerSec = 0),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
             handlerFactory = { _, _, _ -> handler }
         )
         val settings = V2Settings(
             geminiKeys = listOf("k1"),
-            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash"))
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0)
         )
         val summary = engine.run(listOf(folder.uri), settings)
         assertEquals(1, summary.folders)
@@ -279,12 +318,13 @@ class V2EngineTest {
         val engine = RunEngine(
             store = store,
             scope = CoroutineScope(Dispatchers.Unconfined),
-            options = EngineOptions(workerStaggerSec = 0),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
             handlerFactory = { _, _, _ -> handler }
         )
         val settings = V2Settings(
             geminiKeys = listOf("k1"),
             profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0),
             dict = com.example.novelscraper.translation.v2.settings.V2DictSettings(
                 enabled = true,
                 providerId = "gemini",
@@ -313,6 +353,54 @@ class V2EngineTest {
     }
 
     @Test
+    fun testRunEngine_OpenRouterDictWithoutGeminiKeys() = kotlinx.coroutines.runBlocking {
+        // OpenRouter辞書はGeminiプールを使わない（空プールでも誤枯渇しない）
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-or-dict")
+        for (name in listOf("a.txt", "b.txt")) {
+            val doc = store.createFile(folder.uri, name, "text/plain")!!
+            store.writeText(doc.uri, "勇者タロウは旅に出ました。仲間と共に魔王を倒す決意をしたのです。")
+        }
+        val dictJson = """{"style":"カタカナ","characters":{"勇者タロウ":"タロウ"},"genders":{}}"""
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val sys = request.systemPrompt
+                if (sys.contains("Extract person names") ||
+                    sys.contains("Merge the dictionary") ||
+                    sys.contains("Review the merged")
+                ) {
+                    return LlmResult.Success(dictJson)
+                }
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = emptyList(),
+            openRouterKey = "or-key",
+            profiles = listOf(V2ModelProfile(providerId = "openrouter", model = "x/y")),
+            limits = V2Limits(requestDelaySec = 0),
+            dict = com.example.novelscraper.translation.v2.settings.V2DictSettings(
+                enabled = true,
+                providerId = "openrouter",
+                model = "x/y"
+            )
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(2, summary.completedFiles)
+        val published = store.findChild(folder.uri, "dictionary.json")
+        assertNotNull(published)
+        assertTrue((store.readText(published!!.uri) ?: "").contains("タロウ"))
+    }
+
+    @Test
     fun testRunEngine_PreSplit() = kotlinx.coroutines.runBlocking {
         val store = InMemoryFileStore()
         val folder = store.createRoot("novel")
@@ -327,12 +415,13 @@ class V2EngineTest {
         val engine = RunEngine(
             store = store,
             scope = CoroutineScope(Dispatchers.Unconfined),
-            options = EngineOptions(workerStaggerSec = 0),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
             handlerFactory = { _, _, _ -> handler }
         )
         val settings = V2Settings(
             geminiKeys = listOf("k1"),
             profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0),
             split = V2SplitSettings(enabled = true, splitSizeChars = 1000)
         )
         val summary = engine.run(listOf(folder.uri), settings)
@@ -368,13 +457,13 @@ class V2EngineTest {
         val engine = RunEngine(
             store = store,
             scope = CoroutineScope(Dispatchers.Unconfined),
-            options = EngineOptions(workerStaggerSec = 0),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
             handlerFactory = { _, _, _ -> handler }
         )
         val settings = V2Settings(
             geminiKeys = listOf("k1"),
             profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
-            limits = V2Limits(parallelWorkers = 1),
+            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0),
             promptSelection = com.example.novelscraper.translation.v2.settings.V2PromptSelection(autoEnabled = true)
         )
         val summary = engine.run(listOf(folder.uri), settings)
@@ -410,13 +499,13 @@ class V2EngineTest {
         val engine = RunEngine(
             store = store,
             scope = CoroutineScope(Dispatchers.Unconfined),
-            options = EngineOptions(workerStaggerSec = 0),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
             handlerFactory = { _, _, _ -> handler }
         )
         val settings = V2Settings(
             geminiKeys = listOf("k1"),
             profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
-            limits = V2Limits(parallelWorkers = 1),
+            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0),
             prevContext = V2PrevContext(enabled = true, lines = 20)
         )
         val summary = engine.run(listOf(folder.uri), settings)
@@ -431,5 +520,52 @@ class V2EngineTest {
         assertTrue(dCalls.isNotEmpty())
         assertTrue(dCalls.all { it.second.contains("PREVIOUS TEXT") })
         assertTrue(dCalls.all { it.second.contains("魔王サブロウ") })
+    }
+
+    @Test
+    fun testRunEngine_ParallelWorkers_PrevTailInjected() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel_multi")
+        val texts = listOf(
+            "ch01.txt" to "第1話の文章です。\n勇者は旅立ちました。\n",
+            "ch02.txt" to "第2話の文章です。\n森を抜けました。\n",
+            "ch03.txt" to "第3話の文章です。\n洞窟に入りました。\n",
+            "ch04.txt" to "第4話の文章です。\n宝箱を見つけました。\n"
+        )
+        for ((name, text) in texts) {
+            val doc = store.createFile(folder.uri, name, "text/plain")!!
+            store.writeText(doc.uri, text)
+        }
+        val seen = java.util.Collections.synchronizedList(mutableListOf<Pair<String, String>>())
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                seen.add(request.userText to request.systemPrompt)
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.IO),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L, batchMaxFiles = 1),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1", "k2"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(parallelWorkers = 2, requestDelaySec = 0),
+            prevContext = V2PrevContext(enabled = true, lines = 20)
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(4, summary.completedFiles)
+
+        val ch2 = seen.firstOrNull { it.first.contains("第2話の文章") }
+        assertNotNull(ch2)
+        assertTrue(ch2!!.second.contains("勇者は旅立ちました"))
+
+        val ch3 = seen.firstOrNull { it.first.contains("第3話の文章") }
+        assertNotNull(ch3)
+        assertTrue(ch3!!.second.contains("森を抜けました"))
     }
 }

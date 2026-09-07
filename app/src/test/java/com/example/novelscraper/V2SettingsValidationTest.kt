@@ -83,6 +83,52 @@ class V2SettingsValidationTest {
     }
 
     @Test
+    fun testOpenRouterParams_WarnsOnly() {
+        val settings = base().copy(
+            openRouterKey = "or",
+            profiles = listOf(
+                V2ModelProfile(
+                    providerId = "openrouter",
+                    model = "x/y",
+                    reasoningEffort = "ultra",
+                    providerOrder = listOf("b", "", "b"),
+                    providerAllowFallbacks = true
+                )
+            )
+        )
+        val issues = validateV2Settings(settings)
+        assertFalse(issues.any { it.blocksSave })
+        assertTrue(issues.any { it.message.contains("reasoningEffort") })
+        assertTrue(issues.any { it.message.contains("providerOrder") })
+
+        val both = base().copy(
+            openRouterKey = "or",
+            profiles = listOf(
+                V2ModelProfile(
+                    providerId = "openrouter",
+                    model = "x/y",
+                    reasoningEffort = "high",
+                    reasoningEnabled = true
+                )
+            )
+        )
+        assertTrue(validateV2Settings(both).any { it.message.contains("reasoningEnabled") })
+
+        val alone = base().copy(
+            openRouterKey = "or",
+            profiles = listOf(
+                V2ModelProfile(
+                    providerId = "openrouter",
+                    model = "x/y",
+                    providerOrder = emptyList(),
+                    providerAllowFallbacks = true
+                )
+            )
+        )
+        assertTrue(validateV2Settings(alone).any { it.message.contains("allow_fallbacks") })
+    }
+
+    @Test
     fun testUnknownProvider_Blocks() {
         val settings = base().copy(
             profiles = listOf(V2ModelProfile(providerId = "groq", model = "llama"))

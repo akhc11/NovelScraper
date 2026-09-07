@@ -14,14 +14,8 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
-data class NovelDict(
-    val style: String = "カタカナ",
-    val characters: Map<String, String> = emptyMap(),
-    val genders: Map<String, String> = emptyMap()
-)
-
 @Serializable
-data class NovelDictJson(
+data class NovelDict(
     val style: String = "カタカナ",
     val characters: Map<String, String> = emptyMap(),
     val genders: Map<String, String> = emptyMap()
@@ -48,6 +42,7 @@ data class DictOptions(
     val uniformSample: Boolean = true,
     val maxBatchBytes: Int = 100000,
     val maxTotalScanBytes: Int = 10000000,
+    /** 既定8。エンジン経路では辞書設定（worker×同時実行数、上限30）で上書きする */
     val parallelism: Int = 8,
     val maxRetriesPerBatch: Int = 4,
     val mergeRetries: Int = 3,
@@ -74,9 +69,8 @@ fun parseNovelDict(rawJson: String): NovelDict? {
         val first = text.indexOf('{')
         val last = text.lastIndexOf('}')
         if (first != -1 && last > first) text = text.substring(first, last + 1)
-        val decoded = dictJson.decodeFromString(NovelDictJson.serializer(), text)
-        if (decoded.characters.isEmpty()) null
-        else NovelDict(decoded.style, decoded.characters, decoded.genders)
+        val decoded = dictJson.decodeFromString(NovelDict.serializer(), text)
+        if (decoded.characters.isEmpty()) null else decoded
     } catch (_: Exception) {
         null
     }
@@ -105,18 +99,19 @@ fun selectSampleFiles(fileNames: List<String>, maxFiles: Int, uniform: Boolean):
 /**
  * 辞書生成stage。`call` は巡回・待機を適用済みの呼出側 binding を受け取る。
  * 失敗種別：BLOCKED/CONFIG＝確定的、QUOTA/RETRYABLE/FATAL＝一時的。
+ * 技術的根拠1行：本文はファイル名のサンプリング後に1件ずつ遅延読込し、全文リストをメモリに抱えない。
  */
 suspend fun generateDictionary(
     store: FileStore,
     workDirUri: String,
-    files: List<Pair<String, String>>,
+    fileNames: List<String>,
+    readText: suspend (name: String) -> String?,
     call: suspend (model: String, prompt: String, text: String) -> LlmResult,
     options: DictOptions,
     log: (String) -> Unit = {}
 ): NovelDict? = coroutineScope {
-    val sampledNames = selectSampleFiles(files.map { it.first }, options.maxFiles, options.uniformSample)
-    val sampled = files.filter { it.first in sampledNames }
-    if (sampled.isEmpty()) {
+    val sampledNames = selectSampleFiles(fileNames, options.maxFiles, options.uniformSample)
+    if (sampledNames.isEmpty()) {
         log("dict: no sample files")
         return@coroutineScope null
     }
@@ -126,12 +121,12 @@ suspend fun generateDictionary(
     val buffer = StringBuilder()
     var bufferBytes = 0
     var scannedBytes = 0
-    for ((_, text) in sampled) {
+    for (name in sampledNames) {
         if (scannedBytes >= options.maxTotalScanBytes) {
             log("dict: scan cap reached")
             break
         }
-        val clean = text.trim()
+        val clean = readText(name)?.trim() ?: continue
         if (clean.isEmpty()) continue
         val bytes = utf8Bytes(clean)
         scannedBytes += bytes
@@ -237,7 +232,13 @@ suspend fun generateDictionary(
                                 log("dict: batch $batchNum deterministic fail, skip retries")
                                 break
                             }
-                            sawTransient = true
+                            // 技術的根拠1行：FATAL（JSON崩れ等）は再送するが全体保留にはしない（他バッチで部分マージ可）。
+                            if (result.failure.kind == FailureKind.QUOTA_DAILY ||
+                                result.failure.kind == FailureKind.QUOTA_MINUTE ||
+                                result.failure.kind == FailureKind.RETRYABLE_AFTER
+                            ) {
+                                sawTransient = true
+                            }
                             if (retry >= maxRetries) break
                             delay(1000L * (retry + 1))
                         }
@@ -261,7 +262,10 @@ suspend fun generateDictionary(
         log("dict: partial merge (${completed.size}/$totalBatches), skipped deterministic batches [$skipped]")
     }
 
-    // マージ（レビューも同一モデル）
+    // 【辞書生成の2段階設計（マージ ＆ レビューの意図的分離）】:
+    // マージ（各バッチ断片の統合・粗抽出）とレビュー（地名・組織名・肩書・一般名詞の除去および表記揺れの統一）は
+    // 目的と評価軸が全く異なるため、あえて2回に分けてLLMを呼び出すことで人名抽出精度を最大限に高めている。
+    // （1工程にまとめると一般名詞の誤混入や表記ブレが劇的に増大するため、2工程で精度を担保する）。
     val reviewModel = options.mergeModel.ifBlank { options.model }
     val merged: NovelDict? = if (completed.size == 1) {
         parseNovelDict(completed.first())
@@ -288,7 +292,7 @@ suspend fun generateDictionary(
 
     // レビュー（失敗時はマージ結果で確定する）
     var reviewed: NovelDict = merged
-    val reviewInput = dictJson.encodeToString(NovelDictJson.serializer(), NovelDictJson(merged.style, merged.characters, merged.genders))
+    val reviewInput = dictJson.encodeToString(NovelDict.serializer(), merged)
     for (retry in 0 until options.reviewRetries.coerceIn(1, 3)) {
         when (val r = call(reviewModel, options.prompts.review, reviewInput)) {
             is LlmResult.Success -> {
@@ -309,7 +313,7 @@ suspend fun generateDictionary(
         ?: store.createFile(workDirUri, "dictionary.json", "application/json")
     if (dictDoc != null && store.writeText(
             dictDoc.uri,
-            dictJson.encodeToString(NovelDictJson.serializer(), NovelDictJson(reviewed.style, reviewed.characters, reviewed.genders))
+            dictJson.encodeToString(NovelDict.serializer(), reviewed)
         )
     ) {
         log("dict: finalized (${reviewed.characters.size} names)")

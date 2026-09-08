@@ -13,6 +13,7 @@ object TranslationLimits {
     val DICT_PARALLELISM_RANGE = 1..30
     const val SPLIT_MIN_CHARS = 500
     val PREV_LINES_RANGE = 1..100
+    val PROMPT_NUMBER_RANGE = 1..7
     val SIZE_RATIO_RANGE = 10..1000
     val OUTPUT_CHARS_RANGE = 2000..100000
     const val COOLDOWN_MIN_SEC = 5

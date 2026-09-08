@@ -10,6 +10,7 @@ import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
 import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.engine.EngineOptions
+import com.example.novelscraper.translation.v2.engine.DictionaryBuilder
 import com.example.novelscraper.translation.v2.engine.Rotation
 import com.example.novelscraper.translation.v2.engine.RunEngine
 import com.example.novelscraper.translation.v2.engine.UnmanagedRotation
@@ -464,6 +465,115 @@ class V2EngineTest {
     }
 
     @Test
+    fun testRunEngine_ConfigOnlyStopsWorker() = kotlinx.coroutines.runBlocking {
+        // 設定不良は全ファイル共通のため、残件を無駄打ちせずワーカー終了する（.failedも作らない）
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-cfg")
+        for (name in listOf("a.txt", "b.txt")) {
+            val doc = store.createFile(folder.uri, name, "text/plain")!!
+            store.writeText(doc.uri, "これはテストの本文です。勇者が旅に出ました。")
+        }
+        val calls = java.util.concurrent.atomic.AtomicInteger(0)
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                calls.incrementAndGet()
+                return LlmResult.Failure(ClassifiedFailure(FailureKind.CONFIG))
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(
+                workerStaggerSec = 0,
+                minSendIntervalMs = 0L,
+                batchMaxFiles = 1,
+                maxSameRetries = 0
+            ),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(
+                V2ModelProfile(
+                    providerId = "gemini",
+                    model = "gemini-3.5-flash",
+                    promptOrder = listOf(1),
+                    useCustomPromptOrder = true
+                )
+            ),
+            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0)
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertEquals(1, calls.get())
+        assertEquals(0, summary.completedFiles)
+        val outDir = store.findChild(folder.uri, "翻訳完了_LLM")!!
+        assertNull(store.findChild(outDir.uri, "a.txt"))
+        assertNull(store.findChild(outDir.uri, "a.txt.failed"))
+    }
+
+    @Test
+    fun testRunEngine_EmptyDictCachedAndReused() = kotlinx.coroutines.runBlocking {
+        // 人名ゼロは空のまま確定・公開され、次回は再生成されない
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-empty-dict")
+        for (name in listOf("a.txt", "b.txt")) {
+            val doc = store.createFile(folder.uri, name, "text/plain")!!
+            store.writeText(doc.uri, "風の音だけが聞こえる丘の昼下がりでした。雨上がりの空に雲が流れました。")
+        }
+        var dictCalls = 0
+        val emptyJson = """{"style":"カタカナ","characters":{},"genders":{}}"""
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val sys = request.systemPrompt
+                if (sys.contains("Extract person names") ||
+                    sys.contains("Merge the dictionary") ||
+                    sys.contains("Review the merged")
+                ) {
+                    dictCalls++
+                    return LlmResult.Success(emptyJson)
+                }
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0),
+            dict = com.example.novelscraper.translation.v2.settings.V2DictSettings(
+                enabled = true,
+                providerId = "gemini",
+                model = "gemini-3.5-flash"
+            )
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(2, summary.completedFiles)
+        assertEquals(1, dictCalls)
+        val published = store.findChild(folder.uri, "dictionary.json")
+        assertNotNull(published)
+        // 空辞書として読込可能（再利用されることが要点。既定値のみのJSON化を許容する）
+        val loaded = DictionaryBuilder.parseDictJson(store.readText(published!!.uri) ?: "")
+        assertNotNull(loaded)
+        assertTrue(loaded!!.characters.isEmpty())
+        // 出力だけ消して再実行→空辞書は再利用され、再生成されない
+        val outDir = store.findChild(folder.uri, "翻訳完了_LLM")!!
+        for (child in store.children(outDir.uri)) {
+            store.deleteFile(child.uri)
+        }
+        val summary2 = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary2.aborted)
+        assertEquals(2, summary2.completedFiles)
+        assertEquals(1, dictCalls)
+    }
+
+    @Test
     fun testRunEngine_PreSplit() = kotlinx.coroutines.runBlocking {
         val store = InMemoryFileStore()
         val folder = store.createRoot("novel")
@@ -502,6 +612,51 @@ class V2EngineTest {
         assertTrue(outputs.isNotEmpty())
         assertTrue(outputs.all { it.name.startsWith("part_") })
         assertEquals(summary.completedFiles, outputs.size)
+    }
+
+    @Test
+    fun testRunEngine_PreSplitSkipsMojibake() = kotlinx.coroutines.runBlocking {
+        // 文字化け確定ファイルは翻訳しない（通常経路へのすり抜けなし）。正常ファイルは訳す。
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-moji")
+        val good = store.createFile(folder.uri, "good.txt", "text/plain")!!
+        store.writeText(good.uri, "昔々あるところに勇者がいました。\n".repeat(120))
+        val bad = store.createFile(folder.uri, "bad.txt", "text/plain")!!
+        val pattern = byteArrayOf(
+            0x00.toByte(), 0x98.toByte(), 0x81.toByte(),
+            0x8D.toByte(), 0xFF.toByte(), 0x80.toByte()
+        )
+        store.writeBytes(bad.uri, ByteArray(2000) { i -> pattern[i % pattern.size] })
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0),
+            split = V2SplitSettings(enabled = true, splitSizeChars = 1000)
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertTrue(summary.completedFiles > 0)
+        assertEquals(summary.totalFiles, summary.completedFiles)
+        // bad に subfolder・出力・.failed のいずれも作られない
+        val splitRoot = store.findChild(folder.uri, "分割済み")!!
+        assertNotNull(store.findChild(splitRoot.uri, "good"))
+        assertNull(store.findChild(splitRoot.uri, "bad"))
+        assertNull(store.findChild(folder.uri, settings.limits.outputSubDir))
+        val goodOut = store.findChild(store.findChild(splitRoot.uri, "good")!!.uri, settings.limits.outputSubDir)!!
+        val names = store.children(goodOut.uri).map { it.name }
+        assertTrue(names.none { it.contains("bad") || it.endsWith(".failed") })
     }
 
     @Test

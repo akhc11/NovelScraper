@@ -47,18 +47,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.coroutineContext
 
 data class EngineOptions(
-    /** 現在未使用（しきい値は目標出力からの逆算値を用いる）。将来の固定値運用のために残す */
-    val splitThresholdBytes: Int = 30000,
     val batchMaxFiles: Int = 3,
-    /** 現在未使用（チャンク幅は逆算値の90%を用いる）。将来の固定値運用のために残す */
-    val chunkSizeBytes: Int = 27000,
     /** チャンク翻訳に渡す上限。これを超える入力はスキップ確定（.failed保存）する */
     val maxInputBytes: Int = 1_000_000,
-    /** 現在未使用（末尾行数は設定の前文脈行数を用いる）。将来の固定値運用のために残す */
-    val tailLines: Int = 20,
-    /** 現在未使用（サイズ比は設定の言語別比率を用いる）。将来の固定値運用のために残す */
-    val sizeMinPct: Int = 50,
-    val sizeMaxPct: Int = 300,
     val kanaFloor: Double = 0.2,
     val markerEnabled: Boolean = true,
     val maxSameRetries: Int = 2,
@@ -293,11 +284,15 @@ class RunEngine(
         return detected.language
     }
 
+    /** 事前物理分割の結果。skipped は文字化け確定で翻訳対象外にするファイル名。 */
+    private data class PreSplitOutcome(val done: Int, val total: Int, val skipped: Set<String>)
+
     /**
      * Physical pre-split pass. Returns accumulated (done, total) when at least
      * one part was translated (parent direct translation is then skipped),
      * or null when there is nothing to translate this way (normal path continues,
-     * e.g. no raw files, or raw files produced no translatable parts).
+     * e.g. no raw files). Files quarantined as mojibake are reported in [PreSplitOutcome.skipped]
+     * and must be excluded from the normal path (they are never translated).
      * One blocked novel never stops the others: each part file translates and
      * resumes independently, so no combine step can get stuck mid-file.
      */
@@ -307,7 +302,7 @@ class RunEngine(
         settings: V2Settings,
         pool: QuotaPool,
         meter: CostMeter
-    ): Pair<Int, Int>? {
+    ): PreSplitOutcome? {
         val rawFiles = store.children(folderUri)
             .filter {
                 !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) &&
@@ -323,6 +318,7 @@ class RunEngine(
             }
         var done = 0
         var total = 0
+        val skipped = mutableSetOf<String>()
         for ((rawIndex, raw) in rawFiles.withIndex()) {
             if (stopFlag.get() || !coroutineContext.isActive) break
             _state.update { it.copy(statusText = "📄 物理分割中: ${raw.name} (${rawIndex + 1}/${rawFiles.size})") }
@@ -335,7 +331,8 @@ class RunEngine(
                 splitSizeChars = settings.split.splitSizeChars,
                 declared = V2DeclaredEncoding.parseOrNull(settings.split.inputEncoding),
                 stopped = { stopFlag.get() || !scope.isActive },
-                log = { addLog(it) }
+                log = { addLog(it) },
+                onSkipped = { skipped.add(raw.name) }
             )
             if (result != null && !stopFlag.get() && coroutineContext.isActive) {
                 val lang = detectLanguage(result.sampleText).language
@@ -347,7 +344,7 @@ class RunEngine(
                 total += t
             }
         }
-        return if (total > 0) (done to total) else null
+        return PreSplitOutcome(done, total, skipped)
     }
 
     private suspend fun processFolder(
@@ -366,18 +363,34 @@ class RunEngine(
         // Physical pre-split first (same order as the frozen spec):
         // each raw file is split and its subfolder translated immediately,
         // direct translation of the parent is skipped afterwards.
+        // 技術的根拠1行：文字化け確定ファイルは通常経路でも訳さない（検査すり抜けの完成を防ぐ）。
+        var splitSkipped: Set<String> = emptySet()
         if (settings.split.enabled && inheritedLang == null) {
             val splitResult = processPreSplit(folderUri, folderName, settings, pool, meter)
-            if (splitResult != null && splitResult.second > 0) return splitResult
+            if (splitResult != null) {
+                if (splitResult.total > 0) return splitResult.done to splitResult.total
+                splitSkipped = splitResult.skipped
+                if (splitSkipped.isNotEmpty()) {
+                    addLog("⏭️ 文字化けのため翻訳しません: ${splitSkipped.sorted().joinToString(", ")}")
+                }
+            }
         }
         val outSubDir = settings.limits.outputSubDir.ifBlank { "翻訳完了_LLM" }
         _state.update { it.copy(statusText = "📁 フォルダ内を検索中: $folderName") }
         val files = store.children(folderUri)
-            .filter { !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) && !it.name.endsWith(".failed", ignoreCase = true) }
+            .filter {
+                !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) &&
+                    !it.name.endsWith(".failed", ignoreCase = true) && it.name !in splitSkipped
+            }
             .sortedBy { it.name }
         if (files.isEmpty()) {
-            addLog("⚠️ 対象ファイルなし: $folderName (直下に.txtファイルがありません)")
-            _state.update { it.copy(statusText = "⚠️ .txtファイルがありません: $folderName") }
+            if (splitSkipped.isNotEmpty()) {
+                addLog("⚠️ 全件が文字化けのためスキップ: $folderName")
+                _state.update { it.copy(statusText = "⚠️ 文字化けのためスキップ: $folderName") }
+            } else {
+                addLog("⚠️ 対象ファイルなし: $folderName (直下に.txtファイルがありません)")
+                _state.update { it.copy(statusText = "⚠️ .txtファイルがありません: $folderName") }
+            }
             return 0 to 0
         }
         val outputDir = store.findChild(folderUri, outSubDir)

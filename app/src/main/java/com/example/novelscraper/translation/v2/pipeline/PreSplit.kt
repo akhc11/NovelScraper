@@ -8,7 +8,7 @@ import kotlinx.coroutines.CancellationException
  * Physical pre-splitter (v2).
  *
  * External contract (same as the frozen spec):
- * - Never touch an already-split folder: return cached info (sample is the first part, not the full text).
+ * - Never touch an already-split folder: return cached info (sample is a head excerpt, not the full text).
  * - Drop incomplete work on failure/stop, return null.
  * - An empty file yields one empty part.
  * - Ingested text is verified UTF-8; only parts are written back as UTF-8 (source file is never overwritten).
@@ -18,6 +18,8 @@ import kotlinx.coroutines.CancellationException
  */
 const val PRE_SPLIT_MIN_CHARS = 500
 const val PRE_SPLIT_DEFAULT_CHARS = 7000
+/** 言語判定用サンプルの上限（先頭抜粋。新規・再開の両経路で一致させる） */
+const val PRE_SPLIT_SAMPLE_CHARS = 8000
 
 /** 呼出毎コンパイルを避けるための共有正規表現 */
 private val TXT_SUFFIX_REGEX = Regex("""\.[tT][xX][tT]$""")
@@ -87,6 +89,8 @@ suspend fun splitSingleTextFile(
     splitSizeChars: Int = PRE_SPLIT_DEFAULT_CHARS,
     declared: V2DeclaredEncoding? = null,
     stopped: () -> Boolean = { false },
+    /** 文字化け確定時の通知。呼ばれたファイルは翻訳対象外（スキップ）にする */
+    onSkipped: (reason: String) -> Unit = {},
     log: (String) -> Unit = {}
 ): PreSplitResult? {
     val novelBase = fileName.replace(TXT_SUFFIX_REGEX, "")
@@ -152,6 +156,7 @@ suspend fun splitSingleTextFile(
                 else -> "UNKNOWN" to ""
             }
             log("⚠️ 文字コード判定失敗のためスキップ ($fileName: $reason $evidence)")
+            onSkipped("$reason $evidence")
             rollback()
             return null
         }
@@ -176,6 +181,7 @@ suspend fun splitSingleTextFile(
             val reason = com.example.novelscraper.translation.common.ingest.ChunkVerifier.verify(chunk, charsetId)
             if (reason != null) {
                 log("⚠️ 文字化け検出のためスキップ ($fileName: mojibake $reason)")
+                onSkipped("mojibake $reason")
                 rollback()
                 return null
             }
@@ -194,7 +200,8 @@ suspend fun splitSingleTextFile(
         }
         val total = partNumber - 1
         log("✅ 物理分割完了: $novelBase (全 $total パート)")
-        return PreSplitResult(novelDir.uri, novelBase, fullText, total)
+        // 技術的根拠1行：sampleは言語判定専用のため全文を保持せず先頭抜粋に統一する（再開経路＝先頭partと一致）。
+        return PreSplitResult(novelDir.uri, novelBase, fullText.take(PRE_SPLIT_SAMPLE_CHARS), total)
     } catch (e: CancellationException) {
         rollback()
         throw e

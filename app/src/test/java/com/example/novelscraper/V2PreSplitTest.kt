@@ -2,6 +2,7 @@ package com.example.novelscraper
 
 import com.example.novelscraper.translation.v2.infra.InMemoryFileStore
 import com.example.novelscraper.translation.v2.pipeline.PRE_SPLIT_MIN_CHARS
+import com.example.novelscraper.translation.v2.pipeline.PRE_SPLIT_SAMPLE_CHARS
 import com.example.novelscraper.translation.v2.pipeline.cleanseForSplit
 import com.example.novelscraper.translation.v2.pipeline.splitSingleTextFile
 import com.example.novelscraper.translation.v2.pipeline.splitTextToParts
@@ -75,6 +76,46 @@ class V2PreSplitTest {
             body.lines().filter { it.isNotBlank() },
             rejoined.lines().filter { it.isNotBlank() }
         )
+    }
+
+    @Test
+    fun testSplitFile_SampleIsHeadExcerpt() = kotlinx.coroutines.runBlocking {
+        // sampleは言語判定専用の先頭抜粋（新規・再開の両経路で一致させる）
+        val store = InMemoryFileStore()
+        val root = store.createRoot("novel")
+        val raw = store.createFile(root.uri, "long.txt", "text/plain")!!
+        val body = "先頭マーカー\n" + "あ".repeat(20000)
+        store.writeText(raw.uri, body)
+        val splitRoot = store.createDir(root.uri, "split-out")!!
+
+        val result = splitSingleTextFile(
+            store, raw.uri, "long.txt", splitRoot.uri, 1000
+        ) {}
+        assertNotNull(result)
+        assertEquals(body.take(PRE_SPLIT_SAMPLE_CHARS), result!!.sampleText)
+        assertTrue(result.sampleText.length <= PRE_SPLIT_SAMPLE_CHARS)
+    }
+
+    @Test
+    fun testSplitFile_QuarantinedSkips() = kotlinx.coroutines.runBlocking {
+        // 文字化け確定は null＋通知（翻訳対象外）。通常経路へのすり抜けは RunEngine 側で遮断する。
+        val store = InMemoryFileStore()
+        val root = store.createRoot("novel")
+        val raw = store.createFile(root.uri, "bad.txt", "text/plain")!!
+        val pattern = byteArrayOf(
+            0x00.toByte(), 0x98.toByte(), 0x81.toByte(),
+            0x8D.toByte(), 0xFF.toByte(), 0x80.toByte()
+        )
+        store.writeBytes(raw.uri, ByteArray(2000) { i -> pattern[i % pattern.size] })
+        val splitRoot = store.createDir(root.uri, "split-out")!!
+
+        val skipped = mutableListOf<String>()
+        val result = splitSingleTextFile(
+            store, raw.uri, "bad.txt", splitRoot.uri, 1000,
+            onSkipped = { skipped.add(it) }
+        ) {}
+        assertNull(result)
+        assertEquals(1, skipped.size)
     }
 
     @Test

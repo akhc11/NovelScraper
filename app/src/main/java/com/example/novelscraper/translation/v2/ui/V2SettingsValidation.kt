@@ -106,8 +106,21 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
                 issues.add(V2SettingsIssue("$label: providerOrder空のため allow_fallbacks は送られません", false))
             }
         }
-        if (profile.promptOrder.isEmpty() || profile.promptOrder.any { it !in 1..7 }) {
+        if (profile.promptOrder.isEmpty() || profile.promptOrder.any { it !in TranslationLimits.PROMPT_NUMBER_RANGE }) {
             issues.add(V2SettingsIssue("$label: プロンプト番号は1〜7で指定してください", true))
+        }
+    }
+    if (settings.dict.enabled && settings.dict.thinkingLevel != null && settings.dict.model.isNotBlank()) {
+        val dictCaps = when (settings.dict.providerId.toProviderId()) {
+            ProviderId.GEMINI -> GEMINI_DESCRIPTOR
+            ProviderId.OPENROUTER -> OPENROUTER_DESCRIPTOR
+            null -> null
+        }?.capabilitiesFor(settings.dict.model)
+        val dictAllowed = (dictCaps?.thinking as? ThinkingSupport.Levels)?.supported
+        if (dictAllowed == null) {
+            issues.add(V2SettingsIssue("辞書: ${settings.dict.model} は思考非対応のため thinkingLevel は送られません", false))
+        } else if (settings.dict.thinkingLevel !in dictAllowed) {
+            issues.add(V2SettingsIssue("辞書: thinkingLevel ${settings.dict.thinkingLevel} は非対応のため送られません", false))
         }
     }
     if (settings.dict.providerId.toProviderId() == ProviderId.OPENROUTER && settings.dict.enabled) {

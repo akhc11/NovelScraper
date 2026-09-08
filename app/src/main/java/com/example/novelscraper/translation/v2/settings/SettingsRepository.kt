@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.V2DeclaredEncoding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -15,7 +16,6 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import org.json.JSONObject
 
 private val Context.v2DataStore by preferencesDataStore(name = "v2_settings")
 
@@ -132,7 +132,7 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
             }
 
             val dictProviderId = root.stringOr("dictProvider", "GEMINI").lowercase()
-                .takeIf { it == "gemini" || it == "openrouter" } ?: run {
+                .takeIf { ProviderId.parse(it) != null } ?: run {
                 warnings.add("辞書プロバイダー不明のためGemini扱い")
                 "gemini"
             }

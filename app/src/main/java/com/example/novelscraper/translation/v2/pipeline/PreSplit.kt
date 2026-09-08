@@ -8,16 +8,19 @@ import kotlinx.coroutines.CancellationException
  * Physical pre-splitter (v2).
  *
  * External contract (same as the frozen spec):
- * - Never touch an already-split folder, return it as-is.
+ * - Never touch an already-split folder: return cached info (sample is the first part, not the full text).
  * - Drop incomplete work on failure/stop, return null.
  * - An empty file yields one empty part.
- * - Ingested text is verified UTF-8 written back as UTF-8.
+ * - Ingested text is verified UTF-8; only parts are written back as UTF-8 (source file is never overwritten).
  * - Every part is mojibake-checked before writing (fail-closed).
  *
  * No reference to, or reuse of, old code (this file is canonical for v2).
  */
 const val PRE_SPLIT_MIN_CHARS = 500
 const val PRE_SPLIT_DEFAULT_CHARS = 7000
+
+/** 呼出毎コンパイルを避けるための共有正規表現 */
+private val TXT_SUFFIX_REGEX = Regex("""\.[tT][xX][tT]$""")
 
 /** Harmful-char cleansing for split lines. Keeps \n \r \t, drops ISO controls/BOM/ZWSP. */
 fun cleanseForSplit(line: String): String {
@@ -86,7 +89,7 @@ suspend fun splitSingleTextFile(
     stopped: () -> Boolean = { false },
     log: (String) -> Unit = {}
 ): PreSplitResult? {
-    val novelBase = fileName.replace(Regex("""\.[tT][xX][tT]$"""), "")
+    val novelBase = fileName.replace(TXT_SUFFIX_REGEX, "")
     if (novelBase.isBlank()) {
         log("pre-split: blank base name, skip")
         return null
@@ -99,7 +102,7 @@ suspend fun splitSingleTextFile(
             .filter { !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) }
             .sortedBy { it.name }
         if (parts.isNotEmpty()) {
-            log("pre-split: already split ($novelBase, ${parts.size} parts)")
+            log("ℹ️ すでに分割完了済みです ($novelBase: ${parts.size}パート - already split)")
             val sample = store.readText(parts.first().uri) ?: ""
             return PreSplitResult(existing.uri, novelBase, sample, parts.size)
         }
@@ -109,7 +112,7 @@ suspend fun splitSingleTextFile(
     val novelDir = existing?.takeIf { it.isDirectory }
         ?: store.createDir(splitRootUri, novelBase)
     if (novelDir == null || !novelDir.isDirectory) {
-        log("pre-split: cannot create dir $novelBase")
+        log("❌ 分割フォルダ作成に失敗しました ($novelBase)")
         return null
     }
 
@@ -132,21 +135,28 @@ suspend fun splitSingleTextFile(
             rollback()
             return null
         }
-        val bytes = store.readBytes(fileUri, V2Ingest.MAX_INGEST_BYTES + 1)
+        val commonDeclared = declared?.let {
+            com.example.novelscraper.translation.common.ingest.DeclaredEncoding.valueOf(it.name)
+        }
+        val bytes = store.readBytes(fileUri, com.example.novelscraper.translation.common.ingest.TextIngest.MAX_INGEST_BYTES + 1)
             ?: run {
-                log("pre-split: cannot open $fileName")
+                log("❌ ファイルを開けませんでした ($fileName)")
                 rollback()
                 return null
             }
-        val ingested = V2Ingest.ingest(bytes, declared)
-        if (ingested !is V2IngestResult.Success) {
-            ingested as V2IngestResult.Quarantined
-            log("pre-split: skip ${ingested.reason} ($fileName: ${ingested.evidence})")
+        val ingested = com.example.novelscraper.translation.common.ingest.TextIngest.ingest(bytes, commonDeclared)
+        if (ingested !is com.example.novelscraper.translation.common.ingest.IngestResult.Success) {
+            val (reason, evidence) = when (ingested) {
+                is com.example.novelscraper.translation.common.ingest.IngestResult.Quarantined -> ingested.reason.name to ingested.evidence
+                is com.example.novelscraper.translation.common.ingest.IngestResult.Failed -> "FAILED" to (ingested.cause.message ?: "")
+                else -> "UNKNOWN" to ""
+            }
+            log("⚠️ 文字コード判定失敗のためスキップ ($fileName: $reason $evidence)")
             rollback()
             return null
         }
         val fullText = ingested.text
-        val charsetId = ingested.provenance.id
+        val charsetId = ingested.provenance.canonicalId
 
         var partNumber = 1
         suspend fun writePart(content: String): Boolean {
@@ -163,33 +173,33 @@ suspend fun splitSingleTextFile(
                 rollback()
                 return null
             }
-            val reason = V2ChunkVerifier.verify(chunk, charsetId)
+            val reason = com.example.novelscraper.translation.common.ingest.ChunkVerifier.verify(chunk, charsetId)
             if (reason != null) {
-                log("pre-split: skip mojibake in $fileName ($reason)")
+                log("⚠️ 文字化け検出のためスキップ ($fileName: mojibake $reason)")
                 rollback()
                 return null
             }
             if (!writePart(chunk)) {
-                log("pre-split: write failed ($fileName part $partNumber)")
+                log("❌ パート書き込みに失敗しました ($fileName part $partNumber)")
                 rollback()
                 return null
             }
         }
         if (partNumber == 1) {
             if (!writePart("")) {
-                log("pre-split: write failed ($fileName empty part)")
+                log("❌ 空パート書き込みに失敗しました ($fileName)")
                 rollback()
                 return null
             }
         }
         val total = partNumber - 1
-        log("pre-split: done $novelBase ($total parts)")
+        log("✅ 物理分割完了: $novelBase (全 $total パート)")
         return PreSplitResult(novelDir.uri, novelBase, fullText, total)
     } catch (e: CancellationException) {
         rollback()
         throw e
     } catch (e: Exception) {
-        log("pre-split: error $fileName (${e.message})")
+        log("❌ 物理分割エラー: $fileName (${e.message})")
         rollback()
         return null
     }

@@ -12,12 +12,18 @@ import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.domain.SamplingParam
 import com.example.novelscraper.translation.v2.domain.ThinkingSupport
 import com.example.novelscraper.translation.v2.domain.capabilitiesFor
+import com.example.novelscraper.translation.v2.domain.ProviderId
+import com.example.novelscraper.translation.v2.domain.isDeterministic
+import com.example.novelscraper.translation.v2.domain.isQuotaLike
+import com.example.novelscraper.translation.v2.domain.isTerminal
 import com.example.novelscraper.translation.v2.domain.resolveDouble
 import com.example.novelscraper.translation.v2.domain.resolveInt
 import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
 import com.example.novelscraper.translation.v2.domain.resolveOption
 import com.example.novelscraper.translation.v2.domain.resolveProviderOrder
+import com.example.novelscraper.translation.v2.domain.resolveProviderOrderReport
 import com.example.novelscraper.translation.v2.domain.resolveReasoningEffort
+import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.infra.buildGeminiBody
 import com.example.novelscraper.translation.v2.infra.buildOpenRouterBody
 import com.example.novelscraper.translation.v2.infra.parseGeminiResponse
@@ -340,6 +346,37 @@ class V2DomainTest {
         // order空のallow_fallbacks単独指定は送出しない
         val alone = buildOpenRouterBody(req, providerOrder = emptyList(), providerAllowFallbacks = true)
         assertTrue(!alone.contains("allow_fallbacks"))
+    }
+
+    @Test
+    fun testCleanCode_GuardsPredicatesAndProviderId() {
+        // 非有限数は未指定に落とす（送るとJSON化で必ず失敗するため）
+        val nan = resolveDouble(SamplingParam(0.0, 1.0), null, Double.NaN)
+        assertEquals(null, nan.value)
+        assertTrue(nan.coerced)
+        val inf = resolveDouble(SamplingParam(0.0, 1.0), Double.POSITIVE_INFINITY, null)
+        assertEquals(null, inf.value)
+        // 述語の分组は単一真実
+        assertTrue(FailureKind.BLOCKED_DETERMINISTIC.isDeterministic())
+        assertTrue(FailureKind.CONFIG.isDeterministic())
+        assertFalse(FailureKind.FATAL.isDeterministic())
+        assertTrue(FailureKind.QUOTA_MINUTE.isQuotaLike())
+        assertTrue(FailureKind.RETRYABLE_AFTER.isQuotaLike())
+        assertFalse(FailureKind.FATAL.isQuotaLike())
+        assertTrue(FailureKind.FATAL.isTerminal())
+        assertFalse(FailureKind.QUOTA_DAILY.isTerminal())
+        // プロバイダー識別子のtypo耐性
+        assertEquals(ProviderId.GEMINI, ProviderId.parse(" gemini "))
+        assertEquals(ProviderId.OPENROUTER, "OpenRouter".toProviderId())
+        assertEquals(null, ProviderId.parse("groq"))
+        assertEquals(null, ProviderId.parse(null))
+        // 解決報告の内訳
+        val report = resolveProviderOrderReport(listOf("b", "", "b", "x".repeat(65)))
+        assertEquals(listOf("b"), report.resolved)
+        assertTrue(report.droppedBlanks)
+        assertTrue(report.droppedDupes)
+        assertTrue(report.droppedLong)
+        assertFalse(report.truncated)
     }
 
     @Test

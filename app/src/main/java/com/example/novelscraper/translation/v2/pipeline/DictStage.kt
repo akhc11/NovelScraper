@@ -1,7 +1,8 @@
 package com.example.novelscraper.translation.v2.pipeline
 
-import com.example.novelscraper.translation.v2.domain.FailureKind
 import com.example.novelscraper.translation.v2.domain.LlmResult
+import com.example.novelscraper.translation.v2.domain.isDeterministic
+import com.example.novelscraper.translation.v2.domain.isQuotaLike
 import com.example.novelscraper.translation.v2.infra.FileStore
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -108,7 +109,9 @@ suspend fun generateDictionary(
     readText: suspend (name: String) -> String?,
     call: suspend (model: String, prompt: String, text: String) -> LlmResult,
     options: DictOptions,
-    log: (String) -> Unit = {}
+    log: (String) -> Unit = {},
+    /** 待機の注入口（既定は実delay。テストは記録式fakeを渡す） */
+    sleeper: suspend (Long) -> Unit = { delay(it) }
 ): NovelDict? = coroutineScope {
     val sampledNames = selectSampleFiles(fileNames, options.maxFiles, options.uniformSample)
     if (sampledNames.isEmpty()) {
@@ -226,21 +229,16 @@ suspend fun generateDictionary(
                             return@withPermit result.text
                         }
                         is LlmResult.Failure -> {
-                            val deterministic = result.failure.kind == FailureKind.BLOCKED_DETERMINISTIC ||
-                                result.failure.kind == FailureKind.CONFIG
-                            if (deterministic) {
+                            if (result.failure.kind.isDeterministic()) {
                                 log("dict: batch $batchNum deterministic fail, skip retries")
                                 break
                             }
                             // 技術的根拠1行：FATAL（JSON崩れ等）は再送するが全体保留にはしない（他バッチで部分マージ可）。
-                            if (result.failure.kind == FailureKind.QUOTA_DAILY ||
-                                result.failure.kind == FailureKind.QUOTA_MINUTE ||
-                                result.failure.kind == FailureKind.RETRYABLE_AFTER
-                            ) {
+                            if (result.failure.kind.isQuotaLike()) {
                                 sawTransient = true
                             }
                             if (retry >= maxRetries) break
-                            delay(1000L * (retry + 1))
+                            sleeper(1000L * (retry + 1))
                         }
                     }
                 }
@@ -279,7 +277,7 @@ suspend fun generateDictionary(
                     if (parsed != null) break
                 }
                 is LlmResult.Failure -> {
-                    if (retry + 1 < options.mergeRetries) delay(1000L * (retry + 1))
+                    if (retry + 1 < options.mergeRetries) sleeper(1000L * (retry + 1))
                 }
             }
         }
@@ -303,7 +301,7 @@ suspend fun generateDictionary(
                 }
             }
             is LlmResult.Failure -> {
-                if (retry + 1 < options.reviewRetries) delay(1000L)
+                if (retry + 1 < options.reviewRetries) sleeper(1000L)
             }
         }
     }

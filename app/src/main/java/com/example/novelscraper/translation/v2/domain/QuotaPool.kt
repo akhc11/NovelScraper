@@ -74,7 +74,7 @@ class QuotaPool(private val credentials: List<String>) {
                 dailyDead.add(credentialIndex to normalizeScope(scope))
                 cooldownUntil.remove(credentialIndex)
             } else {
-                val effective = cooldownSec.coerceAtLeast(5)
+                val effective = cooldownSec.coerceAtLeast(TranslationLimits.COOLDOWN_MIN_SEC)
                 cooldownUntil[credentialIndex] = System.currentTimeMillis() + (effective * 1000L)
             }
         }

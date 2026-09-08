@@ -129,6 +129,18 @@ class V2SettingsValidationTest {
     }
 
     @Test
+    fun testNonFinite_WarnsOnly() {
+        val settings = base().copy(
+            profiles = listOf(
+                V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash", temperature = Double.NaN)
+            )
+        )
+        val issues = validateV2Settings(settings)
+        assertFalse(issues.any { it.blocksSave })
+        assertTrue(issues.any { it.message.contains("有限数") })
+    }
+
+    @Test
     fun testUnknownProvider_Blocks() {
         val settings = base().copy(
             profiles = listOf(V2ModelProfile(providerId = "groq", model = "llama"))

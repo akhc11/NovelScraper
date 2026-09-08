@@ -2,7 +2,7 @@ package com.example.novelscraper.translation.v2.domain
 
 /**
  * 社形式の誤差配器。HTTPステータス＋本文（＋Retry-After）を共通分類へ正規化する。
- * pure・副作用なし。fixtures による対応表テストを必須とする。
+ * pure・副作用なし。対応表の回帰テスト（V2DomainTest内の分類表）を必須とする。
  */
 interface ErrorMapper {
     fun map(code: Int, body: String, retryAfterSec: Long? = null): ClassifiedFailure
@@ -26,7 +26,10 @@ object GenericErrorMapper : ErrorMapper {
         return when (code) {
             429 -> ClassifiedFailure(
                 FailureKind.QUOTA_MINUTE,
-                retryAfterSec = retryAfterSec?.coerceIn(1L, 600L)?.toInt(),
+                retryAfterSec = retryAfterSec?.coerceIn(
+                    TranslationLimits.RETRY_AFTER_MIN_SEC,
+                    TranslationLimits.RETRY_AFTER_MAX_SEC
+                )?.toInt(),
                 note = "429"
             )
             401, 403 -> ClassifiedFailure(FailureKind.CONFIG, configKind = ConfigKind.AUTH_FAILED, note = "$code")

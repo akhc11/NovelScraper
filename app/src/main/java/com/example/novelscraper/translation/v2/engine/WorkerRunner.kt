@@ -6,6 +6,7 @@ import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.capabilitiesFor
+import com.example.novelscraper.translation.v2.domain.isDeterministicFailure
 import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.VDoc
@@ -18,6 +19,7 @@ import com.example.novelscraper.translation.v2.pipeline.TranslateContext
 import com.example.novelscraper.translation.v2.pipeline.VerifyOptions
 import com.example.novelscraper.translation.v2.pipeline.buildProfilePrompt
 import com.example.novelscraper.translation.v2.pipeline.cleanseBasic
+import com.example.novelscraper.translation.v2.pipeline.findOrCreateFile
 import com.example.novelscraper.translation.v2.pipeline.translateBatch
 import com.example.novelscraper.translation.v2.pipeline.translateLarge
 import com.example.novelscraper.translation.v2.pipeline.translateSingle
@@ -129,6 +131,7 @@ class WorkerRunner(
             if (!claim(fileName)) continue
             onFileStart(fileName, completed.get(), total)
 
+            var retainPrimaryClaim = false
             try {
                 val raw = store.readText(file.uri)
                 if (raw == null) {
@@ -141,8 +144,7 @@ class WorkerRunner(
                 val content = cleanseBasic(raw)
                 contextTracker.putSource(fileIdx, content)
                 if (content.isBlank()) {
-                    val out = store.findChild(outputDirUri, fileName)
-                        ?: store.createFile(outputDirUri, fileName, "text/plain")
+                    val out = findOrCreateFile(store, outputDirUri, fileName, "text/plain")
                     if (out != null && store.writeText(out.uri, "")) existing.add(fileName)
                     bump(fileName)
                     continue
@@ -183,9 +185,9 @@ class WorkerRunner(
                         if (ok) {
                             existing.add(fileName)
                             log("✅ [W#$workerId] 大ファイル翻訳完了: $fileName")
+                            bump(fileName)
                         }
                     }
-                    bump(fileName)
                     continue
                 }
 
@@ -209,8 +211,7 @@ class WorkerRunner(
                     val nextClean = cleanseBasic(nextRaw)
                     contextTracker.putSource(nextIdx, nextClean)
                     if (nextClean.isBlank()) {
-                        val out = store.findChild(outputDirUri, nextName)
-                            ?: store.createFile(outputDirUri, nextName, "text/plain")
+                        val out = findOrCreateFile(store, outputDirUri, nextName, "text/plain")
                         if (out != null && store.writeText(out.uri, "")) existing.add(nextName)
                         bump(nextName)
                         unclaim(nextName)
@@ -244,19 +245,34 @@ class WorkerRunner(
                         // 保存系はstage内で完結するため、結果から既存集合を直接同期（不要なfindChild Binder IPCクエリを全廃）
                         // 技術的根拠: SAFの findChild は O(N) の線形ディレクトリ走査・IPCクエリを伴うため、translateBatch の確定ファイル名で1工程同期する
                         existing.addAll(outcome.savedFiles)
-                        if (outcome.configBlocked) return
+                        if (outcome.configBlocked) {
+                            log("⚠️ [W#$workerId] 設定エラーのため終了します（修正後に再実行可能）")
+                            return
+                        }
                     } else {
                         log("📝 [W#$workerId] 翻訳中: $fileName")
                         when (val r = translateSingle(content, ctx, prevSourceTail = contextTracker.getPrevSourceTail(fileIdx))) {
                             is SingleResult.Translated -> {
-                                val out = store.findChild(outputDirUri, fileName)
-                                    ?: store.createFile(outputDirUri, fileName, "text/plain")
+                                val out = findOrCreateFile(store, outputDirUri, fileName, "text/plain")
                                 if (out != null && store.writeText(out.uri, r.text)) {
                                     existing.add(fileName)
                                     log("✅ [W#$workerId] 翻訳完了・保存: $fileName")
+                                    bump(fileName)
                                 }
                             }
-                            is SingleResult.Failed -> writeFailed(store, outputDirUri, fileName, content) { log(it) }
+                            is SingleResult.Failed -> {
+                                if (isDeterministicFailure(r.terminal, r.note)) {
+                                    log("❌ [W#$workerId] 翻訳失敗: $fileName (${r.terminal} ${r.note})".trim())
+                                    // 技術的根拠1行：確定的エラーのみ.failedを作成し、後続ワーカーの拾い直しを防ぐ。
+                                    if (writeFailed(store, outputDirUri, fileName, content) { log(it) }) {
+                                        existing.add("$fileName.failed")
+                                        bump(fileName)
+                                    }
+                                } else {
+                                    log("⚠️ [W#$workerId] 一時エラー/制限のため未完了として保留します: $fileName (${r.terminal} ${r.note})".trim())
+                                    retainPrimaryClaim = true // 技術的根拠1行：同一セッション内で後続ワーカーが重複処理しないようclaimを保持する
+                                }
+                            }
                             is SingleResult.ConfigOnly -> {
                                 // 技術的根拠1行：設定不良は全ファイル共通のため残件を無駄打ちせずワーカー終了する（バッチconfigBlockedと対称）。
                                 log("⚠️ [W#$workerId] 設定エラーのため終了します（修正後に再実行可能）")
@@ -264,13 +280,16 @@ class WorkerRunner(
                             }
                             is SingleResult.Stopped -> return
                         }
-                        bump(fileName)
                     }
                 } finally {
-                    for (item in batch) unclaim(item.first.name)
+                    for (item in batch.drop(1)) {
+                        val name = item.first.name
+                        val settled = existing.contains(name) || existing.contains("$name.failed")
+                        if (settled) unclaim(name)
+                    }
                 }
             } finally {
-                unclaim(fileName)
+                if (!retainPrimaryClaim) unclaim(fileName)
             }
         }
     }

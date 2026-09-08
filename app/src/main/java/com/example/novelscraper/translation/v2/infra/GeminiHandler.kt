@@ -31,6 +31,12 @@ internal fun v2HttpClient(): OkHttpClient = OkHttpClient.Builder()
     .readTimeout(180, TimeUnit.SECONDS)
     .build()
 
+/**
+ * エンジン共用のHTTPクライアント（コネクション再利用）。
+ * 技術的根拠1行：試行ごとに生成するとプールを使い回せずTLS確立を繰り返すため、OkHttpClientのスレッドセーフ性を活かして共有する。
+ */
+internal val sharedV2HttpClient: OkHttpClient by lazy { v2HttpClient() }
+
 @Serializable
 internal data class V2GeminiPart(val text: String? = null, val thought: Boolean? = null)
 
@@ -45,7 +51,8 @@ internal data class V2GeminiGenConfig(
     val temperature: Double? = null,
     val maxOutputTokens: Int? = null,
     val thinkingConfig: V2GeminiThinking? = null,
-    val responseMimeType: String? = null
+    val responseMimeType: String? = null,
+    val responseSchema: kotlinx.serialization.json.JsonElement? = null
 )
 
 @Serializable
@@ -81,7 +88,7 @@ internal data class V2GeminiResponse(
 @Serializable
 internal data class V2GeminiFeedback(val blockReason: String? = null)
 
-/** 送信は解決済み値をそのまま送る（可否判断は能力層の責務）。level/budget併存時はlevel優先 */
+/** 送信は解決済み値をそのまま送る（可否判断は能力層の責務）。本構造にない項目（topP等）は送出対象外。level/budget併存時はlevel優先 */
 internal fun buildGeminiBody(req: LlmRequest): String {
     val thinking = when {
         !req.options.thinkingLevel.isNullOrBlank() ->
@@ -90,14 +97,28 @@ internal fun buildGeminiBody(req: LlmRequest): String {
             V2GeminiThinking(thinkingBudget = req.options.thinkingBudget)
         else -> null
     }
+    val schemaElement = when (val s = req.options.jsonSchema) {
+        null -> null
+        "batch" -> try {
+            v2Json.parseToJsonElement(com.example.novelscraper.translation.v2.pipeline.buildBatchJsonSchema())
+        } catch (_: Exception) {
+            null
+        }
+        else -> try {
+            v2Json.parseToJsonElement(s)
+        } catch (_: Exception) {
+            null
+        }
+    }
     val genConfig = if (req.options.temperature != null || req.options.maxOutputTokens != null ||
-        thinking != null || req.options.jsonSchema != null
+        thinking != null || schemaElement != null
     ) {
         V2GeminiGenConfig(
             temperature = req.options.temperature,
             maxOutputTokens = req.options.maxOutputTokens,
             thinkingConfig = thinking,
-            responseMimeType = if (req.options.jsonSchema != null) "application/json" else null
+            responseMimeType = if (schemaElement != null) "application/json" else null,
+            responseSchema = schemaElement
         )
     } else null
     return v2Json.encodeToString(
@@ -110,7 +131,15 @@ internal fun buildGeminiBody(req: LlmRequest): String {
     )
 }
 
+internal fun parseGeminiRetryDelay(body: String): Long? {
+    val match = Regex("""retryDelay["']?\s*:\s*["']?([0-9]+(?:\.[0-9]+)?)s?""", RegexOption.IGNORE_CASE).find(body)
+        ?: return null
+    val secDouble = match.groupValues[1].toDoubleOrNull() ?: return null
+    return kotlin.math.ceil(secDouble).toLong().coerceIn(0L, com.example.novelscraper.translation.v2.domain.TranslationLimits.RETRY_AFTER_MAX_SEC)
+}
+
 internal fun parseGeminiResponse(code: Int, body: String, retryAfterSec: Long? = null): LlmResult {
+    val effectiveRetryAfter = retryAfterSec ?: parseGeminiRetryDelay(body)
     if (code == 200) {
         val resp = try {
             v2Json.decodeFromString(V2GeminiResponse.serializer(), body)
@@ -143,7 +172,7 @@ internal fun parseGeminiResponse(code: Int, body: String, retryAfterSec: Long? =
         )
     }
     if (code == 429) {
-        val mapped = GeminiErrorMapper.map(code, body, retryAfterSec)
+        val mapped = GeminiErrorMapper.map(code, body, effectiveRetryAfter)
         return LlmResult.Failure(mapped, statusCode = code)
     }
     val mapped = GenericErrorMapper.map(code, body)
@@ -153,7 +182,7 @@ internal fun parseGeminiResponse(code: Int, body: String, retryAfterSec: Long? =
 class GeminiHandler(
     private val apiKey: String,
     private val endpointBase: String = "https://generativelanguage.googleapis.com/v1beta/models",
-    private val client: OkHttpClient = v2HttpClient()
+    private val client: OkHttpClient = sharedV2HttpClient
 ) : ProviderHandler {
 
     override suspend fun call(request: LlmRequest): LlmResult = withContext(Dispatchers.IO) {

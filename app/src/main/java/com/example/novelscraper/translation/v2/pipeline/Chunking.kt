@@ -160,8 +160,8 @@ suspend fun joinOutputsStreaming(
             val trimmed = text.trimStart('\r', '\n')
             when {
                 prevEndingNewlines >= 2 -> "\n\n" + trimmed
-                prevEndingNewlines == 1 -> "\n" + trimmed
-                else -> trimmed
+                // 技術的根拠1行：検証済みチャンクは末尾改行が落ちているため、無区切り結合では切れ目の行が癒着する。
+                else -> "\n" + trimmed
             }
         }
         if (!store.appendText(finalUri, piece)) return false

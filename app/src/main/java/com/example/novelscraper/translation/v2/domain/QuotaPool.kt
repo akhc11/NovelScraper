@@ -21,7 +21,7 @@ class QuotaPool(private val credentials: List<String>) {
     private val dailyDead = mutableSetOf<Pair<Int, String>>()
     private val cooldownUntil = mutableMapOf<Int, Long>()
 
-    suspend fun acquire(scopes: Collection<String>): AcquireResult = mutex.withLock {
+    suspend fun acquire(scopes: Collection<String>, busyWaitMs: Long = 200L): AcquireResult = mutex.withLock {
         if (credentials.isEmpty()) return@withLock AcquireResult.Exhausted
         val targets = normalizeScopes(scopes)
         val now = System.currentTimeMillis()
@@ -42,11 +42,11 @@ class QuotaPool(private val credentials: List<String>) {
             .filter { !isDeadForAllLocked(it, targets) && it !in claimed }
             .mapNotNull { cooldownUntil[it] }
         if (waits.isNotEmpty()) {
-            val minUntil = waits.minOrNull() ?: (now + 1000L)
-            return@withLock AcquireResult.Wait((minUntil - now).coerceAtLeast(1000L))
+            val minUntil = waits.minOrNull() ?: (now + 1L)
+            return@withLock AcquireResult.Wait((minUntil - now).coerceAtLeast(1L))
         }
 
-        if (claimed.isNotEmpty()) return@withLock AcquireResult.Wait(3000L)
+        if (claimed.isNotEmpty()) return@withLock AcquireResult.Wait(busyWaitMs)
         return@withLock AcquireResult.Exhausted
     }
 
@@ -74,7 +74,7 @@ class QuotaPool(private val credentials: List<String>) {
                 dailyDead.add(credentialIndex to normalizeScope(scope))
                 cooldownUntil.remove(credentialIndex)
             } else {
-                val effective = cooldownSec.coerceAtLeast(TranslationLimits.COOLDOWN_MIN_SEC)
+                val effective = cooldownSec.coerceAtLeast(0)
                 cooldownUntil[credentialIndex] = System.currentTimeMillis() + (effective * 1000L)
             }
         }

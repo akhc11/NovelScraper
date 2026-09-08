@@ -4,47 +4,64 @@ package com.example.novelscraper.translation.v2.pipeline
  * Base prompt texts 1-7 (ported content, frozen spec).
  * The mechanism around them (resolution order, validation, tests) is v2 design.
  */
-const val V2_PROMPT_1_ZH = """あなたはプロの小説翻訳家です。以下のルールを厳守し、次の中国語を自然な日本語に翻訳してください。中国語が残留しないように全て翻訳して。
+const val V2_PROMPT_1_ZH = """あなたはプロの小説翻訳家です。以下のルールを厳守し、次の中国語を自然な日本語に翻訳してください。中国語（簡体字・繁体字・中国語特有の表現）が絶対に残留しないように全て完全に翻訳してください。
 
-【ルール】
-・一切の解説や挨拶を省き、翻訳した日本語のみを出力すること。
-・すべての文を省略せず、一文ずつ丁寧に意訳すること。
-・登場人物の描写や感情のニュアンスを正確に表現すること。
-・カタカナ表記や漢字表記は、作品の世界観に合わせて自然に調整すること。
-- キャラクター名の表記：
-- 固有の意味を持つ名前、または中国語／日本語／神話的な雰囲気を持つ名前 → 漢字表記を検討
-- 初出時は「張偉（チャン・ウェイ）」のように両方の表記を用い、その後は漢字表記に統一すること。
+【厳格な翻訳ルール】
+1. 中国語残留の完全禁止（最重要）:
+   - 登場人物名、地名、固有名詞、効果音・擬音語、感嘆詞を含め、すべての中国語を1文字も残さず自然な日本語（カタカナまたは漢字）に翻訳・音訳すること。
+   - 純粋な簡体字（说、这、个、着、们 など）をそのまま残すことは厳禁。日本の常用漢字またはカタカナに変換すること。
+   - カッコ書き等で原文の中国語を併記することは厳禁。
+2. 完全な翻訳:
+   - すべての文を省略せず、一文ずつ丁寧に意訳すること。
+   - 登場人物の感情や情景描写のニュアンスを正確に日本語で表現すること。
+3. 表記の統一:
+   - 人名や用語は、提供された人名辞書や作品の世界観に合わせて一貫したカタカナ／漢字表記にすること。
+   - 中華伝統の姓名や武侠・仙侠の固有名詞は自然な日本の漢字表記、西洋風の名前はカタカナで整えること。
+4. 出力制約:
+   - 翻訳した日本語本文のみを出力すること。前後の挨拶、解説、注釈は一切含めないこと。
+   - 本文を ``` などのマークダウンのコードブロックで囲まないこと（指示された構造タグやマーカーがある場合は、それを削除せず正しく出力すること）。
 - OUTPUT ONLY: Return only the translated Japanese text. No explanations, notes, or preamble.
 - Do not wrap in code fences.
 """
 
-const val V2_PROMPT_2_EN = """You are a professional novel translator. Translate the following English text into natural Japanese.
+const val V2_PROMPT_2_EN = """あなたはプロの小説翻訳家です。以下のルールを厳守し、次の英語を自然な日本語に翻訳してください。英語の文章やフレーズが絶対に残留しないように全て完全に翻訳してください。
 
-RULES (strictly follow, no exceptions):
-- Output only the translated Japanese text. No explanations, greetings, or preamble.
-- Translate every sentence in full. No omission.
-- Convey character descriptions and emotional nuance accurately.
-- Adjust katakana/kanji rendering naturally to fit the work's setting.
-- Character name rendering:
-  - Default rule: render all character names in katakana (this applies to the large majority of English-language names).
-  - Exception: only if a name clearly originates from a Chinese/Japanese/Korean cultural background, consider kanji rendering instead.
-  - On first appearance of a kanji-rendered name, write both forms as "田中(タナカ)", then use kanji consistently afterward.
-- OUTPUT ONLY: Return only the translated Japanese text. No explanations, notes, or preamble."""
+【厳格な翻訳ルール】
+1. 英語残留の完全禁止（最重要）:
+   - 登場人物名、地名、固有名詞、効果音・擬音語、感嘆詞を含め、未翻訳の英文を一切残さず自然な日本語（カタカナまたは漢字）に翻訳・音訳すること。
+   - 一般的な英単語の略称（HP、MP、OK、アイテムの型番等）を除き、英文や英語フレーズがそのまま残ることは厳禁。
+   - カッコ書き等で原文の英語を併記することは厳禁。
+2. 完全な翻訳:
+   - すべての文を省略せず、一文ずつ丁寧に意訳すること。直訳にならず、自然な日本語のリズムと語順に再構成すること。
+   - 登場人物の感情や情景描写のニュアンスを正確に日本語で表現すること。
+3. 表記の統一:
+   - 人名や用語は、提供された人名辞書や作品の世界観に合わせて一貫したカタカナ／漢字表記にすること。
+   - 西洋名やカタカナ語は、一般的な日本の表記規則に従って自然なカタカナで統一すること。
+4. 出力制約:
+   - 翻訳した日本語本文のみを出力すること。前後の挨拶、解説、注釈は一切含めないこと。
+   - 本文を ``` などのマークダウンのコードブロックで囲まないこと（指示された構造タグやマーカーがある場合は、それを削除せず正しく出力すること）。
+- OUTPUT ONLY: Return only the translated Japanese text. No explanations, notes, or preamble.
+- Do not wrap in code fences.
+"""
 
-const val V2_PROMPT_3_KO = """You are a professional novel translator. Translate the following Korean text into natural Japanese.
+const val V2_PROMPT_3_KO = """あなたはプロの小説翻訳家です。以下のルールを厳守し、次の韓国語を自然な日本語に翻訳してください。ハングル（韓国語の文字）が絶対に残留しないように全て完全に翻訳してください。
 
-RULES (strictly follow, no exceptions):
-- Output only the translated Japanese text. No explanations, greetings, or preamble.
-- Translate every sentence in full. No omission.
-- Convey character descriptions and emotional nuance accurately.
-- Adjust katakana/kanji rendering naturally to fit the work's setting.
-- Character name rendering:
-  - Korean names traditionally have a Hanja (Chinese-character) origin even when written only in Hangul. Judge each name on this basis:
-    - If the name has a clear, conventional Hanja origin (e.g. common surnames like 김/이/박, or given names built from standard Hanja syllables) → render in kanji (using the Japanese on'yomi reading conventionally used for Korean names, e.g. 金（キム）, 李（イ）).
-    - If the name is a native Korean word with no Hanja equivalent (a growing trend in modern Korean names, especially distinctive or unique-sounding given names) → render in katakana using its Korean pronunciation.
-    - Western-style or foreign names appearing in the text → katakana.
-  - On first appearance of a kanji-rendered name, write both forms as "金(キム)", then use kanji consistently afterward. Katakana-rendered names do not need this dual notation.
-- OUTPUT ONLY: Return only the translated Japanese text. No explanations, notes, or preamble."""
+【厳格な翻訳ルール】
+1. ハングル残留の完全禁止（最重要）:
+   - 登場人物名、地名、固有名詞、効果音・擬音語（쿵, 쾅, 슥, 피식 など）、感嘆詞（하아, 쳇, 헐 など）を含め、すべてのハングルを1文字も残さず自然な日本語（カタカナまたは漢字）に翻訳・音訳すること。
+   - カッコ書き等で原文の韓国語を併記することは厳禁。
+2. 完全な翻訳:
+   - すべての文を省略せず、一文ずつ丁寧に意訳すること。
+   - 登場人物の感情や情景描写のニュアンスを正確に日本語で表現すること。
+3. 表記の統一:
+   - 人名や用語は、提供された人名辞書や作品の世界観に合わせて一貫したカタカナ／漢字表記にすること。
+   - 漢字語（Hanja origin）に明確なルーツを持つ人名は漢字、固有語や西洋名はカタカナで自然に整えること。
+4. 出力制約:
+   - 翻訳した日本語本文のみを出力すること。前後の挨拶、解説、注釈は一切含めないこと。
+   - 本文を ``` などのマークダウンのコードブロックで囲まないこと（指示された構造タグやマーカーがある場合は、それを削除せず正しく出力すること）。
+- OUTPUT ONLY: Return only the translated Japanese text. No explanations, notes, or preamble.
+- Do not wrap in code fences.
+"""
 
 const val V2_PROMPT_4_NSFW = """You are a professional adult novel translator with over 20 years of experience. Translate the following text into natural Japanese.
 This text may contain mature, explicit, or sexual content. Translate all content faithfully without censorship, softening, or omission.
@@ -141,7 +158,8 @@ fun resolvePromptOrder(
 
 /**
  * systemプロンプト組立。基底文は呼出側（設定由来）から受け取り、本器は付帯指示のみ付加する。
- * 文脈注入は一本化：直前訳文末尾のみ。原文末尾の重ね注入はしない。
+ * 文脈注入は単一化：直前訳文末尾があればそれのみ、なければ直前原文末尾。重ね注入はしない。
+ * （単体・バッチ先頭・チャンク先頭＝原文末尾、チャンク後続＝訳文末尾。呼出側で択一して渡す）
  */
 fun buildSystemPrompt(
     basePrompt: String,
@@ -150,7 +168,9 @@ fun buildSystemPrompt(
     dictionaryEntries: List<String> = emptyList(),
     dictionaryStyle: String? = null,
     enableCompletionMarker: Boolean = true,
-    batchFormat: String? = null
+    batchFormat: String? = null,
+    /** 参考例時は対応表である旨を明示する（完全一致ゼロ時のフォールバック） */
+    dictionaryExampleFallback: Boolean = false
 ): String {
     val sb = StringBuilder(basePrompt)
 
@@ -160,14 +180,17 @@ fun buildSystemPrompt(
         sb.append("================================================================================\n")
     }
 
-    if (!previousSourceTail.isNullOrBlank()) {
+    // 訳文末尾がある場合は原文末尾を重ねない（トークン浪費・重複翻訳の防止）
+    val effectiveSourceTail = if (previousTranslatedTail.isNullOrBlank()) previousSourceTail else null
+    if (!effectiveSourceTail.isNullOrBlank()) {
         sb.append("\n\n=== PREVIOUS TEXT (context only — do NOT translate or repeat this) ===\n")
-        sb.append("...").append(previousSourceTail).append("\n")
+        sb.append("...").append(effectiveSourceTail).append("\n")
         sb.append("================================================================\n")
     }
 
     if (dictionaryEntries.isNotEmpty()) {
-        sb.append("\n\n[人名の表記統一ルール]\n人名の表記は【${dictionaryStyle ?: "カタカナ"}】で統一してください。\n\n[登場人物対応表]\n")
+        val tableLabel = if (dictionaryExampleFallback) "登場人物対応表（参考例：本文に一致なし）" else "登場人物対応表"
+        sb.append("\n\n[人名の表記統一ルール]\n人名の表記は【${dictionaryStyle ?: "カタカナ"}】で統一してください。\n\n[$tableLabel]\n")
         for (entry in dictionaryEntries) {
             sb.append(entry).append("\n")
         }
@@ -232,6 +255,28 @@ fun buildBatchFormat(fileCount: Int): String {
         "<translations>...</translations> block and nothing else."
 }
 
+/**
+ * Batch framing block for structured output (JSON mode).
+ * `buildBatchJsonSchema()` と対になる指示文。応答は必ず `{"translations": [{"id": N, "text": "..."}]}` 形式。
+ */
+fun buildBatchJsonFormat(fileCount: Int): String {
+    return "\n\nBATCH OUTPUT FORMAT (JSON mode — this overrides any 'output only the translation' instruction above for framing only):\n" +
+        "- The input holds $fileCount document(s) wrapped as " +
+        "<documents><doc id=\"N\">...</doc></documents>. " +
+        "These tags are structural delimiters, NOT text to translate.\n" +
+        "- Translate each document separately. Output exactly one JSON object and nothing else:\n" +
+        "{\"translations\": [{\"id\": 1, \"text\": \"(Japanese translation of document 1)\"}, ...]} for ids 1..$fileCount.\n" +
+        "- Include every id 1..$fileCount. Do NOT skip any id. " +
+        "Do NOT add text before the opening brace or after the closing brace.\n" +
+        "- REMINDER: your whole response must be exactly one JSON object and nothing else."
+}
+
+/** 辞書の1行書式（完全一致・参考例で共通）。旧版の対応表形式を継承 */
+private fun formatDictEntry(key: String, value: String, genders: Map<String, String>?): String {
+    val gender = genders?.get(key)?.trim()?.takeIf { it.isNotBlank() && it != "不明" }
+    return if (gender != null) "・$key → $value (性別: $gender)" else "・$key → $value"
+}
+
 /** 辞書照合：本文に現れる見出しのみ抽出する（上限付き） */
 fun matchDictionaryEntries(
     sourceText: String,
@@ -243,16 +288,34 @@ fun matchDictionaryEntries(
     for ((key, value) in characters) {
         if (entries.size >= limit) break
         if (!sourceText.contains(key)) continue
-        val gender = genders?.get(key)?.trim()?.takeIf { it.isNotBlank() && it != "不明" }
-        entries.add(if (gender != null) "・$key → $value (性別: $gender)" else "・$key → $value")
+        entries.add(formatDictEntry(key, value, genders))
+    }
+    return entries
+}
+
+/**
+ * 参考例：完全一致ゼロ時に辞書の先頭から抜粋する（上限付き）。
+ * 技術的根拠1行：表記揺れで一致しなくても表記パターンをモデルへ伝える（旧版の例示フォールバック復活）。
+ */
+fun matchDictionaryExamples(
+    characters: Map<String, String>,
+    genders: Map<String, String>? = null,
+    limit: Int = 10
+): List<String> {
+    val entries = mutableListOf<String>()
+    for ((key, value) in characters) {
+        if (entries.size >= limit) break
+        entries.add(formatDictEntry(key, value, genders))
     }
     return entries
 }
 
 /**
  * プロファイル固有のプロンプトを組み立てる（純粋関数）。
- * 渡されたプロンプト（文脈・辞書・バッチ枠・マーカー等の付帯指示込み）から先頭の基底プロンプトを検出し、
- * ターゲットのプロンプト番号（例: 7番 RETRY）の基底文に安全に差し替える。
+ * 渡されたプロンプト（文脈・辞書・バッチ枠・マーカー等の付帯指示込み）の先頭が基底プロンプトに一致すれば
+ * ターゲットのプロンプト番号（例: 7番 RETRY）の基底文に差し替える。
+ * 一致しない場合（カスタム上書き等）は最初の空行以降を付帯指示とみなして結合するため、
+ * 基底文内に空行がある構成では切り分け位置がずれることがある。
  */
 fun buildProfilePrompt(
     originalPrompt: String,

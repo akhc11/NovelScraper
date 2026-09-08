@@ -75,7 +75,8 @@ class Rotation(
     private val descriptors: Map<ProviderId, ProviderDescriptor>,
     private val handlerFactory: HandlerFactory,
     private val openRouterKey: String,
-    private val switchCooldownSec: Int = 15,
+    private val geminiCooldownSec: Int = 60,
+    private val transientRetryDelaySec: Int = 2,
     private val maxSameRetries: Int = 2,
     private val sendGate: V2SendGate? = null,
     private val sendGateIntervalMs: Long = 10_000L,
@@ -148,19 +149,19 @@ class Rotation(
             val dailyScopes = mutableSetOf<Pair<Int, String>>()
             var attemptedAny = false
 
-            for (profile in profiles) {
+            profileLoop@ for (profile in profiles) {
                 if (stopped() || exhausted) break
                 // 枯渇ペアは飛ばして無駄打ち防止
                 if (managed(profile)) {
                     val pool = pool ?: continue
                     val dead = scopesFor(profile).all { pool.isScopeDead(keyIndex, it) }
                     if (dead) {
-                        log("[W#$workerId] skip dead pair: ${profile.model}")
+                        log("skip dead pair: ${profile.model}")
                         continue
                     }
                 }
                 val activePrompts = profilePrompts?.get(profile.id)?.ifEmpty { prompts } ?: prompts
-                for (prompt in activePrompts) {
+                promptLoop@ for (prompt in activePrompts) {
                     if (stopped() || exhausted) break
                     var sameLeft = maxSameRetries
                     while (true) {
@@ -174,24 +175,33 @@ class Rotation(
                                     FailureKind.BLOCKED_DETERMINISTIC,
                                     FailureKind.CONFIG,
                                     FailureKind.FATAL -> break
-                                    FailureKind.QUOTA_DAILY, FailureKind.QUOTA_MINUTE,
-                                    FailureKind.RETRYABLE_AFTER -> {
+                                    FailureKind.QUOTA_DAILY -> {
                                         quotaSeenThisEpoch = true
                                         if (managed(profile)) {
                                             val scope = scopesFor(profile).firstOrNull() ?: profile.model
                                             failedScopes.add(keyIndex to scope)
-                                            if (result.failure.kind == FailureKind.QUOTA_DAILY) {
-                                                dailyScopes.add(keyIndex to scope)
-                                            }
+                                            dailyScopes.add(keyIndex to scope)
                                         }
-                                        // 待ちは二層で役割が異なる：waitSecはサーバ指示の backoff（429/Retry-After 用）、
-                                        // callOnce 側の sendGate は通常時のユーザー指定ペーシング。制限時は合算される。
-                                        val waitSec = result.failure.retryAfterSec
-                                            ?.toLong()?.coerceIn(TranslationLimits.WAIT_MIN_SEC, TranslationLimits.WAIT_MAX_SEC)
-                                            ?: if (managed(profile)) 2L else TranslationLimits.WAIT_MIN_SEC
-                                        if (sameLeft > 0) {
+                                        log("${profile.model} の日のLIMITに達したため同一キー内の次モデルへ移行します")
+                                        // 日のLIMITは今日中回復しないため同一モデルでの待機再試行を0秒で打ち切り、同一キー内の次モデルへ即時切替
+                                        break@promptLoop
+                                    }
+                                    FailureKind.QUOTA_MINUTE -> {
+                                        quotaSeenThisEpoch = true
+                                        if (managed(profile)) {
+                                            val scope = scopesFor(profile).firstOrNull() ?: profile.model
+                                            failedScopes.add(keyIndex to scope)
+                                        }
+                                        if (handleQuotaRetry(result.failure, geminiCooldownSec, TranslationLimits.COOLDOWN_MAX_SEC.toLong(), sameLeft, sleeper, log)) {
                                             sameLeft--
-                                            sleeper(waitSec * 1000L)
+                                            continue
+                                        }
+                                        break
+                                    }
+                                    FailureKind.RETRYABLE_AFTER -> {
+                                        // 技術的根拠1行：5xxや通信一時エラーはクォータ枯渇ではないためプール報告せず、一時エラー待機設定で再試行する。
+                                        if (handleTransientRetry(result.failure, transientRetryDelaySec, sameLeft, sleeper, log)) {
+                                            sameLeft--
                                             continue
                                         }
                                         break
@@ -206,7 +216,7 @@ class Rotation(
             // 1周して成功なし：全プロファイルが枯渇skipなら終了、制限系なしなら確定失敗
             if (!attemptedAny) {
                 exhausted = true
-                log("[W#$workerId] all pairs dead, worker ends")
+                log("all pairs dead, worker ends")
                 return LlmResult.Failure(ClassifiedFailure(FailureKind.QUOTA_DAILY, note = "all-pairs-dead"))
             }
             if (!quotaSeenThisEpoch) return lastFailure
@@ -224,23 +234,23 @@ class Rotation(
                     ?: LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "no-pool"))
             }
             for ((k, scope) in failedScopes) {
-                pool.reportQuota(k, scope, (k to scope) in dailyScopes, switchCooldownSec)
+                pool.reportQuota(k, scope, (k to scope) in dailyScopes, geminiCooldownSec)
             }
             when (val claimed = pool.acquire(geminiModels())) {
                 is AcquireResult.Ready -> {
                     keyIndex = claimed.credentialIndex
                     key = claimed.credential
-                    log("🔄 [W#$workerId] APIキー#${keyIndex + 1} に切り替えました")
+                    log("🔄 APIキー#${keyIndex + 1} に切り替えました")
                     continue@keyEpoch
                 }
                 is AcquireResult.Wait -> {
-                    log("⏳ [W#$workerId] レート制限のため ${claimed.waitMillis / 1000}秒待機中...")
+                    log("⏳ レート制限のため ${claimed.waitMillis / 1000}秒待機中...")
                     sleeper(claimed.waitMillis)
                     continue@keyEpoch
                 }
                 is AcquireResult.Exhausted -> {
                     exhausted = true
-                    log("⚠️ [W#$workerId] 利用可能な全APIキーの上限に達しました")
+                    log("⚠️ 利用可能な全APIキーの上限に達しました")
                     return lastFailure
                         ?: LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "exhausted"))
                 }

@@ -6,6 +6,7 @@ import com.example.novelscraper.translation.v2.domain.FailureKind
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ProviderDescriptor
+import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.V2SendGate
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 
@@ -63,9 +64,55 @@ internal suspend fun executeLlmCall(
     }
     if (result is LlmResult.Success && meter != null) {
         if (!meter.add(tokens = (result.promptTokens + result.completionTokens).toLong())) {
-            log("[W#$workerId] cost cap reached")
+            log("cost cap reached")
             return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "cost-cap"))
         }
     }
     return result
+}
+
+/**
+ * 一時エラー（5xx・通信瞬断等）の待機・再送判定（RotationとUnmanagedRotationで共有）。
+ * 技術的根拠1行：待機秒数解決・ログ出力・スリープ処理のコピペ重複を排除し、DRY原則を徹底する。
+ */
+internal suspend fun handleTransientRetry(
+    failure: ClassifiedFailure,
+    transientRetryDelaySec: Int,
+    sameLeft: Int,
+    sleeper: suspend (Long) -> Unit,
+    log: (String) -> Unit
+): Boolean {
+    if (sameLeft <= 0) return false
+    val waitSec = failure.retryAfterSec?.toLong()?.coerceIn(0L, TranslationLimits.RETRY_AFTER_MAX_SEC)
+        ?: transientRetryDelaySec.toLong().coerceIn(0L, TranslationLimits.WAIT_MAX_SEC)
+    if (waitSec > 0) {
+        log("一時エラーのため ${waitSec}秒待機して再送します")
+        sleeper(waitSec * 1000L)
+    } else {
+        log("一時エラーのため即座に再送します")
+    }
+    return true
+}
+
+/**
+ * 429レート制限・クォータ一時エラーの待機・再送判定（RotationとUnmanagedRotationで共有）。
+ */
+internal suspend fun handleQuotaRetry(
+    failure: ClassifiedFailure,
+    cooldownSec: Int,
+    maxCooldownSec: Long,
+    sameLeft: Int,
+    sleeper: suspend (Long) -> Unit,
+    log: (String) -> Unit
+): Boolean {
+    if (sameLeft <= 0) return false
+    val waitSec = failure.retryAfterSec?.toLong()?.coerceIn(0L, TranslationLimits.RETRY_AFTER_MAX_SEC)
+        ?: cooldownSec.toLong().coerceIn(0L, maxCooldownSec)
+    if (waitSec > 0) {
+        log("${failure.kind} のため ${waitSec}秒待機して再送します")
+        sleeper(waitSec * 1000L)
+    } else {
+        log("${failure.kind} のため即座に再送します")
+    }
+    return true
 }

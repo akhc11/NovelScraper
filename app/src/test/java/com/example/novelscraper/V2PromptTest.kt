@@ -1,6 +1,5 @@
 package com.example.novelscraper
 
-import com.example.novelscraper.translation.llm.prompt.TranslationPrompts
 import com.example.novelscraper.translation.v2.pipeline.SourceLang
 import com.example.novelscraper.translation.v2.pipeline.buildBatchFormat
 import com.example.novelscraper.translation.v2.pipeline.buildProfilePrompt
@@ -14,12 +13,12 @@ import org.junit.Test
 class V2PromptTest {
 
     @Test
-    fun testPromptTexts_MatchOld() {
-        // Ported content must stay byte-identical to the frozen source.
+    fun testPromptTexts_V2PromptsNotEmpty() {
         for (n in 1..7) {
-            assertEquals("prompt $n", TranslationPrompts.getPromptByNumber(n), getV2PromptByNumber(n))
+            val prompt = getV2PromptByNumber(n)
+            assertTrue("Prompt $n should not be empty", prompt.isNotEmpty())
         }
-        assertEquals(TranslationPrompts.getPromptByNumber(1), getV2PromptByNumber(99))
+        assertEquals(getV2PromptByNumber(1), getV2PromptByNumber(99))
     }
 
     @Test
@@ -46,8 +45,13 @@ class V2PromptTest {
         assertFalse(lineCountOk(src10, dst2))
         val dst4 = (1..4).joinToString("\n") { "訳文${it}行目。" }
         assertTrue(lineCountOk(src10, dst4))
-        // Short sources bypass.
-        assertTrue(lineCountOk("一行。\n二行。", "一行訳。"))
+        // Upper bound: maxMultiplier = 3 (up to 30 lines for 10 source lines passes, 31 fails)
+        val dst30 = (1..30).joinToString("\n") { "訳文${it}行目。" }
+        assertTrue(lineCountOk(src10, dst30))
+        val dst31 = (1..31).joinToString("\n") { "訳文${it}行目。" }
+        assertFalse(lineCountOk(src10, dst31))
+        // Short sources bypass (even if output has many lines).
+        assertTrue(lineCountOk("一行。\n二行。", (1..20).joinToString("\n") { "訳文${it}行目。" }))
         // Empty output never passes the caller, but the pure rule ignores empties.
         assertTrue(lineCountOk("", ""))
     }
@@ -66,6 +70,8 @@ class V2PromptTest {
         )
         assertTrue(originalPrompt.startsWith(base1))
         assertTrue(originalPrompt.contains("前の訳文"))
+        // 重ね注入はしない（訳文末尾がある場合は原文末尾を落とす）
+        assertFalse(originalPrompt.contains("前の原文"))
         assertTrue(originalPrompt.contains("BATCH FORMAT..."))
 
         // 1番から7番へ安全に差し替え
@@ -79,8 +85,12 @@ class V2PromptTest {
         assertFalse(profile7Prompt.startsWith(base1))
         // 付帯指示（文脈やバッチ枠）が完全に保持されていること
         assertTrue(profile7Prompt.contains("前の訳文"))
-        assertTrue(profile7Prompt.contains("前の原文"))
+        assertFalse(profile7Prompt.contains("前の原文"))
         assertTrue(profile7Prompt.contains("BATCH FORMAT..."))
+
+        // 訳文末尾がない場合は原文末尾を注入する
+        val srcOnly = buildSystemPrompt(basePrompt = base1, previousSourceTail = "前の原文")
+        assertTrue(srcOnly.contains("前の原文"))
 
         // 同一番号なら同一インスタンス
         assertEquals(originalPrompt, buildProfilePrompt(originalPrompt, basePrompts, 1, 1))

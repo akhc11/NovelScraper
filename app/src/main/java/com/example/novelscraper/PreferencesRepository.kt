@@ -7,7 +7,6 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.novelscraper.scraper.ScraperConfig
-import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChangedBy
@@ -50,7 +49,6 @@ class PreferencesRepository(private val context: Context) {
         val WEB_SPLIT_ENABLED = stringPreferencesKey("web_split_enabled")
         val WEB_SPLIT_SIZE_CHARS = stringPreferencesKey("web_split_size_chars")
         val INPUT_ENCODING = stringPreferencesKey("input_encoding")
-        val LLM_CONFIG = stringPreferencesKey("llm_translation_config_v2")
     }
 
     private val json = Json {
@@ -145,34 +143,6 @@ class PreferencesRepository(private val context: Context) {
     suspend fun saveInputEncoding(value: String) = withContext(Dispatchers.IO) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.INPUT_ENCODING] = value
-        }
-    }
-
-    // ---- LLM 翻訳設定の永続化 ----
-
-    val llmConfigFlow: Flow<LlmTranslationConfig> = context.dataStore.data
-        .distinctUntilChangedBy { it[PreferencesKeys.LLM_CONFIG] }
-        .map { preferences ->
-            val jsonStr = preferences[PreferencesKeys.LLM_CONFIG]
-            if (!jsonStr.isNullOrBlank()) {
-                try {
-                    json.decodeFromString<LlmTranslationConfig>(jsonStr)
-                } catch (e: Exception) {
-                    Log.e("PreferencesRepository", "Failed to decode LLM config, fallback to default", e)
-                    LlmTranslationConfig()
-                }
-            } else {
-                LlmTranslationConfig()
-            }
-        }.flowOn(Dispatchers.IO)
-
-    suspend fun saveLlmConfig(config: LlmTranslationConfig) = withContext(Dispatchers.IO) {
-        context.dataStore.edit { preferences ->
-            try {
-                preferences[PreferencesKeys.LLM_CONFIG] = json.encodeToString(config)
-            } catch (e: Exception) {
-                Log.e("PreferencesRepository", "Failed to encode LLM config", e)
-            }
         }
     }
 

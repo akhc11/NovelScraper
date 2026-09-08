@@ -1,5 +1,7 @@
 package com.example.novelscraper.translation.v2.pipeline
 
+import com.example.novelscraper.translation.common.ingest.LanguageModels
+
 /**
  * Residual source-language detection (v2).
  *
@@ -7,14 +9,16 @@ package com.example.novelscraper.translation.v2.pipeline
  * - Script-first, per-segment: split the output into sentences/lines and
  *   classify each segment by Unicode script counts. A segment with Hangul
  *   and no kana, or a long Han-only segment (ZH source), is residue.
- * - Short Han-only blocks inherit the surrounding answer: when the rest of
+ * - Short Han-only blocks without simplified chars inherit the surrounding answer: when the rest of
  *   the output holds kana, they are treated as headings/names, not residue.
  *   (Industry practice for mixed-script documents: short ambiguous blocks
  *   must not get their own label.)
- * - Latin-only segments are never flagged (proper nouns; parity with old).
- * - Only ZH/KO sources are checked (parity with old); EN/JA skip.
- * - Thresholds are options, not hard codes, so behavior can be tuned
- *   without touching the algorithm.
+ *   Blocks containing simplified chars never inherit and are always residue.
+ * - Latin-only segments are ignored, except EN-source accumulation
+ *   (>= minLatinResidueChars) which is flagged as residue.
+ * - ZH/KO/EN sources are checked; JA skips.
+ * - Thresholds are options, except the long-Han rule (inheritChars * 3, fixed),
+ *   so behavior can be tuned without touching the algorithm.
  *
  * Threat model: accidental residue, not adversarial evasion. A model that
  * deliberately mixes one kana into residue defeats this check by design.
@@ -29,7 +33,9 @@ data class ResidualOptions(
     /** Segments with fewer script chars are ignored as noise. */
     val minSegmentChars: Int = 2,
     /** Han-only blocks below this size inherit the surrounding kana text. */
-    val inheritChars: Int = 10
+    val inheritChars: Int = 10,
+    /** Latin-only blocks above this size trigger residue for EN source (prevents proper noun false-positives). */
+    val minLatinResidueChars: Int = 60
 )
 
 private fun isKana(code: Int): Boolean =
@@ -41,12 +47,15 @@ private fun isHangul(code: Int): Boolean =
 private fun isHan(code: Int): Boolean =
     code in 0x4E00..0x9FFF || code in 0x3400..0x4DBF
 
+private fun isLatin(code: Int): Boolean =
+    (code in 0x0041..0x005A) || (code in 0x0061..0x007A)
+
 private fun isSegmentBoundary(ch: Char): Boolean {
     if (ch == '\n') return true
     val code = ch.code
     return code == 0x3002 || code == 0xFF0E || code == 0x002E ||
         code == 0x0021 || code == 0x003F || code == 0xFF01 ||
-        code == 0xFF1F || code == 0x2026
+        code == 0xFF1F || code == 0x2026 || code == 0x300D || code == 0x300F
 }
 
 /**
@@ -54,7 +63,10 @@ private fun isSegmentBoundary(ch: Char): Boolean {
  * Call with marker-stripped text (the marker itself is Latin).
  */
 fun residualFailure(translatedText: String, options: ResidualOptions): String? {
-    if (options.sourceLang != SourceLang.ZH && options.sourceLang != SourceLang.KO) return null
+    if (options.sourceLang != SourceLang.ZH &&
+        options.sourceLang != SourceLang.KO &&
+        options.sourceLang != SourceLang.EN
+    ) return null
 
     var kanaTotal = 0
     for (ch in translatedText) {
@@ -71,37 +83,86 @@ fun residualFailure(translatedText: String, options: ResidualOptions): String? {
         var k = 0
         var h = 0
         var c = 0
+        var s = 0
+        var l = 0
         for (ch in seg) {
             val code = ch.code
             when {
                 isKana(code) -> k++
                 isHangul(code) -> h++
-                isHan(code) -> c++
+                isHan(code) -> {
+                    c++
+                    if (LanguageModels.PURE_SIMPLIFIED_CHARS.contains(ch)) s++
+                }
+                isLatin(code) -> l++
             }
         }
-        if (k + h + c < options.minSegmentChars) return
-        if (k > 0) return
+        if (k + h + c + l < options.minSegmentChars) return
+
+        if (options.sourceLang == SourceLang.KO) {
+            // 韓国語ソース: ハングルが含まれていれば、文中に少量の「は」等のかながあっても韓国語残留
+            if (h > 0) {
+                residue += h + c
+                if (residueKind.isEmpty()) residueKind = "hangul"
+            }
+            return
+        }
+
+        if (options.sourceLang == SourceLang.EN) {
+            // 英語ソース:
+            // セグメント内にかなまたは漢字が含まれていれば、日本語文中の英単語（固有名詞・用語）として許容
+            if (k > 0 || c > 0) return
+            // かな・漢字を含まない純粋な英字セグメントを英語残留疑いとして累積
+            if (l >= options.minSegmentChars) {
+                residue += l
+                if (residueKind.isEmpty()) residueKind = "latin"
+            }
+            return
+        }
+
+        // 中国語ソース:
+        // 1. 純粋簡体字が存在する場合: かなが文中に混ざっていても中国語残留として検知
+        if (s > 0) {
+            residue += s + c
+            if (residueKind.isEmpty()) residueKind = "han"
+            return
+        }
+
+        // 2. ハングル混入も検知
         if (h > 0) {
             residue += h + c
             if (residueKind.isEmpty()) residueKind = "hangul"
             return
         }
-        // Han-only block: ambiguous (Chinese residue vs Japanese heading/name).
-        if (options.sourceLang == SourceLang.ZH) {
-            if (c >= options.inheritChars || kanaTotal == 0) {
+
+        // 3. かなを含む文で純粋簡体字がなければ、正当な日本語文として合格
+        if (k > 0) return
+
+        // 4. 漢字のみのセグメント:
+        // 周囲にかなが存在し（kanaTotal > 0）、純粋簡体字がない場合は日本の章見出しや技名等として許容。
+        // 全文にかなが一切ない場合（全文中国語コピー）は残留としてカウント。
+        if (c >= options.inheritChars || kanaTotal == 0) {
+            if (kanaTotal == 0) {
+                residue += c
+                if (residueKind.isEmpty()) residueKind = "han"
+            } else if (c >= options.inheritChars * 3) {
+                // かなテキスト内でも30文字以上の長大漢字ブロックは残留疑い
                 residue += c
                 if (residueKind.isEmpty()) residueKind = "han"
             }
-            // Else: short block inside kana text -> inherit, ignore.
         }
-        // KO source: han-only passes (parity with old behavior).
     }
     for (ch in translatedText) {
         if (isSegmentBoundary(ch)) flush() else current.append(ch)
     }
     flush()
 
-    if (residue >= options.minResidueChars) {
+    val threshold = if (residueKind == "latin") {
+        options.minLatinResidueChars
+    } else {
+        options.minResidueChars
+    }
+    if (residue >= threshold) {
         return "residual $residueKind ($residue chars)"
     }
     return null

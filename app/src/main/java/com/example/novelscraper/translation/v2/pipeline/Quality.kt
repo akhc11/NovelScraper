@@ -15,7 +15,7 @@ const val MARKER_SEARCH_WINDOW_CHARS = 300
 /**
  * 完走マーカー判定用正規表現。
  * - 大文字小文字不問（(?i)）
- * - 括弧（半角[], 全角［］, 丸括弧(), 全角丸括弧（））および括弧なし単体
+ * - 括弧（半角[], 全角［］, 丸括弧(), 全角丸括弧（））および括弧なし単体（SRC END等の素の語も拾う）
  * - 区切り文字（アンダースコア _, ハイフン -, 空白, 連結）
  * - 前後のMarkdown装飾（太字 **, コード枠 `, 見出し # 等）
  */
@@ -44,7 +44,7 @@ fun checkAndStripMarker(text: String, enabled: Boolean): String? {
     return trimmed.substring(0, absStart).trimEnd()
 }
 
-/** ```剥離→前口上除去。後口上は呼び元で扱う */
+/** ```剥離のみ（前口上の除去はしない）。後口上は呼び元で扱う */
 fun stripFences(text: String): String {
     var t = text.trim()
     if (t.startsWith("```")) {
@@ -61,7 +61,13 @@ fun utf8Bytes(text: String): Int = text.toByteArray(Charsets.UTF_8).size
 
 /**
  * サイズ比検証（原文に対する訳文のバイト比率%）。範囲は呼出側指定。
- * 下限未満＝省略疑い、上限超過＝水増し疑い。
+ * 下限未満＝省略疑い、上限超過＝水増し・解説混入・繰り返し暴走疑い。
+ *
+ * 【小説翻訳における比率特性】:
+ * 1行・短文の翻訳と異なり、小説翻訳（まとまった段落・チャンク単位）では文長が平均化されるため、
+ * 極端な増大（300%や320%等）は正常な翻訳ではあり得ない。
+ * そのような膨張はLLMのハルシネーション（幻覚・不要な追記・同一語句のループ）と判定して弾くのが安全である。
+ * なお上限値自体は言語別の設定値（V2SizeRatios。英語既定220）に従う。
  */
 fun sizeRatioOk(sourceText: String, translatedText: String, minPct: Int, maxPct: Int): Boolean {
     val src = utf8Bytes(sourceText.trim())
@@ -93,19 +99,42 @@ fun kanaRate(text: String): Double {
 fun meetsKanaFloor(text: String, minRate: Double = 0.2): Boolean = kanaRate(text) >= minRate
 
 /**
- * Line-loss check (ported rule): translated non-blank lines below
- * source lines / divisor means broken paragraphs. Short sources bypass.
- * Improvement vs old: thresholds are parameters, not object constants,
- * so callers/tests tune without touching the algorithm.
+ * 不合格理由の特定（ログ用）。合格時は null を返す。
+ * 判定順序は verifyTranslation と同一にすること（順序がずれると表示と実判定が食い違う）。
+ */
+fun verifyRejectReason(sourceText: String, translatedText: String, options: VerifyOptions): String? {
+    val stripped = stripFences(translatedText)
+    val withoutMarker = checkAndStripMarker(stripped, options.markerEnabled) ?: return "marker-missing"
+    val cleaned = withoutMarker.trim()
+    if (cleaned.isBlank()) return "blank"
+    if (options.residual != null) {
+        val residual = residualFailure(cleaned, options.residual)
+        if (residual != null) return residual
+    }
+    if (!lineCountOk(sourceText, cleaned)) return "line-count"
+    if (!sizeRatioOk(sourceText, cleaned, options.sizeMinPct, options.sizeMaxPct)) return "size-ratio"
+    if (!meetsKanaFloor(cleaned, options.kanaFloor)) return "kana-floor"
+    return null
+}
+
+/**
+ * Line-loss and explosion check:
+ * - translated non-blank lines below source lines / divisor means broken paragraphs (line-loss).
+ * - translated non-blank lines exceeding source lines * maxMultiplier means hallucination or newline spam (line-explosion).
+ * - Short sources (< minLines) bypass.
  */
 fun lineCountOk(
     sourceText: String,
     translatedText: String,
     minLines: Int = 5,
-    divisor: Int = 3
+    divisor: Int = 3,
+    maxMultiplier: Int = 3
 ): Boolean {
     val srcLines = sourceText.lines().filter { it.isNotBlank() }
     val outLines = translatedText.lines().filter { it.isNotBlank() }
-    if (srcLines.size < minLines || outLines.isEmpty()) return true
-    return outLines.size * divisor >= srcLines.size
+    if (srcLines.size < minLines) return true
+    if (outLines.isEmpty()) return false
+    val minOk = outLines.size * divisor >= srcLines.size
+    val maxOk = outLines.size <= srcLines.size * maxMultiplier
+    return minOk && maxOk
 }

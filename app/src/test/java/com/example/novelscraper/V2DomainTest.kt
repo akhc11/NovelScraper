@@ -49,6 +49,9 @@ class V2DomainTest {
             Row(400, "The model `x` does not exist", "CONFIG", "MODEL_NOT_FOUND"),
             Row(400, "Incorrect API key provided", "CONFIG", "AUTH_FAILED"),
             Row(400, "Free tier is not available in your country", "CONFIG", "PAYMENT_REQUIRED"),
+            Row(400, "Invalid parameter: temperature must be between 0 and 2", "CONFIG", "INVALID_PARAM"),
+            Row(400, "Unsupported parameter: reasoning.effort", "CONFIG", "INVALID_PARAM"),
+            Row(400, "This model's maximum context length is 8192 tokens", "FATAL", null),
             Row(400, "", "FATAL", null),
             Row(429, "too many requests", "QUOTA_MINUTE", null),
             Row(418, "", "FATAL", null)

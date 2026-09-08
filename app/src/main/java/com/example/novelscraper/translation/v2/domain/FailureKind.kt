@@ -29,6 +29,8 @@ enum class ConfigKind {
     MODEL_NOT_FOUND,
     AUTH_FAILED,
     PAYMENT_REQUIRED,
+    /** パラメータ不正など設定起因の400。内容起因（文脈長超過等）と区別し、.failedを作らない */
+    INVALID_PARAM,
     UNKNOWN
 }
 

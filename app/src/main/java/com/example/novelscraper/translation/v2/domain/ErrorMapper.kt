@@ -61,6 +61,40 @@ object GenericErrorMapper : ErrorMapper {
                 lowerBody.contains("no endpoints found") ||
                 lowerBody.contains("not a valid model") ->
                 ClassifiedFailure(FailureKind.CONFIG, configKind = ConfigKind.MODEL_NOT_FOUND, note = "400-model")
+            // 技術的根拠1行：文脈長超過はファイル内容依存の確定失敗（.failed対象）。設定起因と混同しない。
+            lowerBody.contains("maximum context") ||
+                lowerBody.contains("context length") ||
+                lowerBody.contains("context_length") ||
+                lowerBody.contains("too many tokens") ||
+                lowerBody.contains("token limit") ||
+                lowerBody.contains("input too long") ||
+                lowerBody.contains("prompt is too long") ||
+                lowerBody.contains("request too large") ||
+                lowerBody.contains("content too long") ->
+                ClassifiedFailure(FailureKind.FATAL, note = "400-context-length")
+            // 技術的根拠1行：パラメータ不正は設定起因として扱い、.failedを作らず修正後再実行に回す。
+            lowerBody.contains("invalid parameter") ||
+                lowerBody.contains("invalid_param") ||
+                lowerBody.contains("unsupported parameter") ||
+                lowerBody.contains("unknown parameter") ||
+                lowerBody.contains("additional properties") ||
+                lowerBody.contains("validation error") ||
+                lowerBody.contains("invalid value") ||
+                lowerBody.contains("must be") ||
+                lowerBody.contains("should be") ||
+                lowerBody.contains("not supported") ||
+                lowerBody.contains("not allowed") ||
+                lowerBody.contains("mutually exclusive") ||
+                lowerBody.contains("response_format") ||
+                lowerBody.contains("response_schema") ||
+                lowerBody.contains("temperature") ||
+                lowerBody.contains("top_p") ||
+                lowerBody.contains("top_k") ||
+                lowerBody.contains("penalty") ||
+                lowerBody.contains("reasoning") ||
+                lowerBody.contains("thinking") ||
+                lowerBody.contains("effort") ->
+                ClassifiedFailure(FailureKind.CONFIG, configKind = ConfigKind.INVALID_PARAM, note = "400-param")
             else -> ClassifiedFailure(FailureKind.FATAL, note = "400-invalid-argument")
         }
     }

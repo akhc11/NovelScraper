@@ -18,7 +18,7 @@ import com.example.novelscraper.translation.v2.pipeline.DictOptions
 import com.example.novelscraper.translation.v2.pipeline.NovelDict
 import com.example.novelscraper.translation.v2.pipeline.cleanseBasic
 import com.example.novelscraper.translation.v2.pipeline.generateDictionary
-import com.example.novelscraper.translation.v2.pipeline.parseNovelDict
+import com.example.novelscraper.translation.v2.pipeline.parseNovelDictLenient
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import kotlinx.coroutines.CancellationException
@@ -178,10 +178,14 @@ class DictionaryBuilder(
     }
 
     companion object {
+        /**
+         * 公開辞書の読込。空辞書も有効として再利用する（毎回の再生成ループ防止）。
+         * 構文破損時のみ null（再生成）。
+         */
         fun parseDictJson(raw: String): NovelDict? {
             if (raw.isBlank()) return null
             return try {
-                parseNovelDict(raw)
+                parseNovelDictLenient(raw)
             } catch (_: Exception) {
                 null
             }

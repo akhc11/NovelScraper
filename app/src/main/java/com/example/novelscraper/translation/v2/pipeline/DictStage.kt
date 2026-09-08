@@ -63,15 +63,28 @@ fun mergeDecision(totalBatches: Int, completedCount: Int, hasTransientFailure: B
 
 private val dictJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
+private fun extractJsonObject(rawJson: String): String {
+    var text = rawJson.trim()
+        .removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+    val first = text.indexOf('{')
+    val last = text.lastIndexOf('}')
+    if (first != -1 && last > first) text = text.substring(first, last + 1)
+    return text
+}
+
 fun parseNovelDict(rawJson: String): NovelDict? {
     return try {
-        var text = rawJson.trim()
-            .removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-        val first = text.indexOf('{')
-        val last = text.lastIndexOf('}')
-        if (first != -1 && last > first) text = text.substring(first, last + 1)
-        val decoded = dictJson.decodeFromString(NovelDict.serializer(), text)
+        val decoded = dictJson.decodeFromString(NovelDict.serializer(), extractJsonObject(rawJson))
         if (decoded.characters.isEmpty()) null else decoded
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/** 構文妥当性の判定用。人名ゼロでも有効とみなす（空辞書の完成判定に使う）。 */
+fun parseNovelDictLenient(rawJson: String): NovelDict? {
+    return try {
+        dictJson.decodeFromString(NovelDict.serializer(), extractJsonObject(rawJson))
     } catch (_: Exception) {
         null
     }
@@ -265,7 +278,7 @@ suspend fun generateDictionary(
     // 目的と評価軸が全く異なるため、あえて2回に分けてLLMを呼び出すことで人名抽出精度を最大限に高めている。
     // （1工程にまとめると一般名詞の誤混入や表記ブレが劇的に増大するため、2工程で精度を担保する）。
     val reviewModel = options.mergeModel.ifBlank { options.model }
-    val merged: NovelDict? = if (completed.size == 1) {
+    val mergedOrNullInitial: NovelDict? = if (completed.size == 1) {
         parseNovelDict(completed.first())
     } else {
         val mergeInput = completed.mapIndexed { i, json -> "[part${i + 1}]\n$json" }.joinToString("\n\n")
@@ -283,25 +296,38 @@ suspend fun generateDictionary(
         }
         parsed
     }
+    var mergedOrNull = mergedOrNullInitial
+    if (mergedOrNull == null) {
+        // 空辞書の確定：全断片が構文上有効かつ人名ゼロなら空のまま完成扱いにする。
+        // 技術的根拠1行：人名なし書籍では空が正解であり、保留にするとフォルダ全体が永久停止するため。
+        val lenient = completed.mapNotNull { parseNovelDictLenient(it) }
+        if (lenient.size == completed.size && lenient.isNotEmpty() && lenient.all { it.characters.isEmpty() }) {
+            log("dict: finalized empty (no person names)")
+            mergedOrNull = NovelDict(style = lenient.first().style)
+        }
+    }
+    val merged = mergedOrNull
     if (merged == null) {
         log("dict: merge failed, hold for next time")
         return@coroutineScope null
     }
 
-    // レビュー（失敗時はマージ結果で確定する）
+    // レビュー（空辞書は対象なしのため素通し。失敗時はマージ結果で確定する）
     var reviewed: NovelDict = merged
-    val reviewInput = dictJson.encodeToString(NovelDict.serializer(), merged)
-    for (retry in 0 until options.reviewRetries.coerceIn(1, 3)) {
-        when (val r = call(reviewModel, options.prompts.review, reviewInput)) {
-            is LlmResult.Success -> {
-                val parsed = parseNovelDict(r.text)
-                if (parsed != null) {
-                    reviewed = parsed
-                    break
+    if (reviewed.characters.isNotEmpty()) {
+        val reviewInput = dictJson.encodeToString(NovelDict.serializer(), merged)
+        for (retry in 0 until options.reviewRetries.coerceIn(1, 3)) {
+            when (val r = call(reviewModel, options.prompts.review, reviewInput)) {
+                is LlmResult.Success -> {
+                    val parsed = parseNovelDict(r.text)
+                    if (parsed != null) {
+                        reviewed = parsed
+                        break
+                    }
                 }
-            }
-            is LlmResult.Failure -> {
-                if (retry + 1 < options.reviewRetries) sleeper(1000L)
+                is LlmResult.Failure -> {
+                    if (retry + 1 < options.reviewRetries) sleeper(1000L)
+                }
             }
         }
     }

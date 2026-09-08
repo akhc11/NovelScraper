@@ -217,7 +217,7 @@ class WorkerRunner(
                         continue
                     }
                     val nextBytes = utf8Bytes(nextClean)
-                    // 技術的根拠: バッチ束ね判定でも固定デフォルト値 options.splitThresholdBytes ではなく最小モデル連動の動的 splitThresholdBytes を適用しトークン溢れを防止
+                    // 技術的根拠: バッチ束ね判定でも固定値ではなく最小モデル連動の動的 splitThresholdBytes を適用しトークン溢れを防止
                     if (nextBytes > splitThresholdBytes || batchBytes + nextBytes > batchMaxBytes) {
                         unclaim(nextName)
                         break
@@ -258,7 +258,9 @@ class WorkerRunner(
                             }
                             is SingleResult.Failed -> writeFailed(store, outputDirUri, fileName, content) { log(it) }
                             is SingleResult.ConfigOnly -> {
-                                log("⚠️ [W#$workerId] 設定エラーのためスキップ: $fileName")
+                                // 技術的根拠1行：設定不良は全ファイル共通のため残件を無駄打ちせずワーカー終了する（バッチconfigBlockedと対称）。
+                                log("⚠️ [W#$workerId] 設定エラーのため終了します（修正後に再実行可能）")
+                                return
                             }
                             is SingleResult.Stopped -> return
                         }

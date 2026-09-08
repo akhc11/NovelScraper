@@ -166,8 +166,7 @@ suspend fun splitSingleTextFile(
         var partNumber = 1
         suspend fun writePart(content: String): Boolean {
             val partName = "part_" + partNumber.toString().padStart(4, '0') + ".txt"
-            val doc = store.findChild(novelDir.uri, partName)
-                ?: store.createFile(novelDir.uri, partName, "text/plain")
+            val doc = findOrCreateFile(store, novelDir.uri, partName, "text/plain")
             val ok = doc != null && store.writeText(doc.uri, content)
             if (ok) partNumber++
             return ok

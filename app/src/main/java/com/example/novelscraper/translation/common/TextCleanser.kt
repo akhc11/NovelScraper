@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper.translation.llm.pipeline
+package com.example.novelscraper.translation.common
 
 object TextCleanser {
 

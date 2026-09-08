@@ -4,7 +4,9 @@ import com.example.novelscraper.translation.v2.domain.CostMeter
 import com.example.novelscraper.translation.v2.domain.FailureKind
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ClassifiedFailure
+import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.InMemoryFileStore
+import com.example.novelscraper.translation.v2.infra.VDoc
 import com.example.novelscraper.translation.v2.pipeline.Attempt
 import com.example.novelscraper.translation.v2.pipeline.AttemptOptions
 import com.example.novelscraper.translation.v2.pipeline.BatchOutcome
@@ -12,7 +14,6 @@ import com.example.novelscraper.translation.v2.pipeline.COMPLETION_MARKER
 import com.example.novelscraper.translation.v2.pipeline.DictOptions
 import com.example.novelscraper.translation.v2.pipeline.DriverOutcome
 import com.example.novelscraper.translation.v2.pipeline.NovelDict
-import com.example.novelscraper.translation.v2.pipeline.Route
 import com.example.novelscraper.translation.v2.pipeline.SingleResult
 import com.example.novelscraper.translation.v2.pipeline.SourceLang
 import com.example.novelscraper.translation.v2.pipeline.TranslateContext
@@ -37,15 +38,18 @@ import com.example.novelscraper.translation.v2.pipeline.mergeDecision
 import com.example.novelscraper.translation.v2.pipeline.parseBatchResponse
 import com.example.novelscraper.translation.v2.pipeline.parseBatchJsonResponse
 import com.example.novelscraper.translation.v2.pipeline.parseNovelDict
-import com.example.novelscraper.translation.v2.pipeline.routeFor
+import com.example.novelscraper.translation.v2.pipeline.sanitizeNovelDict
 import com.example.novelscraper.translation.v2.pipeline.selectSampleFiles
 import com.example.novelscraper.translation.v2.pipeline.sha256Hex
 import com.example.novelscraper.translation.v2.pipeline.sizeRatioOk
 import com.example.novelscraper.translation.v2.pipeline.splitIntoChunks
 import com.example.novelscraper.translation.v2.pipeline.stripFences
 import com.example.novelscraper.translation.v2.pipeline.translateBatch
+import com.example.novelscraper.translation.v2.pipeline.writeFailed
 import com.example.novelscraper.translation.v2.pipeline.translateLarge
 import com.example.novelscraper.translation.v2.pipeline.translateSingle
+import com.example.novelscraper.translation.v2.pipeline.ResidualOptions
+import com.example.novelscraper.translation.v2.pipeline.verifyRejectReason
 import com.example.novelscraper.translation.v2.pipeline.verifyTranslation
 import com.example.novelscraper.translation.v2.pipeline.LargeOptions
 import org.junit.Assert.*
@@ -322,6 +326,75 @@ class V2PipelineTest {
     }
 
     @Test
+    fun testTranslateSingle_FailureCarriesReason() = kotlinx.coroutines.runBlocking {
+        // 失敗理由はログ表示用に伝播する（.failed の中身は原文のまま）
+        val ctx = looseCtx(
+            call = { _, _, _ ->
+                LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "cutoff:length"))
+            }
+        )
+        val r = translateSingle("原文", ctx)
+        assertTrue(r is SingleResult.Failed)
+        assertEquals(FailureKind.FATAL, (r as SingleResult.Failed).terminal)
+        assertEquals("cutoff:length", r.note)
+    }
+
+    @Test
+    fun testVerifyRejectReason() {
+        val loose = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
+        // 合格時は null
+        assertNull(verifyRejectReason("原文です。", "訳文です。", loose))
+        // マーカー欠落
+        assertEquals("marker-missing", verifyRejectReason("原文", "訳文", VerifyOptions(markerEnabled = true)))
+        // かな不足
+        assertEquals("kana-floor", verifyRejectReason("原文です。", "李云张三", loose.copy(kanaFloor = 0.2)))
+        // サイズ比
+        assertEquals(
+            "size-ratio",
+            verifyRejectReason(
+                "あ".repeat(100), "あ",
+                VerifyOptions(sizeMinPct = 50, sizeMaxPct = 300, kanaFloor = 0.0, markerEnabled = false)
+            )
+        )
+        // 残留ハングル
+        val ko = loose.copy(residual = ResidualOptions(SourceLang.KO))
+        val residual = verifyRejectReason("원문", "한".repeat(40), ko)
+        assertNotNull(residual)
+        assertTrue(residual!!.startsWith("residual"))
+        // 行数
+        val src6 = (1..6).joinToString("\n") { "$it 行目" }
+        assertEquals("line-count", verifyRejectReason(src6, "訳のみ", loose))
+    }
+
+
+    @Test
+    fun testWriteFailed_NoDuplicateOnStaleRename() = kotlinx.coroutines.runBlocking {
+        // 古い一覧＋自動リネーム環境でも "a.txt.failed (1)" を作らず既存へ上書きする
+        val fake = StaleRenameStore()
+        val root = fake.inner.createRoot("w")
+        val seed = fake.inner.createFile(root.uri, "a.txt.failed", "text/plain")!!
+        fake.inner.writeText(seed.uri, "old")
+        fake.staleFails = 1
+        val ok = writeFailed(fake, root.uri, "a.txt", "src") {}
+        assertTrue(ok)
+        assertEquals(listOf("a.txt.failed"), fake.childNames(root.uri))
+        assertEquals("src", fake.inner.readText(seed.uri))
+    }
+
+    @Test
+    fun testWriteFailed_PersistentStaleLeavesNoDuplicate() = kotlinx.coroutines.runBlocking {
+        // 一覧が回復しなくても重複を積まず失敗扱いにする（次回再試行で自己回復）
+        val fake = StaleRenameStore()
+        val root = fake.inner.createRoot("w")
+        val seed = fake.inner.createFile(root.uri, "a.txt.failed", "text/plain")!!
+        fake.inner.writeText(seed.uri, "old")
+        fake.staleFails = 100
+        val ok = writeFailed(fake, root.uri, "a.txt", "src") {}
+        assertFalse(ok)
+        assertEquals(listOf("a.txt.failed"), fake.childNames(root.uri))
+    }
+
+    @Test
     fun testTranslateBatch_Flow() = kotlinx.coroutines.runBlocking {
         val store = InMemoryFileStore()
         val root = store.createRoot("out")
@@ -582,6 +655,109 @@ class V2PipelineTest {
         )
         assertNotNull(fatalPartial)
         assertEquals("ヤマダ", fatalPartial!!.characters["山田"])
+
+        // 想定外例外（RuntimeException）が発生してもスコープ全体が道連れにならず隔離される（supervisorScope検証）
+        val root4 = store.createRoot("d4")
+        val isolated = generateDictionary(
+            store, root4.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = { _, _, text ->
+                if (text.contains("BLOCK")) throw RuntimeException("Simulated unexpected crash in batch")
+                else ok(goodJson)
+            },
+            DictOptions(maxBatchBytes = 25, maxRetriesPerBatch = 0, parallelism = 2)
+        )
+        assertNotNull(isolated)
+        assertEquals("ヤマダ", isolated!!.characters["山田"])
+    }
+
+    @Test
+    fun testDictSanitize() {
+        // 日本語見出しでない値は落とす（韓国語のままの採用を防ぐ）。性別表も連動して刈る。
+        val dict = NovelDict(
+            style = "カタカナ",
+            characters = mapOf("山田" to "ヤマダ", "김민준" to "김민준", "John" to "ジョン", "李云" to "李雲"),
+            genders = mapOf("山田" to "男", "김민준" to "男", "John" to "不明")
+        )
+        val cleaned = sanitizeNovelDict(dict)
+        assertEquals(mapOf("山田" to "ヤマダ", "John" to "ジョン", "李云" to "李雲"), cleaned.characters)
+        // 性別表は生存項目に連動（「不明」は使用時に除外されるため保持でよい）
+        assertEquals(mapOf("山田" to "男", "John" to "不明"), cleaned.genders)
+        assertNull(cleaned.characters["김민준"])
+        assertNull(cleaned.genders["김민준"])
+    }
+
+    @Test
+    fun testDictStage_AllNonJapaneseHolds() = kotlinx.coroutines.runBlocking {
+        // 全項目が原文表記のままなら黙って採用せず保留にする（大声ログつき）
+        val store = InMemoryFileStore()
+        val root = store.createRoot("d-ko-echo")
+        val echoJson = """{"style":"カタカナ","characters":{"김민준":"김민준"},"genders":{}}"""
+        val files = listOf("a.txt" to "민준의 이야기", "b.txt" to "하늘의 노래")
+        val byName = files.toMap()
+        val logs = mutableListOf<String>()
+        val dict = generateDictionary(
+            store, root.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = { _, _, _ -> ok(echoJson) },
+            DictOptions(maxRetriesPerBatch = 0, parallelism = 2),
+            log = { synchronized(logs) { logs.add(it) } }
+        )
+        assertNull(dict)
+        assertTrue(logs.any { it.contains("日本語でない") })
+    }
+
+    @Test
+    fun testDictExamples_Fallback() = kotlinx.coroutines.runBlocking {
+        // 完全一致ゼロ時は参考例が指示に入る（表記揺れでも表記パターンを伝える）
+        val prompts = mutableListOf<String>()
+        val ctx = TranslateContext(
+            basePrompts = mapOf(1 to "base"),
+            promptOrder = listOf(1),
+            driverNames = listOf("d1"),
+            dictionary = NovelDict(style = "カタカナ", characters = mapOf("山田" to "ヤマダ")),
+            verify = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false),
+            call = { _, prompt, _ ->
+                synchronized(prompts) { prompts.add(prompt) }
+                ok("訳文")
+            }
+        )
+        val r = translateSingle("本文に名前なし", ctx)
+        assertTrue(r is SingleResult.Translated)
+        assertEquals(1, prompts.size)
+        assertTrue(prompts[0].contains("参考例"))
+        assertTrue(prompts[0].contains("ヤマダ"))
+    }
+
+    @Test
+    fun testDictParse_NestedFallback() {
+        // 入れ子形式 {"名前": {"name": "読み"}} も救済する（旧版の柔軟パーサー復活）
+        val nested = """{"style":"カタカナ","characters":{"김민준":{"name":"金","gender":"男"}}}"""
+        val parsed = parseNovelDict(nested)
+        assertNotNull(parsed)
+        assertEquals("金", parsed!!.characters["김민준"])
+        assertEquals("男", parsed.genders["김민준"])
+    }
+
+    @Test
+    fun testDictStage_EmptyFinalized() = kotlinx.coroutines.runBlocking {
+        // 人名ゼロは空のまま完成扱い（毎回の再生成ループにしない）。レビューは素通し。
+        val store = InMemoryFileStore()
+        val root = store.createRoot("d-empty")
+        val emptyJson = """{"style":"カタカナ","characters":{},"genders":{}}"""
+        var calls = 0
+        val files = listOf("a.txt" to "風の音だけが聞こえる丘の昼下がり", "b.txt" to "雨上がりの空に雲が流れる")
+        val byName = files.toMap()
+        val dict = generateDictionary(
+            store, root.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = { _, _, _ -> calls++; ok(emptyJson) },
+            DictOptions(maxRetriesPerBatch = 0, parallelism = 2)
+        )
+        assertNotNull(dict)
+        assertTrue(dict!!.characters.isEmpty())
+        // 単一バッチのため抽出のみ（マージ・レビュー呼び出しなし）
+        assertEquals(1, calls)
     }
 
     @Test
@@ -628,6 +804,46 @@ class V2PipelineTest {
     }
 
     @Test
+    fun testDictStage_ImmediateRetry() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val goodJson = """{"style":"カタカナ","characters":{"山田":"ヤマダ"}}"""
+        val files = listOf("a.txt" to "山田の冒険")
+        val byName = files.toMap()
+
+        // 1. バッチ抽出で一時失敗しても、DictStage自身は待機せず即座に再試行（call側へ一本化）
+        val root0 = store.createRoot("d0")
+        var attempts0 = 0
+        val dict0 = generateDictionary(
+            store, root0.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = { _, _, _ ->
+                if (attempts0++ == 0) fail(FailureKind.FATAL) else ok(goodJson)
+            },
+            options = DictOptions(maxRetriesPerBatch = 2)
+        )
+        assertNotNull(dict0)
+        assertEquals(3, attempts0) // バッチ抽出（失敗1+成功1）+ レビュー（成功1）
+
+        // 2. 辞書レビューで一時失敗しても、即座に再試行して完了
+        val rootReview = store.createRoot("d_review")
+        var revCalls = 0
+        val dictRev = generateDictionary(
+            store, rootReview.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = { _, prompt, _ ->
+                if (prompt.contains("Review the merged")) {
+                    if (revCalls++ == 0) fail(FailureKind.FATAL) else ok(goodJson)
+                } else {
+                    ok(goodJson)
+                }
+            },
+            options = DictOptions(maxRetriesPerBatch = 2, reviewRetries = 2)
+        )
+        assertNotNull(dictRev)
+        assertEquals(2, revCalls)
+    }
+
+    @Test
     fun testDictHelpers() {
         val picked = selectSampleFiles((1..10).map { "f$it" }, 4, true)
         assertEquals(4, picked.size)
@@ -646,13 +862,6 @@ class V2PipelineTest {
         val prompt = buildSystemPrompt("base", previousTranslatedTail = "prev", dictionaryEntries = entries)
         assertTrue(prompt.contains("PREVIOUS CONTEXT"))
         assertTrue(prompt.contains(COMPLETION_MARKER))
-    }
-
-    @Test
-    fun testRouteFor() {
-        assertEquals(Route.SINGLE, routeFor(0, 100))
-        assertEquals(Route.BATCHABLE, routeFor(50, 100))
-        assertEquals(Route.LARGE, routeFor(101, 100))
     }
 
     @Test
@@ -813,4 +1022,32 @@ class V2PipelineTest {
         val blankDst = "   \n  \n  "
         assertFalse(com.example.novelscraper.translation.v2.pipeline.lineCountOk(src, blankDst))
     }
+}
+
+/**
+ * 実機プロバイダの2つの振る舞いを再現するfake:
+ * 一覧の古さで指定名を見落とす＋同名生成を "(1)" に自動リネームする。
+ */
+internal class StaleRenameStore(
+    val inner: InMemoryFileStore = InMemoryFileStore()
+) : FileStore by inner {
+    var staleFails = 0
+    var staleMatcher: (String) -> Boolean = { it.endsWith(".failed") }
+
+    override suspend fun findChild(dirUri: String, name: String): VDoc? {
+        if (staleMatcher(name) && staleFails > 0) {
+            staleFails--
+            return null
+        }
+        return inner.findChild(dirUri, name)
+    }
+
+    override suspend fun createFile(dirUri: String, name: String, mime: String): VDoc? {
+        if (inner.findChild(dirUri, name) != null) {
+            return inner.createFile(dirUri, "$name (1)", mime)
+        }
+        return inner.createFile(dirUri, name, mime)
+    }
+
+    suspend fun childNames(dirUri: String): List<String> = inner.children(dirUri).map { it.name }
 }

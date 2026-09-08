@@ -20,7 +20,6 @@ object TranslationLimits {
     const val COOLDOWN_MAX_SEC = 300
     const val RETRY_AFTER_MIN_SEC = 1L
     const val RETRY_AFTER_MAX_SEC = 600L
-    const val WAIT_MIN_SEC = 5L
     const val WAIT_MAX_SEC = 120L
     const val UNMANAGED_COOLDOWN_MAX_SEC = 300
 }

@@ -1,0 +1,303 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "LLM Translation Pipeline Code Audit",
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "audit-overview",
+        "label": "Full Audit Pipeline",
+        "focus": [
+          "raw_novel",
+          "ingest_stage",
+          "engine_orchestrator",
+          "prompt_prep",
+          "double_loop",
+          "llm_api",
+          "storage_final"
+        ],
+        "note": "Complete overview of the audited LLM translation dataflow."
+      },
+      {
+        "id": "redundancy-focus",
+        "label": "Redundant Stages",
+        "focus": [
+          "presplit_stage",
+          "dict_stage",
+          "prompt_prep",
+          "double_loop",
+          "chunk_redundant",
+          "batch_post_query"
+        ],
+        "note": "Key areas where single-stage tasks are split into two or more unnecessary stages."
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "intake_lane",
+      "label": "1. Ingest & Split"
+    },
+    {
+      "id": "engine_lane",
+      "label": "2. Orchestrator & Dict"
+    },
+    {
+      "id": "pipeline_lane",
+      "label": "3. Prompt & Pipeline"
+    },
+    {
+      "id": "llm_lane",
+      "label": "4. LLM Cloud"
+    },
+    {
+      "id": "store_lane",
+      "label": "5. Save & Verification"
+    }
+  ],
+  "phases": [
+    {
+      "id": "p_intake",
+      "label": "Intake & Split",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "p_engine",
+      "label": "Orchestrator & Prompt",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "p_exec",
+      "label": "Inference & Output",
+      "fromCol": 4,
+      "toCol": 4,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "raw_novel",
+    "ingest_stage",
+    "engine_orchestrator",
+    "prompt_prep",
+    "double_loop",
+    "batch_post_query",
+    "storage_final"
+  ],
+  "nodes": [
+    {
+      "id": "raw_novel",
+      "lane": "intake_lane",
+      "col": 0,
+      "type": "external",
+      "label": "Raw Novel Files",
+      "sublabel": "Read x4 per file",
+      "tag": "I/O bottleneck",
+      "width": 140
+    },
+    {
+      "id": "ingest_stage",
+      "lane": "intake_lane",
+      "col": 1,
+      "type": "frontend",
+      "label": "Ingest & Cleanser",
+      "sublabel": "1000 lines cloned",
+      "tag": "duplicate",
+      "width": 140
+    },
+    {
+      "id": "presplit_stage",
+      "lane": "intake_lane",
+      "col": 2,
+      "type": "backend",
+      "label": "Physical PreSplit",
+      "sublabel": "Redundant split",
+      "tag": "stage 1 of 2",
+      "width": 140
+    },
+    {
+      "id": "dict_stage",
+      "lane": "engine_lane",
+      "col": 1,
+      "type": "database",
+      "label": "Dict Generator",
+      "sublabel": "Merge then Review",
+      "tag": "2 LLM calls",
+      "width": 140
+    },
+    {
+      "id": "engine_orchestrator",
+      "lane": "engine_lane",
+      "col": 2,
+      "type": "backend",
+      "label": "RunEngine Pool",
+      "sublabel": "OOM risk on full load",
+      "tag": "core",
+      "width": 140
+    },
+    {
+      "id": "prompt_prep",
+      "lane": "pipeline_lane",
+      "col": 2,
+      "type": "messagebus",
+      "label": "Prompt Re-builder",
+      "sublabel": "Build then replace",
+      "tag": "2 steps",
+      "width": 140
+    },
+    {
+      "id": "double_loop",
+      "lane": "pipeline_lane",
+      "col": 3,
+      "type": "security",
+      "label": "Prompt Executor",
+      "sublabel": "Attempt x Rotation",
+      "tag": "N x N loop",
+      "width": 140
+    },
+    {
+      "id": "llm_api",
+      "lane": "llm_lane",
+      "col": 4,
+      "type": "cloud",
+      "label": "LLM Cloud APIs",
+      "sublabel": "Gemini / OpenRouter",
+      "width": 140
+    },
+    {
+      "id": "chunk_redundant",
+      "lane": "pipeline_lane",
+      "col": 4,
+      "type": "backend",
+      "label": "Chunk Translator",
+      "sublabel": "Write then re-read",
+      "tag": "stage 2 of 2",
+      "width": 140
+    },
+    {
+      "id": "batch_post_query",
+      "lane": "store_lane",
+      "col": 3,
+      "type": "messagebus",
+      "label": "Batch IO Stage",
+      "sublabel": "Post-save findChild",
+      "tag": "IPC query",
+      "width": 140
+    },
+    {
+      "id": "storage_final",
+      "lane": "store_lane",
+      "col": 4,
+      "type": "database",
+      "label": "Verified Output",
+      "sublabel": "Output Directory",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_raw_ingest",
+      "from": "raw_novel",
+      "to": "ingest_stage",
+      "variant": "default"
+    },
+    {
+      "id": "e_ingest_presplit",
+      "from": "ingest_stage",
+      "to": "presplit_stage",
+      "label": "physical split",
+      "variant": "dashed"
+    },
+    {
+      "id": "e_ingest_orch",
+      "from": "ingest_stage",
+      "to": "engine_orchestrator",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e_presplit_orch",
+      "from": "presplit_stage",
+      "to": "engine_orchestrator",
+      "label": "subfolder run",
+      "variant": "dashed"
+    },
+    {
+      "id": "e_orch_dict",
+      "from": "engine_orchestrator",
+      "to": "dict_stage",
+      "label": "sample",
+      "variant": "dashed"
+    },
+    {
+      "id": "e_orch_prompt",
+      "from": "engine_orchestrator",
+      "to": "prompt_prep",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e_prompt_loop",
+      "from": "prompt_prep",
+      "to": "double_loop",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e_loop_llm",
+      "from": "double_loop",
+      "to": "llm_api",
+      "label": "call",
+      "variant": "default"
+    },
+    {
+      "id": "e_loop_chunk",
+      "from": "double_loop",
+      "to": "chunk_redundant",
+      "label": "large file",
+      "variant": "dashed"
+    },
+    {
+      "id": "e_loop_batch",
+      "from": "double_loop",
+      "to": "batch_post_query",
+      "label": "batch",
+      "variant": "default"
+    },
+    {
+      "id": "e_batch_store",
+      "from": "batch_post_query",
+      "to": "storage_final",
+      "variant": "default"
+    },
+    {
+      "id": "e_chunk_store",
+      "from": "chunk_redundant",
+      "to": "storage_final",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "amber",
+      "title": "Code Duplication Points",
+      "items": [
+        "TextIngest (common vs v2): ~1000 lines of charset detection cloned",
+        "NovelPhysicalSplitter vs PreSplit: duplicate splitSingleTextFile logic",
+        "Cleanser tripled across common, PreSplit, and RunEngine"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Redundant Multi-Stage Points",
+      "items": [
+        "Double Chunking: Physical PreSplit -> Subfolder -> Chunking in translateLarge",
+        "Double Prompt Loop: Outer Attempt list loop x Inner Rotation loop (NxN)",
+        "Prompt Re-build: Full prompt assembly string split and replaced in call()",
+        "Dict Gen: Merge call immediately followed by Review call to same model",
+        "Batch Post-Query: Heavy findChild IPC queries run right after writeText"
+      ]
+    }
+  ]
+}

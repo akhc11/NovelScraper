@@ -2,21 +2,26 @@ package com.example.novelscraper.translation.v2.infra
 
 import android.content.Context
 import android.net.Uri
-import androidx.documentfile.provider.DocumentFile
+import android.provider.DocumentsContract
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * SAF実装。ContentResolver直結の最小操作のみを持ち、判定・解釈は上位層に置かない。
- * 旧実装の参照・流用なし（振る舞い仕様のみ持ち込み）。
+ * SAF（Storage Access Framework）実装。
+ * AndroidX の DocumentFile（TreeDocumentFile）を完全に排除し、
+ * DocumentsContract および ContentResolver に直結してすべての操作を実行する。
+ * これにより、階層ディレクトリや特殊文字を含む環境でもルートへの巻き戻りや親直下への誤保存を物理的に防止する。
  */
 class SafFileStore(private val context: Context) : FileStore {
 
-    private fun docOf(uri: String): DocumentFile? {
+    /**
+     * URI文字列の安全パース。
+     * 技術的根拠1行：ファイル名に「#」が含まれるとUri.parseがフラグメント（アンカー）と誤認してパスが途切れるため正規化する。
+     */
+    private fun safeParseUri(uriString: String): Uri? {
         return try {
-            val parsed = Uri.parse(uri) ?: return null
-            if (isTreeUri(parsed)) DocumentFile.fromTreeUri(context, parsed)
-            else DocumentFile.fromSingleUri(context, parsed)
+            val normalized = if (uriString.contains('#')) uriString.replace("#", "%23") else uriString
+            Uri.parse(normalized)
         } catch (_: Exception) {
             null
         }
@@ -27,22 +32,116 @@ class SafFileStore(private val context: Context) : FileStore {
         return path.contains("/tree/")
     }
 
-    private fun VDocOf(doc: DocumentFile): VDoc {
-        return VDoc(
-            uri = doc.uri.toString(),
-            name = doc.name ?: "",
-            isDirectory = doc.isDirectory,
-            length = try {
-                doc.length()
-            } catch (_: Exception) {
-                0L
+    private fun extractDocumentId(uri: Uri): String? {
+        return try {
+            if (uri.path?.contains("/document/") == true) {
+                DocumentsContract.getDocumentId(uri)
+            } else if (uri.path?.contains("/tree/") == true) {
+                DocumentsContract.getTreeDocumentId(uri)
+            } else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun toDocumentUri(uri: Uri): Uri {
+        return try {
+            if (uri.path?.contains("/document/") == true) uri
+            else if (uri.path?.contains("/tree/") == true) {
+                val docId = DocumentsContract.getTreeDocumentId(uri)
+                DocumentsContract.buildDocumentUriUsingTree(uri, docId)
+            } else uri
+        } catch (_: Exception) {
+            uri
+        }
+    }
+    /**
+     * 実表示名の取得。同名衝突によるプロバイダの自動リネーム（" (1)" 等）を検知するために使用。
+     * 技術的根拠1行：ContentResolverから直接COLUMN_DISPLAY_NAMEを取得し、誤認や親ルートへの巻き戻りを排除する。
+     */
+    private fun actualName(uri: Uri): String? {
+        return try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    if (idx >= 0) cursor.getString(idx) else null
+                } else null
             }
-        )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * 作成結果の検証。自動リネームされていたら重複 "(1)" を消して既存を探し直す。
+     * 技術的根拠1行：同名存在時の createDocument の挙動はプロバイダ定義で、重複 "(1)" を残すと無限増殖するため。
+     */
+    private suspend fun resolveCreated(
+        parentUri: String,
+        requestedName: String,
+        createdUri: Uri?,
+        isDirectory: Boolean
+    ): VDoc? {
+        if (createdUri == null) return null
+        val actual = actualName(createdUri)
+        val isCollisionRename = actual != null && Regex(""".*\s\(\d+\).*""").matches(actual)
+        if (actual == null || actual.equals(requestedName, ignoreCase = true) || !isCollisionRename) {
+            return VDoc(
+                uri = createdUri.toString(),
+                name = actual ?: requestedName,
+                isDirectory = isDirectory,
+                length = 0L
+            )
+        }
+        try {
+            DocumentsContract.deleteDocument(context.contentResolver, createdUri)
+        } catch (_: Exception) {
+        }
+        return findChild(parentUri, requestedName)
     }
 
     override suspend fun children(dirUri: String): List<VDoc> = withContext(Dispatchers.IO) {
         try {
-            docOf(dirUri)?.listFiles()?.map { VDocOf(it) } ?: emptyList()
+            val parsed = safeParseUri(dirUri) ?: return@withContext emptyList()
+            if (!isTreeUri(parsed)) return@withContext emptyList()
+            val docId = extractDocumentId(parsed) ?: return@withContext emptyList()
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(parsed, docId)
+            val projection = arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE
+            )
+            val result = mutableListOf<VDoc>()
+            context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                val sizeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
+                while (cursor.moveToNext()) {
+                    val childDocId = cursor.getString(idIdx)
+                    val name = cursor.getString(nameIdx) ?: ""
+                    val mime = cursor.getString(mimeIdx) ?: ""
+                    val size = if (cursor.isNull(sizeIdx)) 0L else cursor.getLong(sizeIdx)
+                    val childUri = DocumentsContract.buildDocumentUriUsingTree(parsed, childDocId)
+                    val isDir = (mime == DocumentsContract.Document.MIME_TYPE_DIR)
+                    result.add(
+                        VDoc(
+                            uri = childUri.toString(),
+                            name = name,
+                            isDirectory = isDir,
+                            length = size
+                        )
+                    )
+                }
+            }
+            result
         } catch (_: Exception) {
             emptyList()
         }
@@ -50,7 +149,8 @@ class SafFileStore(private val context: Context) : FileStore {
 
     override suspend fun readText(fileUri: String): String? = withContext(Dispatchers.IO) {
         try {
-            context.contentResolver.openInputStream(Uri.parse(fileUri))?.use { stream ->
+            val parsed = safeParseUri(fileUri) ?: return@withContext null
+            context.contentResolver.openInputStream(parsed)?.use { stream ->
                 stream.bufferedReader(Charsets.UTF_8).readText()
             }
         } catch (_: Exception) {
@@ -61,12 +161,15 @@ class SafFileStore(private val context: Context) : FileStore {
     override suspend fun readBytes(fileUri: String, maxBytes: Int): ByteArray? =
         withContext(Dispatchers.IO) {
             try {
-                context.contentResolver.openInputStream(Uri.parse(fileUri))?.use { stream ->
+                val parsed = safeParseUri(fileUri) ?: return@withContext null
+                context.contentResolver.openInputStream(parsed)?.use { stream ->
                     val out = java.io.ByteArrayOutputStream(8192)
                     val buf = ByteArray(8192)
                     var total = 0
                     while (true) {
-                        val read = stream.read(buf, 0, buf.size.coerceAtMost((maxBytes - total).coerceAtLeast(0)))
+                        val toRead = buf.size.coerceAtMost((maxBytes - total).coerceAtLeast(0))
+                        if (toRead <= 0) break
+                        val read = stream.read(buf, 0, toRead)
                         if (read == -1) break
                         out.write(buf, 0, read)
                         total += read
@@ -82,7 +185,8 @@ class SafFileStore(private val context: Context) : FileStore {
     override suspend fun writeText(fileUri: String, content: String): Boolean =
         withContext(Dispatchers.IO) {
             try {
-                context.contentResolver.openOutputStream(Uri.parse(fileUri), "wt")?.use { out ->
+                val parsed = safeParseUri(fileUri) ?: return@withContext false
+                context.contentResolver.openOutputStream(parsed, "wt")?.use { out ->
                     out.writer(Charsets.UTF_8).use { writer ->
                         writer.write(content)
                         writer.flush()
@@ -96,7 +200,8 @@ class SafFileStore(private val context: Context) : FileStore {
     override suspend fun appendText(fileUri: String, content: String): Boolean =
         withContext(Dispatchers.IO) {
             try {
-                context.contentResolver.openOutputStream(Uri.parse(fileUri), "wa")?.use { out ->
+                val parsed = safeParseUri(fileUri) ?: return@withContext false
+                context.contentResolver.openOutputStream(parsed, "wa")?.use { out ->
                     out.writer(Charsets.UTF_8).use { writer ->
                         writer.write(content)
                         writer.flush()
@@ -110,7 +215,7 @@ class SafFileStore(private val context: Context) : FileStore {
     override suspend fun findChild(dirUri: String, name: String): VDoc? =
         withContext(Dispatchers.IO) {
             try {
-                docOf(dirUri)?.findFile(name)?.let { VDocOf(it) }
+                children(dirUri).firstOrNull { it.name.equals(name, ignoreCase = true) }
             } catch (_: Exception) {
                 null
             }
@@ -119,7 +224,15 @@ class SafFileStore(private val context: Context) : FileStore {
     override suspend fun createDir(parentUri: String, name: String): VDoc? =
         withContext(Dispatchers.IO) {
             try {
-                docOf(parentUri)?.createDirectory(name)?.let { VDocOf(it) }
+                val parsed = safeParseUri(parentUri) ?: return@withContext null
+                val targetDocUri = toDocumentUri(parsed)
+                val createdUri = DocumentsContract.createDocument(
+                    context.contentResolver,
+                    targetDocUri,
+                    DocumentsContract.Document.MIME_TYPE_DIR,
+                    name
+                )
+                resolveCreated(parentUri, name, createdUri, isDirectory = true)
             } catch (_: Exception) {
                 null
             }
@@ -128,7 +241,15 @@ class SafFileStore(private val context: Context) : FileStore {
     override suspend fun createFile(dirUri: String, name: String, mime: String): VDoc? =
         withContext(Dispatchers.IO) {
             try {
-                docOf(dirUri)?.createFile(mime, name)?.let { VDocOf(it) }
+                val parsed = safeParseUri(dirUri) ?: return@withContext null
+                val targetDocUri = toDocumentUri(parsed)
+                val createdUri = DocumentsContract.createDocument(
+                    context.contentResolver,
+                    targetDocUri,
+                    mime,
+                    name
+                )
+                resolveCreated(dirUri, name, createdUri, isDirectory = false)
             } catch (_: Exception) {
                 null
             }
@@ -137,9 +258,16 @@ class SafFileStore(private val context: Context) : FileStore {
     override suspend fun deleteRecursively(dirUri: String): Boolean =
         withContext(Dispatchers.IO) {
             try {
-                val doc = docOf(dirUri) ?: return@withContext false
-                deleteDeep(doc)
-                true
+                val parsed = safeParseUri(dirUri) ?: return@withContext false
+                for (child in children(dirUri)) {
+                    if (child.isDirectory) {
+                        deleteRecursively(child.uri)
+                    } else {
+                        deleteFile(child.uri)
+                    }
+                }
+                val targetDocUri = toDocumentUri(parsed)
+                DocumentsContract.deleteDocument(context.contentResolver, targetDocUri)
             } catch (_: Exception) {
                 false
             }
@@ -147,18 +275,11 @@ class SafFileStore(private val context: Context) : FileStore {
 
     override suspend fun deleteFile(fileUri: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            docOf(fileUri)?.delete() == true
+            val parsed = safeParseUri(fileUri) ?: return@withContext false
+            val targetDocUri = toDocumentUri(parsed)
+            DocumentsContract.deleteDocument(context.contentResolver, targetDocUri)
         } catch (_: Exception) {
             false
         }
-    }
-
-    private fun deleteDeep(doc: DocumentFile): Boolean {
-        if (doc.isDirectory) {
-            for (child in doc.listFiles()) {
-                deleteDeep(child)
-            }
-        }
-        return doc.delete()
     }
 }

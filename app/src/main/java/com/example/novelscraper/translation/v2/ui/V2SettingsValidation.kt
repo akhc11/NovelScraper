@@ -156,6 +156,12 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
     if (settings.limits.requestDelaySec < 0) {
         issues.add(V2SettingsIssue("要求間隔は0以上で指定してください", true))
     }
+    if (settings.geminiCooldownSec < 0) {
+        issues.add(V2SettingsIssue("429待機は0以上で指定してください", true))
+    }
+    if (settings.transientRetryDelaySec < 0) {
+        issues.add(V2SettingsIssue("一時エラー待機は0以上で指定してください", true))
+    }
     if (settings.limits.filesPerFolder < 0) {
         issues.add(V2SettingsIssue("フォルダ上限は0以上で指定してください", true))
     }

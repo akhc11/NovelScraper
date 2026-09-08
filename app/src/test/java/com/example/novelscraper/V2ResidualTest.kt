@@ -50,12 +50,38 @@ class V2ResidualTest {
         assertNull(residualFailure("주인공은旅に出た。", ko()))
     }
 
+    private fun en() = ResidualOptions(SourceLang.EN)
+
     @Test
-    fun testResidual_LatinSkipped() {
-        // Latin-only segments never flag (proper nouns; parity with old).
+    fun testResidual_EnglishLongBlockFails() {
         val text = "This is a very long English sentence left untranslated in the output " +
             "and it keeps going without any Japanese characters at all."
-        assertNull(residualFailure(text, ResidualOptions(SourceLang.EN)))
+        val reason = residualFailure(text, en())
+        assertNotNull(reason)
+        assertTrue(reason!!.contains("latin"))
+    }
+
+    @Test
+    fun testResidual_EnglishShortHeadingOrProperNounPasses() {
+        // 短い章見出しや固有名詞、ゲーム用語は60文字未満のため誤爆せずパス
+        val text = "Chapter 1\n勇者は立ち上がった。\nGame Over\n"
+        assertNull(residualFailure(text, en()))
+    }
+
+    @Test
+    fun testResidual_EnglishMixedInJapaneseSentencePasses() {
+        // 日本語文の中に混ざる英単語（OK、HPなど）はセグメント内にかな・漢字があるためパス
+        val text = "彼女は「OK！」と答えた。\nステータス画面にHPが表示された。\n"
+        assertNull(residualFailure(text, en()))
+    }
+
+    @Test
+    fun testResidual_LatinInZhOrJaSourceSkipped() {
+        // ZHやJAソースではLatin残留検査はスキップ
+        val text = "This is a very long English sentence left untranslated in the output " +
+            "and it keeps going without any Japanese characters at all."
+        assertNull(residualFailure(text, zh()))
+        assertNull(residualFailure(text, ResidualOptions(SourceLang.JA)))
     }
 
     @Test
@@ -86,5 +112,35 @@ class V2ResidualTest {
         assertNotNull(verifyTranslation(src, "$dst\n[SRC_END]", base))
         // Gate on: residue fails.
         assertNull(verifyTranslation(src, "$dst\n[SRC_END]", base.copy(residual = zh())))
+    }
+
+    @Test
+    fun testResidual_KanaMixedWithPureSimplifiedHanziFails() {
+        // かな（彼は、お前は）が混ざっていても、純粋簡体字（说、这、个）を含む中国語が残留していれば検知される
+        val leaked = "彼は冷笑着说道：你这个不知死活的家伙！\n" +
+            "主角从一个普通的少年成长为世界的救世主。\n"
+        val text = leaked.repeat(2)
+        val reason = residualFailure(text, zh())
+        assertNotNull(reason)
+        assertTrue(reason!!.contains("han"))
+    }
+
+    @Test
+    fun testResidual_LongJapaneseHeadingPasses() {
+        // 純粋簡体字を含まない正当な日本の漢字見出し（14文字）は、本文にかながあれば誤爆せずパスする
+        val heading = "第十三章 異世界転生勇者之奮闘記\n"
+        val body = "勇者は立ち上がり、仲間たちと共に魔王の城へと向かった。\n"
+        val text = heading + body.repeat(5)
+        assertNull(residualFailure(text, zh()))
+    }
+
+    @Test
+    fun testResidual_KoMixedHangulFailsWhenExceedingThreshold() {
+        // 文末に「です」があっても、ハングルが累積して閾値を超えれば韓国語残留として検知される
+        val leaked = "주인공은 평범한 소년이었고 세계를 구원하기 위해 길을 떠났습니다です。\n"
+        val text = leaked.repeat(2)
+        val reason = residualFailure(text, ko())
+        assertNotNull(reason)
+        assertTrue(reason!!.contains("hangul"))
     }
 }

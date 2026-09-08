@@ -7,6 +7,7 @@ import com.example.novelscraper.translation.v2.domain.FailureKind
 import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.GeminiErrorMapper
 import com.example.novelscraper.translation.v2.domain.GenericErrorMapper
+import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.domain.SamplingParam
@@ -27,6 +28,7 @@ import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.infra.buildGeminiBody
 import com.example.novelscraper.translation.v2.infra.buildOpenRouterBody
 import com.example.novelscraper.translation.v2.infra.parseGeminiResponse
+import com.example.novelscraper.translation.v2.infra.parseGeminiRetryDelay
 import com.example.novelscraper.translation.v2.infra.parseOpenRouterResponse
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -73,6 +75,38 @@ class V2DomainTest {
         assertEquals(FailureKind.QUOTA_MINUTE, GeminiErrorMapper.map(429, "").kind)
         assertTrue(GeminiErrorMapper.isDailyQuotaExceeded("per day quota exceeded"))
         assertFalse(GeminiErrorMapper.isDailyQuotaExceeded("per minute quota exceeded"))
+    }
+
+    @Test
+    fun testGeminiRetryDelay_Parsing() {
+        // Google RPC RetryInfo (retryDelay: "34.460462s" -> 切り上げ35秒)
+        val bodyWithFraction = """
+            {
+              "error": {
+                "code": 429,
+                "message": "Resource has been exhausted",
+                "details": [
+                  {
+                    "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                    "retryDelay": "34.460462s"
+                  }
+                ]
+              }
+            }
+        """.trimIndent()
+        assertEquals(35L, parseGeminiRetryDelay(bodyWithFraction))
+
+        val bodyWithInteger = """{"error": {"details": [{"retryDelay": "15s"}]}}"""
+        assertEquals(15L, parseGeminiRetryDelay(bodyWithInteger))
+
+        assertNull(parseGeminiRetryDelay("""{"error": "no details"}"""))
+
+        // parseGeminiResponse 経由で retryAfterSec に反映されること
+        val res = parseGeminiResponse(429, bodyWithFraction)
+        assertTrue(res is LlmResult.Failure)
+        val failure = (res as LlmResult.Failure).failure
+        assertEquals(FailureKind.QUOTA_MINUTE, failure.kind)
+        assertEquals(35, failure.retryAfterSec)
     }
 
     @Test

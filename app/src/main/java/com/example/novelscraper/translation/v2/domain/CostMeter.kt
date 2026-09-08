@@ -23,5 +23,6 @@ class CostMeter(
         return true
     }
 
+    @Synchronized
     fun snapshot(): Pair<Long, Double> = usedTokens to usedCost
 }

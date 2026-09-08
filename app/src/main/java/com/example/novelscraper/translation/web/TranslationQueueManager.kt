@@ -7,9 +7,6 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.common.NovelPhysicalSplitter
 import com.example.novelscraper.translation.common.ingest.DeclaredEncoding
-import com.example.novelscraper.translation.llm.engine.LlmEngineState
-import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
-import com.example.novelscraper.translation.llm.engine.LlmTranslationEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,8 +47,6 @@ class TranslationQueueManager(
     private var deeplSessionId: Long = 0L
     @Volatile
     private var papagoSessionId: Long = 0L
-
-    val llmEngine: LlmTranslationEngine = LlmTranslationEngine(appContext, scope)
 
     private val _googleState = MutableStateFlow(EngineTranslationState())
     val googleState: StateFlow<EngineTranslationState> = _googleState.asStateFlow()
@@ -102,21 +97,6 @@ class TranslationQueueManager(
             repository.papagoFileDelayFlow.collect { d -> _papagoState.update { it.copy(fileDelay = d) } }
         }
 
-        // LLMエンジンの内部ライブ状態を購読して同期
-        scope.launch {
-            llmEngine.engineState.collect { live ->
-                _llmState.update { st ->
-                    st.copy(
-                        isTranslating = live.isTranslating,
-                        statusText = live.statusText,
-                        progress = live.progress,
-                        currentFileName = live.currentFileName,
-                        chunkProgress = live.chunkProgress
-                    )
-                }
-                notifyChanged()
-            }
-        }
     }
 
     // ---- 設定・キュー操作 ----
@@ -199,13 +179,6 @@ class TranslationQueueManager(
         }
 
         if (engine == TranslationEngine.LLM_API) {
-            val uris = engineState.selectedFolders.mapNotNull { it.uri }.ifEmpty {
-                engineState.folderUri?.let { listOf(it) } ?: emptyList()
-            }
-            llmEngine.startTranslation(uris) {
-                onShowMessage?.invoke("[AI/LLM 翻訳] 全フォルダの処理が完了しました", true)
-                notifyChanged()
-            }
             return
         }
 
@@ -473,7 +446,6 @@ class TranslationQueueManager(
 
     fun stop(engine: TranslationEngine) {
         if (engine == TranslationEngine.LLM_API) {
-            llmEngine.stopTranslation()
             return
         }
         synchronized(taskLock) {
@@ -512,7 +484,6 @@ class TranslationQueueManager(
     }
 
     fun shutdown() {
-        llmEngine.stopTranslation()
         synchronized(taskLock) {
             googleSessionId++
             deeplSessionId++

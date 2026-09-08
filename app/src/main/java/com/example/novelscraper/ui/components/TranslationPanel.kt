@@ -33,21 +33,17 @@ import androidx.compose.ui.unit.sp
 import com.example.novelscraper.MainUiState
 import com.example.novelscraper.TranslationEngine
 import com.example.novelscraper.translation.web.*
-import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import com.example.novelscraper.translation.common.ingest.ENCODING_OPTIONS
-import com.example.novelscraper.translation.llm.ui.LlmTranslationPanel
 import com.example.novelscraper.ui.theme.AppColors
 
 @Composable
 fun TranslationPanel(
     uiState: MainUiState,
-    llmConfig: LlmTranslationConfig = LlmTranslationConfig(),
     onSelectEngineTab: (TranslationEngine) -> Unit,
     onSelectFolderClick: () -> Unit,
     onRemoveFolderClick: (TranslationEngine, Int) -> Unit,
     onClearFoldersClick: (TranslationEngine) -> Unit,
     onUpdateDelays: (TranslationEngine, String, String) -> Unit,
-    onOpenLlmSettingsClick: () -> Unit = {},
     onStartTranslationClick: (TranslationEngine) -> Unit,
     onStopTranslationClick: (TranslationEngine) -> Unit,
     onOpenWebTranslateClick: (TranslationEngine) -> Unit,
@@ -55,6 +51,7 @@ fun TranslationPanel(
     onUpdateWebSplitSize: ((Int) -> Unit)? = null,
     onUpdateInputEncoding: ((String) -> Unit)? = null,
     onCloseClick: () -> Unit,
+    isV2Translating: Boolean = false,
     v2Content: @Composable ColumnScope.() -> Unit = {}
 ) {
     val activeEngine = uiState.activeTranslationEngine
@@ -169,7 +166,7 @@ fun TranslationPanel(
                     onClick = { onSelectEngineTab(TranslationEngine.LLM_API) },
                     text = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (uiState.llmEngineLiveState.isTranslating) {
+                            if (isV2Translating) {
                                 Text("● ", color = Color(0xFF4CAF50), fontSize = 11.sp)
                             }
                             Text(
@@ -186,18 +183,7 @@ fun TranslationPanel(
             Spacer(modifier = Modifier.height(10.dp))
 
             if (activeEngine == TranslationEngine.LLM_API) {
-                // LLM 専用パネル（旧実装。v2切替までは維持し、新旧比較用にv2入口を並べる）
-                LlmTranslationPanel(
-                    uiState = uiState,
-                    config = llmConfig,
-                    onSelectFolderClick = onSelectFolderClick,
-                    onRemoveFolderClick = { index -> onRemoveFolderClick(TranslationEngine.LLM_API, index) },
-                    onClearFoldersClick = { onClearFoldersClick(TranslationEngine.LLM_API) },
-                    onOpenSettingsClick = onOpenLlmSettingsClick,
-                    onStartClick = { onStartTranslationClick(TranslationEngine.LLM_API) },
-                    onStopClick = { onStopTranslationClick(TranslationEngine.LLM_API) }
-                )
-                Spacer(modifier = Modifier.height(10.dp))
+                // LLM v2 翻訳パネル
                 v2Content()
             } else {
                 // Web 翻訳パネル (Google / DeepL)

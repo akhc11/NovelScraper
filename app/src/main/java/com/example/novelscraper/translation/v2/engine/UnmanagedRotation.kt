@@ -24,6 +24,7 @@ class UnmanagedRotation(
     private val descriptors: Map<ProviderId, ProviderDescriptor>,
     private val handlerFactory: HandlerFactory,
     private val cooldownSec: Int = 30,
+    private val transientRetryDelaySec: Int = 2,
     private val maxSameRetries: Int = 2,
     private val sendGate: V2SendGate? = null,
     private val sendGateIntervalMs: Long = 10_000L,
@@ -83,18 +84,17 @@ class UnmanagedRotation(
                                     FailureKind.BLOCKED_DETERMINISTIC,
                                     FailureKind.CONFIG,
                                     FailureKind.FATAL -> break
-                                    FailureKind.QUOTA_DAILY, FailureKind.QUOTA_MINUTE,
-                                    FailureKind.RETRYABLE_AFTER -> {
+                                    FailureKind.QUOTA_DAILY, FailureKind.QUOTA_MINUTE -> {
                                         quotaSeenThisEpoch = true
-                                        val waitSec = result.failure.retryAfterSec
-                                            ?.toLong()?.coerceIn(
-                                                TranslationLimits.WAIT_MIN_SEC,
-                                                TranslationLimits.WAIT_MAX_SEC
-                                            )
-                                            ?: TranslationLimits.WAIT_MIN_SEC
-                                        if (sameLeft > 0) {
+                                        if (handleQuotaRetry(result.failure, cooldownSec, TranslationLimits.UNMANAGED_COOLDOWN_MAX_SEC.toLong(), sameLeft, sleeper, log)) {
                                             sameLeft--
-                                            sleeper(waitSec * 1000L)
+                                            continue
+                                        }
+                                        break
+                                    }
+                                    FailureKind.RETRYABLE_AFTER -> {
+                                        if (handleTransientRetry(result.failure, transientRetryDelaySec, sameLeft, sleeper, log)) {
+                                            sameLeft--
                                             continue
                                         }
                                         break
@@ -108,7 +108,11 @@ class UnmanagedRotation(
 
             if (!quotaSeenThisEpoch) return lastFailure
                 ?: LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "no-attempt"))
-            sleeper(cooldownSec.coerceIn(0, TranslationLimits.UNMANAGED_COOLDOWN_MAX_SEC) * 1000L)
+            val cooldown = cooldownSec.coerceIn(0, TranslationLimits.UNMANAGED_COOLDOWN_MAX_SEC)
+            if (cooldown > 0) {
+                log("制限のため ${cooldown}秒冷却して次周します")
+                sleeper(cooldown * 1000L)
+            }
         }
         return lastFailure ?: LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "stopped"))
     }

@@ -34,8 +34,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.*
 import com.example.novelscraper.scraper.*
-import com.example.novelscraper.translation.llm.engine.LlmEngineState
-import com.example.novelscraper.translation.llm.ui.LlmSettingsDialog
 import com.example.novelscraper.translation.v2.ui.V2TranslationPanel
 import com.example.novelscraper.translation.v2.ui.V2TranslationViewModel
 import com.example.novelscraper.ui.components.*
@@ -71,6 +69,9 @@ fun MainScreen(
     val activeTasks by viewModel.activeTasks.collectAsState()
     val currentStatusText by viewModel.currentStatusText.collectAsState()
     val context = LocalContext.current
+
+    val v2ViewModel: V2TranslationViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+    val v2EngineState by v2ViewModel.engineState.collectAsState()
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
@@ -331,10 +332,11 @@ fun MainScreen(
 
                 // 独立したステータスバー（翻訳高頻度更新時のリコンポジションを局所化）
                 AppStatusBar(
-                    isAnyTranslating = uiState.isAnyTranslating,
+                    isAnyTranslating = uiState.isAnyTranslating || v2EngineState.isRunning,
                     googleState = uiState.googleTranslationState,
                     deeplState = uiState.deeplTranslationState,
-                    llmState = uiState.llmEngineLiveState,
+                    isV2Translating = v2EngineState.isRunning,
+                    v2StatusText = v2EngineState.statusText,
                     currentStatusText = currentStatusText
                 )
             }
@@ -433,17 +435,15 @@ fun MainScreen(
                         )
                     }
                     PanelType.TRANSLATION -> {
-                        val v2ViewModel: V2TranslationViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
                         TranslationPanel(
                             uiState = uiState,
-                            llmConfig = viewModel.getLlmConfig(),
+                            isV2Translating = v2EngineState.isRunning,
                             v2Content = { V2TranslationPanel(viewModel = v2ViewModel) },
                             onSelectEngineTab = { engine -> viewModel.setActiveTranslationEngine(engine) },
                             onSelectFolderClick = { folderLauncher.launch(null) },
                             onRemoveFolderClick = { engine, index -> viewModel.removeTranslationFolder(engine, index) },
                             onClearFoldersClick = { engine -> viewModel.clearTranslationFolders(engine) },
                             onUpdateDelays = { engine, chunkDelay, fileDelay -> viewModel.updateTranslationDelays(engine, chunkDelay, fileDelay) },
-                            onOpenLlmSettingsClick = { viewModel.showLlmSettingsDialog() },
                             onStartTranslationClick = { engine -> viewModel.startTranslation(engine) },
                             onStopTranslationClick = { engine -> viewModel.stopTranslation(engine) },
                             onToggleWebSplit = { enabled -> viewModel.toggleWebSplit(enabled) },
@@ -512,16 +512,6 @@ fun MainScreen(
                         onDismiss = { viewModel.dismissDialog() }
                     )
                 }
-                is ActiveDialog.LlmSettings -> {
-                    LlmSettingsDialog(
-                        currentConfig = viewModel.getLlmConfig(),
-                        onSaveConfig = { newConfig ->
-                            viewModel.updateLlmConfig(newConfig)
-                            Toast.makeText(context, "AI翻訳設定を保存しました", Toast.LENGTH_SHORT).show()
-                        },
-                        onDismiss = { viewModel.dismissDialog() }
-                    )
-                }
                 is ActiveDialog.TextQuerySearch -> {
                     TextQuerySearchDialog(
                         onDismiss = { viewModel.dismissDialog() },
@@ -575,12 +565,13 @@ private fun AppStatusBar(
     isAnyTranslating: Boolean,
     googleState: EngineTranslationState,
     deeplState: EngineTranslationState,
-    llmState: LlmEngineState,
+    isV2Translating: Boolean,
+    v2StatusText: String,
     currentStatusText: String
 ) {
     val translationStatus = when {
-        llmState.isTranslating ->
-            "LLM翻訳: ${llmState.statusText}"
+        isV2Translating ->
+            "AI/LLM翻訳: $v2StatusText"
         googleState.isTranslating && deeplState.isTranslating ->
             "Google: ${googleState.progress.first}/${googleState.progress.second}件 | DeepL: ${deeplState.progress.first}/${deeplState.progress.second}件"
         googleState.isTranslating ->

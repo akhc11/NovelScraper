@@ -2,7 +2,6 @@ package com.example.novelscraper
 
 import android.net.Uri
 import com.example.novelscraper.scraper.*
-import com.example.novelscraper.translation.llm.engine.LlmEngineState
 import kotlinx.serialization.Serializable
 
 enum class PanelType { SETTINGS, HISTORY, FAVORITES, TRANSLATION }
@@ -28,7 +27,6 @@ sealed interface ActiveDialog {
     data object None : ActiveDialog
     data class AddFavorite(val title: String, val url: String) : ActiveDialog
     data class SavePreset(val defaultName: String, val currentUrl: String) : ActiveDialog
-    data object LlmSettings : ActiveDialog
     data object TextQuerySearch : ActiveDialog
 }
 
@@ -105,8 +103,7 @@ data class MainUiState(
     val googleTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "1-3", fileDelay = "1-2"),
     val deeplTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "3-8", fileDelay = "2-5"),
     val papagoTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "3-8", fileDelay = "2-5", sourceLang = "ko"),
-    val llmTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "2", fileDelay = "2"),
-    val llmEngineLiveState: LlmEngineState = LlmEngineState()
+    val llmTranslationState: EngineTranslationState = EngineTranslationState(chunkDelay = "2", fileDelay = "2")
 ) {
     val isInspectMode: Boolean
         get() = overlay is Overlay.InspectMode
@@ -123,5 +120,5 @@ data class MainUiState(
         }
 
     val isAnyTranslating: Boolean
-        get() = googleTranslationState.isTranslating || deeplTranslationState.isTranslating || papagoTranslationState.isTranslating || llmEngineLiveState.isTranslating
+        get() = googleTranslationState.isTranslating || deeplTranslationState.isTranslating || papagoTranslationState.isTranslating
 }

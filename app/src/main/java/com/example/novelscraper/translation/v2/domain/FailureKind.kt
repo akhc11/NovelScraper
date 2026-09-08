@@ -57,3 +57,17 @@ fun FailureKind.isQuotaLike(): Boolean =
 
 /** 即時確定（待機再送の対象外） */
 fun FailureKind.isTerminal(): Boolean = this == FailureKind.FATAL || isDeterministic()
+
+/**
+ * .failed ファイルを作成すべき「ファイル内容起因の確定失敗」か判定（pure）。
+ * 技術的根拠1行：通信瞬断・5xx・429等の外的要因による失敗は.failedを作らず未完了保留とする。
+ */
+fun isDeterministicFailure(kind: FailureKind, note: String = ""): Boolean = when (kind) {
+    FailureKind.BLOCKED_DETERMINISTIC -> true
+    FailureKind.FATAL -> {
+        note.contains("context-length") ||
+        note.contains("verify-rejected") ||
+        note.contains("residual")
+    }
+    else -> false
+}

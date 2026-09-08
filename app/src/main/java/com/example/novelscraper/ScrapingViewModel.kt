@@ -7,7 +7,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.novelscraper.scraper.*
 import com.example.novelscraper.translation.web.*
-import com.example.novelscraper.translation.llm.engine.LlmTranslationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -61,11 +60,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 _uiState.update { it.copy(isWebViewDarkMode = isDark) }
             }
         }
-        viewModelScope.launch {
-            repository.llmConfigFlow.collect { llmConfig ->
-                translationManager.llmEngine.updateConfig(llmConfig)
-            }
-        }
 
         // 翻訳状態の購読とUIStateへの反映
         viewModelScope.launch {
@@ -81,17 +75,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             translationManager.papagoState.collect { ps ->
                 _uiState.update { it.copy(papagoTranslationState = ps) }
-            }
-        }
-        viewModelScope.launch {
-            translationManager.llmState.collect { ls ->
-                _uiState.update { it.copy(llmTranslationState = ls) }
-            }
-        }
-        viewModelScope.launch {
-            translationManager.llmEngine.engineState.collect { live ->
-                _uiState.update { it.copy(llmEngineLiveState = live) }
-                syncServiceStatus()
             }
         }
         viewModelScope.launch {
@@ -143,10 +126,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     fun showSavePresetDialog(defaultName: String, currentUrl: String) {
         _uiState.update { it.copy(activeDialog = ActiveDialog.SavePreset(defaultName, currentUrl)) }
-    }
-
-    fun showLlmSettingsDialog() {
-        _uiState.update { it.copy(activeDialog = ActiveDialog.LlmSettings) }
     }
 
     fun showTextQuerySearchDialog() {
@@ -464,23 +443,12 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         translationManager.stop(engine)
     }
 
-    fun getLlmConfig(): LlmTranslationConfig = translationManager.llmEngine.config
-
-    fun updateLlmConfig(config: LlmTranslationConfig) {
-        translationManager.llmEngine.updateConfig(config)
-        viewModelScope.launch {
-            repository.saveLlmConfig(config)
-        }
-        dismissDialog()
-    }
-
     private fun syncServiceStatus() {
         val scrapingCount = taskList.size
         val googleState = translationManager.googleState.value
         val deeplState = translationManager.deeplState.value
         val papagoState = translationManager.papagoState.value
-        val llmState = translationManager.llmEngine.engineState.value
-        val isTranslating = googleState.isTranslating || deeplState.isTranslating || papagoState.isTranslating || llmState.isTranslating
+        val isTranslating = googleState.isTranslating || deeplState.isTranslating || papagoState.isTranslating
 
         if (scrapingCount > 0 || isTranslating) {
             val statusParts = mutableListOf<String>()
@@ -498,9 +466,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             if (papagoState.isTranslating) {
                 val pPrefix = if (papagoState.selectedFolders.size > 1) "[${papagoState.currentFolderIndex + 1}/${papagoState.selectedFolders.size}] " else ""
                 statusParts.add("Papago: ${pPrefix}${papagoState.progress.first}/${papagoState.progress.second}件")
-            }
-            if (llmState.isTranslating) {
-                statusParts.add("LLM: ${llmState.progress.first}/${llmState.progress.second}件")
             }
             val msg = if (statusParts.isNotEmpty()) {
                 statusParts.joinToString(" / ")

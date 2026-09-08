@@ -16,6 +16,7 @@ import com.example.novelscraper.translation.v2.engine.RunEngine
 import com.example.novelscraper.translation.v2.engine.UnmanagedRotation
 import com.example.novelscraper.translation.v2.engine.resolveProfileOptions
 import com.example.novelscraper.translation.v2.infra.InMemoryFileStore
+import com.example.novelscraper.translation.v2.settings.V2DictSettings
 import com.example.novelscraper.translation.v2.settings.V2Limits
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2PrevContext
@@ -211,6 +212,101 @@ class V2EngineTest {
     }
 
     @Test
+    fun testRotation_QuotaWaitIsLogged() = kotlinx.coroutines.runBlocking {
+        // 待機に入る前に理由と秒数をログに出す（無言の停止に見せない）
+        val script: Map<String, MutableList<LlmResult>> = mapOf("m" to mutableListOf(quotaMinute()))
+        val handler = scriptedHandler(script)
+        val waits = mutableListOf<Long>()
+        val logs = mutableListOf<String>()
+        val rotation = Rotation(
+            workerId = 1,
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "m")),
+            pool = QuotaPool(listOf("k1")),
+            keyIndex = 0,
+            key = "k1",
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR),
+            handlerFactory = { _, _ -> handler },
+            openRouterKey = "",
+            geminiCooldownSec = 5,
+            maxSameRetries = 1,
+            sleeper = { waits.add(it) },
+            log = { synchronized(logs) { logs.add(it) } }
+        )
+        val result = rotation.execute(listOf("prompt"), "src")
+        assertTrue(result is LlmResult.Success)
+        assertEquals(listOf(5000L), waits)
+        assertTrue(logs.any { it.contains("待機") && it.contains("再送") })
+    }
+
+    @Test
+    fun testRotation_RetryAfterSecHonored() = kotlinx.coroutines.runBlocking {
+        // APIから指定されたRetry-Afterがある場合、設定値（60秒）ではなく指定秒数（12秒）で待機する
+        val failureWithRetryAfter = LlmResult.Failure(ClassifiedFailure(FailureKind.QUOTA_MINUTE, retryAfterSec = 12))
+        val script: Map<String, MutableList<LlmResult>> = mapOf("m" to mutableListOf(failureWithRetryAfter))
+        val handler = scriptedHandler(script)
+        val waits = mutableListOf<Long>()
+        val rotation = Rotation(
+            workerId = 1,
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "m")),
+            pool = QuotaPool(listOf("k1")),
+            keyIndex = 0,
+            key = "k1",
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR),
+            handlerFactory = { _, _ -> handler },
+            openRouterKey = "",
+            geminiCooldownSec = 60,
+            maxSameRetries = 1,
+            sleeper = { waits.add(it) },
+            log = {}
+        )
+        val result = rotation.execute(listOf("prompt"), "src")
+        assertTrue(result is LlmResult.Success)
+        assertEquals(listOf(12000L), waits)
+    }
+
+    @Test
+    fun testRotation_TransientErrorUsesTransientDelay() = kotlinx.coroutines.runBlocking {
+        // 一時エラー(RETRYABLE_AFTER)発生時は geminiCooldownSec(60秒) ではなく transientRetryDelaySec(3秒) で待機する
+        val failureTransient = LlmResult.Failure(ClassifiedFailure(FailureKind.RETRYABLE_AFTER))
+        val script: Map<String, MutableList<LlmResult>> = mapOf("m" to mutableListOf(failureTransient))
+        val handler = scriptedHandler(script)
+        val waits = mutableListOf<Long>()
+        val rotation = Rotation(
+            workerId = 1,
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "m")),
+            pool = QuotaPool(listOf("k1")),
+            keyIndex = 0,
+            key = "k1",
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR),
+            handlerFactory = { _, _ -> handler },
+            openRouterKey = "",
+            geminiCooldownSec = 60,
+            transientRetryDelaySec = 3,
+            maxSameRetries = 1,
+            sleeper = { waits.add(it) },
+            log = {}
+        )
+        val result = rotation.execute(listOf("prompt"), "src")
+        assertTrue(result is LlmResult.Success)
+        assertEquals(listOf(3000L), waits)
+    }
+
+    @Test
+    fun testIsDeterministicFailure() {
+        // コンテンツブロック・文脈長超過・品質検査不合格のみ確定失敗（.failed対象）
+        assertTrue(com.example.novelscraper.translation.v2.domain.isDeterministicFailure(FailureKind.BLOCKED_DETERMINISTIC))
+        assertTrue(com.example.novelscraper.translation.v2.domain.isDeterministicFailure(FailureKind.FATAL, "400-context-length"))
+        assertTrue(com.example.novelscraper.translation.v2.domain.isDeterministicFailure(FailureKind.FATAL, "verify-rejected: residual hangul"))
+
+        // 通信エラー、サーバー5xx、429、設定不良は外的要因のため .failed を作らない
+        assertFalse(com.example.novelscraper.translation.v2.domain.isDeterministicFailure(FailureKind.RETRYABLE_AFTER, "io:timeout"))
+        assertFalse(com.example.novelscraper.translation.v2.domain.isDeterministicFailure(FailureKind.RETRYABLE_AFTER, "503"))
+        assertFalse(com.example.novelscraper.translation.v2.domain.isDeterministicFailure(FailureKind.QUOTA_MINUTE))
+        assertFalse(com.example.novelscraper.translation.v2.domain.isDeterministicFailure(FailureKind.QUOTA_DAILY))
+        assertFalse(com.example.novelscraper.translation.v2.domain.isDeterministicFailure(FailureKind.CONFIG))
+    }
+
+    @Test
     fun testRotation_RejectsUnmanagedProfiles() = kotlinx.coroutines.runBlocking {
         // 管理巡回器に非管理のみを渡す構成ミスは、プール誤用ではなく即時確定する
         val script: Map<String, MutableList<LlmResult>> = mapOf("x/y" to mutableListOf(quotaMinute()))
@@ -309,6 +405,76 @@ class V2EngineTest {
         // 再実行は早期スキップ
         val summary2 = engine.run(listOf(folder.uri), settings)
         assertEquals(2, summary2.completedFiles)
+    }
+
+    @Test
+    fun testRunEngine_CompletionFlow() = kotlinx.coroutines.runBlocking {
+        // 完了までの通し検証：小2件（バッチ）＋大1件（チャンク）＋辞書ありで全件完成すること
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-flow")
+        val small = "これはテストの本文です。勇者が旅に出ました。"
+        for (name in listOf("s1.txt", "s2.txt")) {
+            val doc = store.createFile(folder.uri, name, "text/plain")!!
+            store.writeText(doc.uri, small)
+        }
+        val bigBody = "これは大きな物語の本文です。勇者は果てしない旅を続けました。\n".repeat(700)
+        val bigDoc = store.createFile(folder.uri, "big.txt", "text/plain")!!
+        store.writeText(bigDoc.uri, bigBody)
+        val dictJson = """{"style":"カタカナ","characters":{"勇者":"ユウシャ"},"genders":{}}"""
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val sys = request.systemPrompt
+                if (sys.contains("Extract person names") ||
+                    sys.contains("Merge the dictionary") ||
+                    sys.contains("Review the merged")
+                ) {
+                    return LlmResult.Success(dictJson)
+                }
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0),
+            dict = com.example.novelscraper.translation.v2.settings.V2DictSettings(
+                enabled = true,
+                providerId = "gemini",
+                model = "gemini-3.5-flash"
+            )
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(3, summary.totalFiles)
+        assertEquals(3, summary.completedFiles)
+        val outDir = store.findChild(folder.uri, "翻訳完了_LLM")!!
+        val names = store.children(outDir.uri).map { it.name }
+        assertTrue(names.containsAll(listOf("s1.txt", "s2.txt", "big.txt")))
+        assertTrue(names.none { it.endsWith(".failed") })
+        assertEquals(small, store.readText(store.findChild(outDir.uri, "s1.txt")!!.uri))
+        val bigOut = store.readText(store.findChild(outDir.uri, "big.txt")!!.uri)!!
+        assertEquals(bigBody.lines().count { it.isNotBlank() }, bigOut.lines().count { it.isNotBlank() })
+        assertEquals(
+            bigBody.lines().first { it.isNotBlank() },
+            bigOut.lines().first { it.isNotBlank() }
+        )
+        assertEquals(
+            bigBody.lines().last { it.isNotBlank() },
+            bigOut.lines().last { it.isNotBlank() }
+        )
+        // 大ファイル作業所は掃除され、辞書は公開される
+        assertTrue(store.children(outDir.uri).none { it.isDirectory })
+        assertNotNull(store.findChild(folder.uri, "dictionary.json"))
+        // 再実行は早期スキップ
+        val summary2 = engine.run(listOf(folder.uri), settings)
+        assertEquals(3, summary2.completedFiles)
     }
 
     @Test
@@ -443,8 +609,7 @@ class V2EngineTest {
             options = EngineOptions(
                 workerStaggerSec = 0,
                 minSendIntervalMs = 0L,
-                maxSameRetries = 0,
-                unmanagedCooldownSec = 0
+                maxSameRetries = 0
             ),
             handlerFactory = { _, _, _ -> handler }
         )
@@ -452,7 +617,8 @@ class V2EngineTest {
             geminiKeys = emptyList(),
             openRouterKey = "or-key",
             profiles = listOf(V2ModelProfile(providerId = "openrouter", model = "x/y")),
-            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0)
+            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0),
+            geminiCooldownSec = 0
         )
         val summary = engine.run(listOf(folder.uri), settings)
         assertFalse(summary.aborted)
@@ -574,6 +740,146 @@ class V2EngineTest {
     }
 
     @Test
+    fun testRunEngine_FailedFilesNotReprocessed() = kotlinx.coroutines.runBlocking {
+        // 単体失敗は既存集合に登録され、後続ワーカーが拾い直さない（低速ワーカーの追いつき対策）
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-nodup")
+        for (name in listOf("a.txt", "b.txt", "c.txt")) {
+            val doc = store.createFile(folder.uri, name, "text/plain")!!
+            store.writeText(doc.uri, "これはテストの本文です。勇者が旅に出ました。")
+        }
+        val calls = java.util.concurrent.atomic.AtomicInteger(0)
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                calls.incrementAndGet()
+                return LlmResult.Failure(ClassifiedFailure(FailureKind.BLOCKED_DETERMINISTIC, note = "SAFETY"))
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(
+                workerStaggerSec = 1,
+                minSendIntervalMs = 0L,
+                batchMaxFiles = 1,
+                maxSameRetries = 0
+            ),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(
+                V2ModelProfile(
+                    providerId = "gemini",
+                    model = "gemini-3.5-flash",
+                    promptOrder = listOf(1),
+                    useCustomPromptOrder = true
+                )
+            ),
+            limits = V2Limits(parallelWorkers = 2, requestDelaySec = 0)
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        // 失敗分も settled 件数に入る。全3件が確定していること
+        assertEquals(3, summary.completedFiles)
+        // 3件×各1回のみ。修正前は追いつきで6回になっていた
+        assertEquals(3, calls.get())
+        val outDir = store.findChild(folder.uri, "翻訳完了_LLM")!!
+        assertEquals(
+            listOf("a.txt.failed", "b.txt.failed", "c.txt.failed"),
+            store.children(outDir.uri).map { it.name }.filter { it != ".lang_cache" }.sorted()
+        )
+    }
+
+    @Test
+    fun testRunEngine_TransientFailureDoesNotCreateFailedFile() = kotlinx.coroutines.runBlocking {
+        // 通信瞬断・5xx・レート制限などの外的要因は.failedを作成せず保留する
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-transient")
+        val doc = store.createFile(folder.uri, "test.txt", "text/plain")!!
+        store.writeText(doc.uri, "テスト本文")
+
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                return LlmResult.Failure(ClassifiedFailure(FailureKind.RETRYABLE_AFTER, note = "503 Service Unavailable"))
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(
+                workerStaggerSec = 0,
+                minSendIntervalMs = 0L,
+                batchMaxFiles = 1,
+                maxSameRetries = 0
+            ),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(
+                V2ModelProfile(
+                    providerId = "gemini",
+                    model = "gemini-3.5-flash",
+                    promptOrder = listOf(1),
+                    useCustomPromptOrder = true
+                )
+            ),
+            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0)
+        )
+        engine.run(listOf(folder.uri), settings)
+        val outDir = store.findChild(folder.uri, "翻訳完了_LLM")
+        // .failed は作成されない
+        val failedFiles = if (outDir != null) {
+            store.children(outDir.uri).map { it.name }.filter { it.endsWith(".failed") }
+        } else {
+            emptyList()
+        }
+        assertTrue(failedFiles.isEmpty())
+    }
+
+    @Test
+    fun testRunEngine_LangCacheNoDuplicate() = kotlinx.coroutines.runBlocking {
+        // 古い一覧＋自動リネーム環境でも ".lang_cache (1)" を作らない
+        val fake = StaleRenameStore()
+        val folder = fake.inner.createRoot("novel-lang")
+        val doc = fake.inner.createFile(folder.uri, "a.txt", "text/plain")!!
+        fake.inner.writeText(doc.uri, "これはテストの本文です。勇者が旅に出ました。")
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = fake,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0)
+        )
+        val first = engine.run(listOf(folder.uri), settings)
+        assertEquals(1, first.completedFiles)
+        assertNotNull(fake.inner.findChild(folder.uri, ".lang_cache"))
+        assertEquals("JA", fake.inner.readText(fake.inner.findChild(folder.uri, ".lang_cache")!!.uri))
+        // 訳文を消して再作業させる（古い一覧で既存キャッシュを見落とす状況）
+        val outDir = fake.inner.findChild(folder.uri, "翻訳完了_LLM")!!
+        fake.inner.deleteFile(fake.inner.findChild(outDir.uri, "a.txt")!!.uri)
+        fake.staleMatcher = { it == ".lang_cache" }
+        fake.staleFails = 2
+        val second = engine.run(listOf(folder.uri), settings)
+        assertFalse(second.aborted)
+        assertEquals(1, second.completedFiles)
+        val names = fake.childNames(folder.uri)
+        assertTrue(names.none { it.contains("(1)") })
+        assertEquals("JA", fake.inner.readText(fake.inner.findChild(folder.uri, ".lang_cache")!!.uri))
+        assertNotNull(fake.inner.findChild(outDir.uri, "a.txt"))
+    }
+
+    @Test
     fun testRunEngine_PreSplit() = kotlinx.coroutines.runBlocking {
         val store = InMemoryFileStore()
         val folder = store.createRoot("novel")
@@ -602,6 +908,8 @@ class V2EngineTest {
         assertTrue(summary.completedFiles > 1)
         // Parts translate inside the split subfolder; the parent is not translated directly.
         assertNull(store.findChild(folder.uri, settings.limits.outputSubDir))
+        assertNotNull(store.findChild(folder.uri, ".lang_cache"))
+        assertEquals("JA", store.readText(store.findChild(folder.uri, ".lang_cache")!!.uri))
         val splitDir = store.children(folder.uri).firstOrNull { it.isDirectory }
         assertNotNull(splitDir)
         val novelDir = store.children(splitDir!!.uri).firstOrNull { it.isDirectory }
@@ -785,5 +1093,44 @@ class V2EngineTest {
         val ch3 = seen.firstOrNull { it.first.contains("第3話の文章") }
         assertNotNull(ch3)
         assertTrue(ch3!!.second.contains("森を抜けました"))
+    }
+
+    @Test
+    fun testRunEngine_PreSplit_DictFailed_DoesNotTranslateRawParent() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val root = store.createRoot("novel")
+        val raw = store.createFile(root.uri, "large_story.txt", "text/plain")!!
+        store.writeText(raw.uri, "主人公キム・ミンジュンが旅に出た。\n".repeat(200))
+
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.IO),
+            handlerFactory = { _, profile, _ ->
+                object : ProviderHandler {
+                    override suspend fun call(request: LlmRequest): LlmResult {
+                        if (request.model == "dict-model") {
+                            // 辞書生成APIが失敗した場合
+                            return LlmResult.Failure(ClassifiedFailure(FailureKind.CONFIG))
+                        }
+                        return LlmResult.Success("訳文\n[SRC_END]")
+                    }
+                }
+            }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("key1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            dict = V2DictSettings(
+                enabled = true,
+                model = "dict-model"
+            ),
+            split = V2SplitSettings(
+                enabled = true,
+                splitSizeChars = 500
+            )
+        )
+        val summary = engine.run(listOf(root.uri), settings)
+        // 辞書未完成のため翻訳は中断・スキップされ、親ファイルの生テキストが直接翻訳される事故（completedFiles > 0）がないこと
+        assertEquals(0, summary.completedFiles)
     }
 }

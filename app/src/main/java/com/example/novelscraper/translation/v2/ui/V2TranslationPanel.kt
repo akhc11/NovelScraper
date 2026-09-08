@@ -39,7 +39,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -48,8 +50,8 @@ import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.ui.theme.AppColors
 
 /**
- * v2実行パネル（新旧比較用のv2入口）。状態表示のみで判定はViewModel/Engineに寄せる。
- * 旧LlmTranslationPanelと並べて置き、同一フォルダ群で新旧比較できる構成にする（旧削除は工程6）。
+ * v2実行パネル（新旧比較用のv2入口）。開始前のプリフライト判定（モデル・キー・設定エラー）も行い、
+ * 本判定はViewModel/Engine側でも重ねて行う。
  */
 @Composable
 fun V2TranslationPanel(viewModel: V2TranslationViewModel) {
@@ -59,6 +61,7 @@ fun V2TranslationPanel(viewModel: V2TranslationViewModel) {
     val importWarnings by viewModel.importWarnings.collectAsState()
     var showSettings by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
 
     val folderLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -70,7 +73,7 @@ fun V2TranslationPanel(viewModel: V2TranslationViewModel) {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
             } catch (_: Exception) {
-                // 権限確保の失敗は握り潰さず次段の表示で扱う（起動時に読めなければログに出る）
+                // 権限確保に失敗しても中断せず、フォルダ読込失敗としてエンジンログに残る
             }
             val doc = DocumentFile.fromTreeUri(context, treeUri)
             val folderName = doc?.name ?: treeUri.lastPathSegment ?: "選択フォルダ"
@@ -295,30 +298,70 @@ fun V2TranslationPanel(viewModel: V2TranslationViewModel) {
                 )
             }
             Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "実行ログ (${engineState.logs.size}件):",
+                    color = AppColors.textSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                if (engineState.logs.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .clickable {
+                                clipboardManager.setText(AnnotatedString(engineState.logs.joinToString("\n")))
+                                android.widget.Toast.makeText(context, "ログをクリップボードにコピーしました", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                            .background(Color(0xFF1B2E2B), RoundedCornerShape(3.dp))
+                            .border(1.dp, AppColors.accentTeal, RoundedCornerShape(3.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("📋 全ログコピー", color = AppColors.accentTealLight, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(100.dp)
+                    .height(200.dp)
                     .background(Color(0xFF0F1416), RoundedCornerShape(4.dp))
+                    .border(1.dp, Color(0xFF1F292E), RoundedCornerShape(4.dp))
                     .padding(6.dp)
             ) {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    reverseLayout = true
-                ) {
-                    items(engineState.logs.reversed()) { logLine ->
-                        Text(
-                            logLine,
-                            color = when {
+                if (engineState.logs.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("ログはまだありません", color = AppColors.textTertiary, fontSize = 11.sp)
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        reverseLayout = false
+                    ) {
+                        // 最新のログが最上部に見えるように reversed() のみを使用（二重反転解消）
+                        items(engineState.logs.reversed()) { logLine ->
+                            val color = when {
                                 logLine.contains("✅") -> Color(0xFF81C784)
                                 logLine.contains("❌") -> Color(0xFFE57373)
                                 logLine.contains("⚠️") -> Color(0xFFFFB74D)
-                                logLine.contains("🔁") || logLine.contains("abort") || logLine.contains("stopped") -> Color(0xFF64B5F6)
-                                else -> AppColors.textTertiary
-                            },
-                            fontSize = 10.sp,
-                            lineHeight = 13.sp
-                        )
+                                logLine.contains("🔄") || logLine.contains("🔁") -> Color(0xFF64B5F6)
+                                logLine.contains("📝") || logLine.contains("📄") || logLine.contains("🚀") -> AppColors.accentTealLight
+                                logLine.contains("⏳") -> Color(0xFFFFD54F)
+                                else -> AppColors.textPrimary
+                            }
+                            Text(
+                                text = logLine,
+                                color = color,
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp,
+                                modifier = Modifier.padding(vertical = 1.dp)
+                            )
+                        }
                     }
                 }
             }

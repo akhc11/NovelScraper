@@ -141,6 +141,16 @@ class V2SettingsValidationTest {
     }
 
     @Test
+    fun testDictThinkingLevel_WarnsOnly() {
+        val settings = base().copy(
+            dict = V2DictSettings(enabled = true, providerId = "gemini", model = "gemma-4-31b-it", thinkingLevel = "high")
+        )
+        val issues = validateV2Settings(settings)
+        assertFalse(issues.any { it.blocksSave })
+        assertTrue(issues.any { it.message.contains("辞書") && it.message.contains("thinkingLevel") })
+    }
+
+    @Test
     fun testUnknownProvider_Blocks() {
         val settings = base().copy(
             profiles = listOf(V2ModelProfile(providerId = "groq", model = "llama"))

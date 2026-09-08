@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.novelscraper.translation.v2.domain.ProviderId
+import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.V2DeclaredEncoding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -91,132 +92,8 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
 
             val geminiKeys = root.stringList("geminiApiKeys")
             val openRouterKey = root.stringOr("openRouterApiKey", "")
-
-            val profiles = mutableListOf<V2ModelProfile>()
-            val rawProfiles = root["modelProfiles"] as? JsonArray
-            if (rawProfiles != null) {
-                for (element in rawProfiles) {
-                    val p = element as? JsonObject ?: continue
-                    val provider = p.stringOr("provider", "GEMINI").uppercase()
-                    if (provider != "GEMINI" && provider != "OPENROUTER") {
-                        warnings.add("未対応プロバイダーのため除外: $provider")
-                        continue
-                    }
-                    val model = p.stringOr("modelName", "").trim()
-                    if (model.isEmpty()) {
-                        warnings.add("モデル名空のため除外")
-                        continue
-                    }
-                    profiles.add(
-                        V2ModelProfile(
-                            id = p.stringOr("id", ""),
-                            providerId = provider.lowercase(),
-                            model = model,
-                            temperature = p.nullableDouble("temperature"),
-                            thinkingLevel = p.stringOr("thinkingLevel", "").ifBlank { null },
-                            thinkingBudget = p.nullableInt("thinkingBudget"),
-                            topP = p.nullableDouble("topP"),
-                            repetitionPenalty = p.nullableDouble("repetitionPenalty"),
-                            reasoningEffort = p.stringOr("reasoningEffort", "").ifBlank { null },
-                            reasoningEnabled = p.nullableBoolean("reasoningEnabled"),
-                            providerOrder = p.stringList("providerOrder"),
-                            providerAllowFallbacks = p.nullableBoolean("providerAllowFallbacks"),
-                            useJsonSchema = p.booleanOr("useJsonSchema", false),
-                            promptOrder = p.intList("promptOrder")
-                                .filter { it in 1..7 }.ifEmpty { listOf(1, 1) },
-                            useCustomPromptOrder = p.booleanOr("useCustomPromptOrder", false),
-                            maxOutputChars = p.intOr("maxOutputChars", 15000).coerceIn(2000, 100000)
-                        )
-                    )
-                }
-            }
-
-            val dictProviderId = root.stringOr("dictProvider", "GEMINI").lowercase()
-                .takeIf { ProviderId.parse(it) != null } ?: run {
-                warnings.add("辞書プロバイダー不明のためGemini扱い")
-                "gemini"
-            }
-            val dictModelKey = if (dictProviderId == "openrouter") "dictOpenRouterModel" else "dictGeminiModel"
-            val dictMergeKey =
-                if (dictProviderId == "openrouter") "dictOpenRouterMergeModel" else "dictGeminiMergeModel"
-            val dict = V2DictSettings(
-                enabled = root.booleanOr("enableDictGen", false),
-                providerId = dictProviderId,
-                model = root.stringOr(dictModelKey, "").ifBlank { root.stringOr("dictModel", "") },
-                mergeModel = root.stringOr(dictMergeKey, "").ifBlank { root.stringOr("dictMergeModel", "") },
-                thinkingLevel = root.stringOr("dictThinkingLevel", "").ifBlank { null },
-                providerOrder = root.stringList("dictOpenRouterProviderOrder"),
-                providerAllowFallbacks = root.nullableBoolean("dictOpenRouterProviderAllowFallbacks"),
-                workerCount = root.intOr("dictWorkerCount", 6).coerceIn(1, 30),
-                concurrencyPerWorker = root.intOr("dictConcurrencyPerWorker", 5).coerceIn(1, 10),
-                totalParts = root.intOr("dictTotalParts", 100).coerceAtLeast(0),
-                batchMaxBytes = root.intOr("dictBatchMaxBytes", 100000).coerceIn(4000, 200000),
-                requestDelaySec = root.intOr("dictRequestDelaySec", 0).coerceAtLeast(0),
-                cooldown429Sec = root.intOr("dict429CooldownSec", 60).coerceIn(5, 300)
-            )
-
-            val limits = V2Limits(
-                parallelWorkers = root.intOr("parallelWorkers", 3).coerceIn(1, 6),
-                requestDelaySec = root.intOr("requestDelaySec", 10).coerceAtLeast(0),
-                filesPerFolder = root.intOr("filesPerFolder", 0).coerceAtLeast(0),
-                outputSubDir = root.stringOr("outputSubDir", "翻訳完了_LLM").ifBlank { "翻訳完了_LLM" }
-            )
-
-            val split = V2SplitSettings(
-                enabled = root.booleanOr("enableTextSplit", false),
-                splitSizeChars = root.intOr("textSplitSizeChars", 7000).coerceAtLeast(500),
-                inputEncoding = root.stringOr("inputEncoding", "AUTO")
-                    .takeIf { V2DeclaredEncoding.parseOrNull(it) != null || it == "AUTO" }
-                    ?: "AUTO"
-            )
-
-            val prevContext = V2PrevContext(
-                enabled = root.booleanOr("enablePrevSrcContext", false),
-                lines = root.intOr("prevSrcContextLines", 20).coerceIn(1, 100)
-            )
-
-            val promptSelection = V2PromptSelection(
-                autoEnabled = root.booleanOr("enableAutoPromptOrder", false),
-                autoOrderKo = root.intList("autoPromptOrderKorean").filter { it in 1..7 }.ifEmpty { listOf(3, 7) },
-                autoOrderZh = root.intList("autoPromptOrderChinese").filter { it in 1..7 }.ifEmpty { listOf(1, 1) },
-                autoOrderEn = root.intList("autoPromptOrderEnglish").filter { it in 1..7 }.ifEmpty { listOf(2, 7) }
-            )
-
-            val customPrompts = mutableMapOf<Int, String>()
-            val rawCustomPrompts = root["customPrompts"] as? JsonObject
-            if (rawCustomPrompts != null) {
-                for ((k, v) in rawCustomPrompts) {
-                    val num = k.toIntOrNull() ?: continue
-                    val text = (v as? JsonPrimitive)?.content ?: continue
-                    if (num in 1..7 && text.isNotBlank()) {
-                        customPrompts[num] = text
-                    }
-                }
-            }
-
-            val promptPresets = mutableListOf<V2PromptPreset>()
-            val rawPresets = root["promptPresets"] as? JsonArray
-            if (rawPresets != null) {
-                for (elem in rawPresets) {
-                    val obj = elem as? JsonObject ?: continue
-                    val label = obj.stringOr("label", "").trim()
-                    val order = obj.intList("order").filter { it in 1..7 }
-                    if (label.isNotEmpty() && order.isNotEmpty()) {
-                        promptPresets.add(V2PromptPreset(id = obj.stringOr("id", ""), label = label, order = order))
-                    }
-                }
-            }
-
-            val sizeRatios = V2SizeRatios(
-                zhMin = root.intOr("sizeRatioZhMin", 102),
-                zhMax = root.intOr("sizeRatioZhMax", 200),
-                koMin = root.intOr("sizeRatioKoMin", 90),
-                koMax = root.intOr("sizeRatioKoMax", 150),
-                enMin = root.intOr("sizeRatioEnMin", 105),
-                enMax = root.intOr("sizeRatioEnMax", 220),
-                jaMin = root.intOr("sizeRatioJaMin", 100),
-                jaMax = root.intOr("sizeRatioJaMax", 200)
-            )
+            val profiles = importProfiles(root, warnings)
+            val dict = importDict(root, warnings)
 
             return LegacyImport(
                 V2Settings(
@@ -227,17 +104,186 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
                         listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash"))
                     },
                     dict = dict,
-                    limits = limits,
-                    split = split,
-                    prevContext = prevContext,
-                    promptSelection = promptSelection,
-                    customPrompts = customPrompts,
-                    promptPresets = promptPresets.ifEmpty { defaultV2PromptPresets() },
-                    sizeRatios = sizeRatios,
+                    limits = importLimits(root),
+                    split = importSplit(root),
+                    prevContext = importPrevContext(root),
+                    promptSelection = importPromptSelection(root),
+                    customPrompts = importCustomPrompts(root),
+                    promptPresets = importPromptPresets(root).ifEmpty { defaultV2PromptPresets() },
+                    sizeRatios = importSizeRatios(root),
                     geminiRotationEnabled = root.booleanOr("geminiRotationEnabled", true),
-                    geminiCooldownSec = root.intOr("geminiCooldownSec", 60).coerceIn(5, 300)
+                    geminiCooldownSec = root.intOr("geminiCooldownSec", 60).coerceIn(
+                        TranslationLimits.COOLDOWN_MIN_SEC,
+                        TranslationLimits.COOLDOWN_MAX_SEC
+                    )
                 ),
                 warnings
+            )
+        }
+
+        /** 区分別の取込（各項目の採用／警告分岐はここに閉じる）。 */
+        private fun importProfiles(root: JsonObject, warnings: MutableList<String>): List<V2ModelProfile> {
+            val profiles = mutableListOf<V2ModelProfile>()
+            val rawProfiles = root["modelProfiles"] as? JsonArray ?: return profiles
+            for (element in rawProfiles) {
+                val p = element as? JsonObject ?: continue
+                val provider = ProviderId.parse(p.stringOr("provider", "GEMINI"))
+                if (provider == null) {
+                    warnings.add("未対応プロバイダーのため除外: ${p.stringOr("provider", "GEMINI").uppercase()}")
+                    continue
+                }
+                val model = p.stringOr("modelName", "").trim()
+                if (model.isEmpty()) {
+                    warnings.add("モデル名空のため除外")
+                    continue
+                }
+                profiles.add(
+                    V2ModelProfile(
+                        id = p.stringOr("id", ""),
+                        providerId = provider.id,
+                        model = model,
+                        temperature = p.nullableDouble("temperature"),
+                        thinkingLevel = p.stringOr("thinkingLevel", "").ifBlank { null },
+                        thinkingBudget = p.nullableInt("thinkingBudget"),
+                        topP = p.nullableDouble("topP"),
+                        repetitionPenalty = p.nullableDouble("repetitionPenalty"),
+                        reasoningEffort = p.stringOr("reasoningEffort", "").ifBlank { null },
+                        reasoningEnabled = p.nullableBoolean("reasoningEnabled"),
+                        providerOrder = p.stringList("providerOrder"),
+                        providerAllowFallbacks = p.nullableBoolean("providerAllowFallbacks"),
+                        useJsonSchema = p.booleanOr("useJsonSchema", false),
+                        promptOrder = p.intList("promptOrder")
+                            .filter { it in TranslationLimits.PROMPT_NUMBER_RANGE }.ifEmpty { listOf(1, 1) },
+                        useCustomPromptOrder = p.booleanOr("useCustomPromptOrder", false),
+                        maxOutputChars = p.intOr("maxOutputChars", 15000).coerceIn(
+                            TranslationLimits.OUTPUT_CHARS_RANGE.first,
+                            TranslationLimits.OUTPUT_CHARS_RANGE.last
+                        )
+                    )
+                )
+            }
+            return profiles
+        }
+
+        private fun importDict(root: JsonObject, warnings: MutableList<String>): V2DictSettings {
+            val dictProviderId = root.stringOr("dictProvider", "GEMINI").lowercase()
+                .takeIf { ProviderId.parse(it) != null } ?: run {
+                warnings.add("辞書プロバイダー不明のためGemini扱い")
+                "gemini"
+            }
+            val dictModelKey = if (dictProviderId == "openrouter") "dictOpenRouterModel" else "dictGeminiModel"
+            val dictMergeKey =
+                if (dictProviderId == "openrouter") "dictOpenRouterMergeModel" else "dictGeminiMergeModel"
+            return V2DictSettings(
+                enabled = root.booleanOr("enableDictGen", false),
+                providerId = dictProviderId,
+                model = root.stringOr(dictModelKey, "").ifBlank { root.stringOr("dictModel", "") },
+                mergeModel = root.stringOr(dictMergeKey, "").ifBlank { root.stringOr("dictMergeModel", "") },
+                thinkingLevel = root.stringOr("dictThinkingLevel", "").ifBlank { null },
+                providerOrder = root.stringList("dictOpenRouterProviderOrder"),
+                providerAllowFallbacks = root.nullableBoolean("dictOpenRouterProviderAllowFallbacks"),
+                workerCount = root.intOr("dictWorkerCount", 6).coerceIn(
+                    TranslationLimits.DICT_WORKER_RANGE.first,
+                    TranslationLimits.DICT_WORKER_RANGE.last
+                ),
+                concurrencyPerWorker = root.intOr("dictConcurrencyPerWorker", 5).coerceIn(
+                    TranslationLimits.DICT_CONCURRENCY_RANGE.first,
+                    TranslationLimits.DICT_CONCURRENCY_RANGE.last
+                ),
+                totalParts = root.intOr("dictTotalParts", 100).coerceAtLeast(0),
+                batchMaxBytes = root.intOr("dictBatchMaxBytes", 100000).coerceIn(
+                    TranslationLimits.DICT_BATCH_BYTES_RANGE.first,
+                    TranslationLimits.DICT_BATCH_BYTES_RANGE.last
+                ),
+                requestDelaySec = root.intOr("dictRequestDelaySec", 0).coerceAtLeast(0),
+                cooldown429Sec = root.intOr("dict429CooldownSec", 60).coerceIn(
+                    TranslationLimits.COOLDOWN_MIN_SEC,
+                    TranslationLimits.COOLDOWN_MAX_SEC
+                )
+            )
+        }
+
+        private fun importLimits(root: JsonObject): V2Limits {
+            return V2Limits(
+                parallelWorkers = root.intOr("parallelWorkers", 3).coerceIn(
+                    TranslationLimits.WORKER_COUNT_RANGE.first,
+                    TranslationLimits.WORKER_COUNT_RANGE.last
+                ),
+                requestDelaySec = root.intOr("requestDelaySec", 10).coerceAtLeast(0),
+                filesPerFolder = root.intOr("filesPerFolder", 0).coerceAtLeast(0),
+                outputSubDir = root.stringOr("outputSubDir", "翻訳完了_LLM").ifBlank { "翻訳完了_LLM" }
+            )
+        }
+
+        private fun importSplit(root: JsonObject): V2SplitSettings {
+            return V2SplitSettings(
+                enabled = root.booleanOr("enableTextSplit", false),
+                splitSizeChars = root.intOr("textSplitSizeChars", 7000).coerceAtLeast(TranslationLimits.SPLIT_MIN_CHARS),
+                inputEncoding = root.stringOr("inputEncoding", "AUTO")
+                    .takeIf { V2DeclaredEncoding.parseOrNull(it) != null || it == "AUTO" }
+                    ?: "AUTO"
+            )
+        }
+
+        private fun importPrevContext(root: JsonObject): V2PrevContext {
+            return V2PrevContext(
+                enabled = root.booleanOr("enablePrevSrcContext", false),
+                lines = root.intOr("prevSrcContextLines", 20).coerceIn(
+                    TranslationLimits.PREV_LINES_RANGE.first,
+                    TranslationLimits.PREV_LINES_RANGE.last
+                )
+            )
+        }
+
+        private fun importPromptSelection(root: JsonObject): V2PromptSelection {
+            return V2PromptSelection(
+                autoEnabled = root.booleanOr("enableAutoPromptOrder", false),
+                autoOrderKo = root.intList("autoPromptOrderKorean")
+                    .filter { it in TranslationLimits.PROMPT_NUMBER_RANGE }.ifEmpty { listOf(3, 7) },
+                autoOrderZh = root.intList("autoPromptOrderChinese")
+                    .filter { it in TranslationLimits.PROMPT_NUMBER_RANGE }.ifEmpty { listOf(1, 1) },
+                autoOrderEn = root.intList("autoPromptOrderEnglish")
+                    .filter { it in TranslationLimits.PROMPT_NUMBER_RANGE }.ifEmpty { listOf(2, 7) }
+            )
+        }
+
+        private fun importCustomPrompts(root: JsonObject): Map<Int, String> {
+            val customPrompts = mutableMapOf<Int, String>()
+            val rawCustomPrompts = root["customPrompts"] as? JsonObject ?: return customPrompts
+            for ((k, v) in rawCustomPrompts) {
+                val num = k.toIntOrNull() ?: continue
+                val text = (v as? JsonPrimitive)?.content ?: continue
+                if (num in TranslationLimits.PROMPT_NUMBER_RANGE && text.isNotBlank()) {
+                    customPrompts[num] = text
+                }
+            }
+            return customPrompts
+        }
+
+        private fun importPromptPresets(root: JsonObject): List<V2PromptPreset> {
+            val promptPresets = mutableListOf<V2PromptPreset>()
+            val rawPresets = root["promptPresets"] as? JsonArray ?: return promptPresets
+            for (elem in rawPresets) {
+                val obj = elem as? JsonObject ?: continue
+                val label = obj.stringOr("label", "").trim()
+                val order = obj.intList("order").filter { it in TranslationLimits.PROMPT_NUMBER_RANGE }
+                if (label.isNotEmpty() && order.isNotEmpty()) {
+                    promptPresets.add(V2PromptPreset(id = obj.stringOr("id", ""), label = label, order = order))
+                }
+            }
+            return promptPresets
+        }
+
+        private fun importSizeRatios(root: JsonObject): V2SizeRatios {
+            return V2SizeRatios(
+                zhMin = root.intOr("sizeRatioZhMin", 102),
+                zhMax = root.intOr("sizeRatioZhMax", 200),
+                koMin = root.intOr("sizeRatioKoMin", 90),
+                koMax = root.intOr("sizeRatioKoMax", 150),
+                enMin = root.intOr("sizeRatioEnMin", 105),
+                enMax = root.intOr("sizeRatioEnMax", 220),
+                jaMin = root.intOr("sizeRatioJaMin", 100),
+                jaMax = root.intOr("sizeRatioJaMax", 200)
             )
         }
 

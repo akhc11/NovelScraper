@@ -31,7 +31,7 @@ import com.example.novelscraper.ui.theme.AppColors
 
 /**
  * 能力駆動の動的フォーム。有効な項目のみ出す（表示＝変更が反映される）。
- * 未指定（null）は送信しない。範囲外は能力範囲に丸めて警告する。
+ * 未指定（null）は送信しない（ただしmaxOutputTokensは能力最大値で送信する）。範囲外は能力範囲に丸めて警告する。
  */
 @Composable
 fun ThinkingLevelEditor(
@@ -78,7 +78,7 @@ fun NullableDoubleEditor(
                             onChange(null)
                             return@BasicTextField
                         }
-                        val parsed = str.toDoubleOrNull() ?: return@BasicTextField
+                        val parsed = str.toDoubleOrNull()?.takeIf { it.isFinite() } ?: return@BasicTextField
                         val fixed = if (range != null) parsed.coerceIn(range.min, range.max) else parsed
                         onChange(fixed)
                     },

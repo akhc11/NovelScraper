@@ -18,19 +18,37 @@ fun resolveReasoningEffort(raw: String?): String? {
     return if (normalized in OPENROUTER_REASONING_EFFORTS) normalized else null
 }
 
-/** 空要素除去・重複除去・上限打切り。長大な単体名は混入させない */
-fun resolveProviderOrder(raw: List<String>): List<String> {
-    if (raw.isEmpty()) return emptyList()
-    val out = LinkedHashSet<String>()
-    for (entry in raw) {
-        val trimmed = entry.trim()
-        if (trimmed.isEmpty()) continue
-        if (trimmed.length > OPENROUTER_PROVIDER_NAME_MAX) continue
-        out.add(trimmed)
-        if (out.size >= OPENROUTER_PROVIDER_ORDER_MAX) break
-    }
-    return out.toList()
+data class ProviderOrderReport(
+    val resolved: List<String>,
+    val droppedBlanks: Boolean,
+    val droppedDupes: Boolean,
+    val droppedLong: Boolean,
+    val truncated: Boolean
+)
+
+/** 空要素除去・重複除去・上限打切り。長大な単体名は混入させない。検証警告は本報告から生成する（二重実装の防止） */
+fun resolveProviderOrderReport(raw: List<String>): ProviderOrderReport {
+    if (raw.isEmpty()) return ProviderOrderReport(emptyList(), false, false, false, false)
+    val trimmed = raw.map { it.trim() }
+    val droppedBlanks = trimmed.any { it.isEmpty() }
+    val nonBlank = trimmed.filter { it.isNotEmpty() }
+    val droppedLong = nonBlank.any { it.length > OPENROUTER_PROVIDER_NAME_MAX }
+    val admissible = nonBlank.filter { it.length <= OPENROUTER_PROVIDER_NAME_MAX }
+    val distinct = admissible.distinct()
+    val droppedDupes = distinct.size < admissible.size
+    val resolved = distinct.take(OPENROUTER_PROVIDER_ORDER_MAX)
+    return ProviderOrderReport(
+        resolved = resolved,
+        droppedBlanks = droppedBlanks,
+        droppedDupes = droppedDupes,
+        droppedLong = droppedLong,
+        truncated = resolved.size < distinct.size
+    )
 }
+
+/** 空要素除去・重複除去・上限打切り。長大な単体名は混入させない */
+fun resolveProviderOrder(raw: List<String>): List<String> =
+    resolveProviderOrderReport(raw).resolved
 
 data class ResolvedOpenRouterParams(
     val reasoningEffort: String?,

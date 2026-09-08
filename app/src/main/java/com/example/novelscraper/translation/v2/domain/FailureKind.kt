@@ -38,3 +38,20 @@ data class ClassifiedFailure(
     val configKind: ConfigKind = ConfigKind.UNKNOWN,
     val note: String = ""
 )
+
+/**
+ * 失敗分组の単一真実。A-2の教訓：分组が各所に分散すると必ず乖離する。
+ * なお attemptDrivers/Rotation の振分けは将来種別の検出のため enum 網羅 when のままとする。
+ */
+/** 再送不能の確定失敗（再送しても直らない） */
+fun FailureKind.isDeterministic(): Boolean =
+    this == FailureKind.BLOCKED_DETERMINISTIC || this == FailureKind.CONFIG
+
+/** 制限系（待機後再送の対象。FATALは含まない） */
+fun FailureKind.isQuotaLike(): Boolean =
+    this == FailureKind.QUOTA_DAILY ||
+        this == FailureKind.QUOTA_MINUTE ||
+        this == FailureKind.RETRYABLE_AFTER
+
+/** 即時確定（待機再送の対象外） */
+fun FailureKind.isTerminal(): Boolean = this == FailureKind.FATAL || isDeterministic()

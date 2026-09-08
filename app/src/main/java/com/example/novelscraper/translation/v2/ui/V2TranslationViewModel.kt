@@ -7,8 +7,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
+import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.RequestOptions
 import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
+import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.engine.EngineState
 import com.example.novelscraper.translation.v2.engine.RunEngine
 import com.example.novelscraper.translation.v2.engine.RunSummary
@@ -203,13 +205,13 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
         try {
             if (profile.model.isBlank()) return@withContext "NG: モデル名が空です"
             val current = settings.value
-            val key = when (profile.providerId) {
-                "gemini" -> current.geminiKeys.firstOrNull { it.isNotBlank() } ?: return@withContext "NG: Geminiキー未設定"
-                "openrouter" -> current.openRouterKey.ifBlank { return@withContext "NG: OpenRouterキー未設定" }
-                else -> return@withContext "NG: 未対応プロバイダー"
+            val key = when (profile.providerId.toProviderId()) {
+                ProviderId.GEMINI -> current.geminiKeys.firstOrNull { it.isNotBlank() } ?: return@withContext "NG: Geminiキー未設定"
+                ProviderId.OPENROUTER -> current.openRouterKey.ifBlank { return@withContext "NG: OpenRouterキー未設定" }
+                null -> return@withContext "NG: 未対応プロバイダー"
             }
-            val handler = when (profile.providerId) {
-                "gemini" -> GeminiHandler(apiKey = key)
+            val handler = when (profile.providerId.toProviderId()) {
+                ProviderId.GEMINI -> GeminiHandler(apiKey = key)
                 else -> {
                     val resolved = resolveOpenRouterParams(profile)
                     OpenRouterHandler(

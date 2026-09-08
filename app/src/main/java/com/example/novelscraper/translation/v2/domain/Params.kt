@@ -3,6 +3,7 @@ package com.example.novelscraper.translation.v2.domain
 /**
  * 値解決の単一則：「プリセット既定＜ユーザー上書き」、空＝未指定（未送信）。
  * 範囲外は能力範囲に丸めて警告対象にする。pure・副作用なし。
+ * なおRotation経路ではプリセット層を使わずプロファイル値のみで解決する。
  */
 data class Resolved<T>(val value: T, val coerced: Boolean)
 
@@ -15,9 +16,10 @@ fun resolveOption(allowedValues: Set<String>?, preset: String?, override: String
     return chosen
 }
 
-/** 数値式。範囲外は丸める */
+/** 数値式。範囲外は丸める。非有限数（NaN/Infinity）は未指定に落とす（送るとJSON化で必ず失敗するため） */
 fun resolveDouble(range: SamplingParam?, preset: Double?, override: Double?): Resolved<Double?> {
     val chosen = override ?: preset ?: return Resolved(null, false)
+    if (!chosen.isFinite()) return Resolved(null, true)
     if (range == null) return Resolved(chosen, false)
     val fixed = chosen.coerceIn(range.min, range.max)
     return Resolved(fixed, fixed != chosen)

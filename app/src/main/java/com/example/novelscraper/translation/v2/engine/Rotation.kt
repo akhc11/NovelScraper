@@ -4,20 +4,21 @@ import com.example.novelscraper.translation.v2.domain.AcquireResult
 import com.example.novelscraper.translation.v2.domain.ClassifiedFailure
 import com.example.novelscraper.translation.v2.domain.CostMeter
 import com.example.novelscraper.translation.v2.domain.FailureKind
-import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ProviderDescriptor
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
+import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.domain.RequestOptions
 import com.example.novelscraper.translation.v2.domain.ThinkingSupport
+import com.example.novelscraper.translation.v2.domain.TranslationLimits
+import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.domain.V2SendGate
 import com.example.novelscraper.translation.v2.domain.capabilitiesFor
 import com.example.novelscraper.translation.v2.domain.resolveDouble
 import com.example.novelscraper.translation.v2.domain.resolveInt
 import com.example.novelscraper.translation.v2.domain.resolveOption
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
-import kotlinx.coroutines.delay
 
 /** ハンドラー生成。資格情報（キー）とエンドポイントの束縛は呼出側の責務 */
 typealias HandlerFactory = (profile: V2ModelProfile, key: String) -> ProviderHandler
@@ -48,7 +49,8 @@ fun resolveProfileOptions(
         return resolveDouble(range, null, value).value
     }
     val modelMaxTokens = caps?.maxOutputTokens ?: 65536
-    val resolvedMaxTokens = profile.maxOutputTokens?.coerceIn(1000, modelMaxTokens) ?: modelMaxTokens
+    val resolvedMaxTokens = profile.maxOutputTokens?.coerceIn(TranslationLimits.MIN_OUTPUT_TOKENS, modelMaxTokens)
+        ?: modelMaxTokens
     return RequestOptions(
         temperature = gateSampling("temperature", profile.temperature),
         topP = gateSampling("topP", profile.topP),
@@ -61,8 +63,8 @@ fun resolveProfileOptions(
 }
 
 /**
- * ワーカー専有の巡回器。モデル×プロンプト巡回、同一スコープ内の待機再送、
- * キー交代を一本化する。非管理プロバイダーは単発＋ bounded 再送のみ行う。
+ * 管理プロバイダー用巡回器。モデル×プロンプト巡回、同一スコープ内の待機再送、
+ * キー交代を一本化する。非管理のみ構成は [UnmanagedRotation] を使うこと。
  */
 class Rotation(
     private val workerId: Int,
@@ -70,80 +72,71 @@ class Rotation(
     private val pool: QuotaPool?,
     private var keyIndex: Int,
     private var key: String,
-    private val descriptors: Map<String, ProviderDescriptor>,
+    private val descriptors: Map<ProviderId, ProviderDescriptor>,
     private val handlerFactory: HandlerFactory,
     private val openRouterKey: String,
     private val switchCooldownSec: Int = 15,
-    /** 非管理のみ構成（OpenRouter等）のエポック間待機。切替先キーがないための同一キー冷却 */
-    private val unmanagedCooldownSec: Int = 30,
     private val maxSameRetries: Int = 2,
     private val sendGate: V2SendGate? = null,
     private val sendGateIntervalMs: Long = 10_000L,
     private val stopped: () -> Boolean = { false },
     private val meter: CostMeter? = null,
+    private val sleeper: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
     private val log: (String) -> Unit = {}
-) {
-    var exhausted: Boolean = false
+) : PromptRouter {
+    override var exhausted: Boolean = false
         private set
 
     private fun geminiModels(): List<String> =
-        profiles.filter { it.providerId == "gemini" }.map { it.model }
+        profiles.filter { it.providerId.toProviderId() == ProviderId.GEMINI }.map { it.model }
 
     private fun scopesFor(profile: V2ModelProfile): List<String> {
-        val descriptor = descriptors[profile.providerId] ?: return listOf(profile.model)
+        val descriptor = profile.providerId.toProviderId()?.let { descriptors[it] }
+            ?: return listOf(profile.model)
         return listOf(descriptor.quotaScopeOf(profile.model))
     }
 
     private fun managed(profile: V2ModelProfile): Boolean =
-        profile.providerId == "gemini" && pool != null
+        profile.providerId.toProviderId() == ProviderId.GEMINI && pool != null
 
     private fun keyFor(profile: V2ModelProfile): String {
-        return when (profile.providerId) {
-            "gemini" -> key
+        return when (profile.providerId.toProviderId()) {
+            ProviderId.GEMINI -> key
             else -> openRouterKey
         }
     }
 
-    private suspend fun callOnce(profile: V2ModelProfile, prompt: String, source: String, forBatch: Boolean): LlmResult {
-        sendGate?.acquire(sendGateIntervalMs)
-        val descriptor = descriptors[profile.providerId]
-        val options = resolveProfileOptions(profile, descriptor, forBatch)
-            val handler = try {
-                handlerFactory(profile, keyFor(profile))
-            } catch (e: Exception) {
-            return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "handler:${e.message}"))
-        }
-        val result = try {
-            handler.call(LlmRequest(profile.providerId, profile.model, prompt, source, options))
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            LlmResult.Failure(ClassifiedFailure(FailureKind.RETRYABLE_AFTER, note = "io:${e.message}"))
-        }
-        if (result is LlmResult.Success && meter != null) {
-            if (!meter.add(tokens = (result.promptTokens + result.completionTokens).toLong())) {
-                log("[W#$workerId] cost cap reached")
-                return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "cost-cap"))
-            }
-        }
-        return result
-    }
+    private suspend fun callOnce(profile: V2ModelProfile, prompt: String, source: String, forBatch: Boolean): LlmResult =
+        executeLlmCall(
+            workerId,
+            sendGate,
+            sendGateIntervalMs,
+            profile.providerId.toProviderId()?.let { descriptors[it] },
+            profile,
+            prompt,
+            source,
+            forBatch,
+            handlerFactory,
+            keyFor(profile),
+            meter,
+            log
+        )
 
     /**
      * モデル×プロンプト巡回。成功で即返却し、全滅時は最終失敗を返す。
      * 技術的根拠1行：再試行（同一スコープ）と退避（モデル→キー）を一層で直列化し、二重管理をなくす。
      */
-    suspend fun execute(
+    override suspend fun execute(
         prompts: List<String>,
         source: String,
-        profilePrompts: Map<String, List<String>>? = null,
-        forBatch: Boolean = false
+        profilePrompts: Map<String, List<String>>?,
+        forBatch: Boolean
     ): LlmResult {
         if (profiles.isEmpty() || stopped() || exhausted) {
             return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "stopped"))
         }
         var lastFailure: LlmResult.Failure? = null
-        var totalGuard = profiles.size * (prompts.size + 2) * 2 + 8
+        var totalGuard = epochGuard(profiles.size, prompts.size)
 
         keyEpoch@ while (!stopped() && !exhausted) {
             if (totalGuard-- <= 0) {
@@ -194,11 +187,11 @@ class Rotation(
                                         // 待ちは二層で役割が異なる：waitSecはサーバ指示の backoff（429/Retry-After 用）、
                                         // callOnce 側の sendGate は通常時のユーザー指定ペーシング。制限時は合算される。
                                         val waitSec = result.failure.retryAfterSec
-                                            ?.toLong()?.coerceIn(5, 120)
-                                            ?: if (managed(profile)) 2L else 5L
+                                            ?.toLong()?.coerceIn(TranslationLimits.WAIT_MIN_SEC, TranslationLimits.WAIT_MAX_SEC)
+                                            ?: if (managed(profile)) 2L else TranslationLimits.WAIT_MIN_SEC
                                         if (sameLeft > 0) {
                                             sameLeft--
-                                            delay(waitSec * 1000L)
+                                            sleeper(waitSec * 1000L)
                                             continue
                                         }
                                         break
@@ -218,10 +211,11 @@ class Rotation(
             }
             if (!quotaSeenThisEpoch) return lastFailure
                 ?: LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "no-attempt"))
-            // 技術的根拠1行：非管理のみ（OpenRouter等）に切替先キーはなく、空プールのacquireで誤枯渇させるより同一キーのbounded待機再送が正しい（上限はtotalGuard）。
+            // 技術的根拠1行：非管理のみ構成は [UnmanagedRotation] の責務であり、ここでプールに触れると誤枯渇する（S-2）。
+            // 生成時に型で固定する原則のため、ここでは即時確定する（沈黙の誤動作より明示の失敗）。
             if (!profiles.any { managed(it) }) {
-                delay(unmanagedCooldownSec.coerceIn(0, 300) * 1000L)
-                continue@keyEpoch
+                return lastFailure
+                    ?: LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "no-managed-profiles"))
             }
             // 制限系あり：失敗ペアを報告して新キーへ
             val pool = pool
@@ -241,7 +235,7 @@ class Rotation(
                 }
                 is AcquireResult.Wait -> {
                     log("⏳ [W#$workerId] レート制限のため ${claimed.waitMillis / 1000}秒待機中...")
-                    delay(claimed.waitMillis)
+                    sleeper(claimed.waitMillis)
                     continue@keyEpoch
                 }
                 is AcquireResult.Exhausted -> {
@@ -255,7 +249,7 @@ class Rotation(
         return lastFailure ?: LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "stopped"))
     }
 
-    suspend fun release() {
+    override suspend fun release() {
         pool?.release(keyIndex)
     }
 }

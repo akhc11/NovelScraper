@@ -6,6 +6,7 @@ import com.example.novelscraper.translation.v2.domain.GenericErrorMapper
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
+import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -137,7 +138,10 @@ internal fun parseOpenRouterResponse(code: Int, body: String, retryAfterSec: Lon
         return LlmResult.Failure(
             ClassifiedFailure(
                 FailureKind.QUOTA_MINUTE,
-                retryAfterSec = retryAfterSec?.coerceIn(1L, 600L)?.toInt(),
+                retryAfterSec = retryAfterSec?.coerceIn(
+                    TranslationLimits.RETRY_AFTER_MIN_SEC,
+                    TranslationLimits.RETRY_AFTER_MAX_SEC
+                )?.toInt(),
                 note = "429"
             ),
             statusCode = code

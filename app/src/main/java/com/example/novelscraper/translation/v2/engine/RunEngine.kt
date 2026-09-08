@@ -10,7 +10,10 @@ import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.ProviderDescriptor
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
+import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.QuotaPool
+import com.example.novelscraper.translation.v2.domain.TranslationLimits
+import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.domain.V2DeclaredEncoding
 import com.example.novelscraper.translation.v2.domain.V2SendGate
 import com.example.novelscraper.translation.v2.domain.capabilitiesFor
@@ -53,15 +56,14 @@ import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -84,6 +86,8 @@ data class EngineOptions(
     val markerEnabled: Boolean = true,
     val maxSameRetries: Int = 2,
     val switchCooldownSec: Int = 15,
+    /** 非管理のみ構成のエポック間冷却（テストは0にして高速化する） */
+    val unmanagedCooldownSec: Int = 30,
     val workerStaggerSec: Long = 0,
     /** 送信間隔の下限。0時は設定の要求間隔（requestDelaySec）をそのまま使う */
     val minSendIntervalMs: Long = 0L,
@@ -110,6 +114,9 @@ data class EngineState(
 
 data class RunSummary(val folders: Int, val completedFiles: Int, val totalFiles: Int, val aborted: Boolean)
 
+/** 呼出毎コンパイルを避けるための共有正規表現 */
+private val BLANK_LINE_COLLAPSE_REGEX = Regex("\n{3,}")
+
 /**
  * v2実行エンジン。フォルダ巡回・早期スキップ・事前物理分割・辞書・ワーカー分配・中止判定を担う。
  *
@@ -125,9 +132,9 @@ class RunEngine(
     private val store: FileStore,
     private val scope: CoroutineScope,
     private val options: EngineOptions = EngineOptions(),
-    private val descriptors: Map<String, ProviderDescriptor> = mapOf(
-        "gemini" to GEMINI_DESCRIPTOR,
-        "openrouter" to OPENROUTER_DESCRIPTOR
+    private val descriptors: Map<ProviderId, ProviderDescriptor> = mapOf(
+        ProviderId.GEMINI to GEMINI_DESCRIPTOR,
+        ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR
     ),
     /** テスト用の差し替え口。null時は内蔵生成を使う */
     private val handlerFactory: ((V2Settings, V2ModelProfile, String) -> ProviderHandler)? = null
@@ -150,25 +157,25 @@ class RunEngine(
     }
 
     private fun geminiModels(profiles: List<V2ModelProfile>): List<String> =
-        profiles.filter { it.providerId == "gemini" }.map { it.model }
+        profiles.filter { it.providerId.toProviderId() == ProviderId.GEMINI }.map { it.model }
 
     private fun hasUsableKey(settings: V2Settings): Boolean {
         val profiles = settings.profiles
         if (profiles.isEmpty()) return false
-        if (profiles.any { it.providerId == "gemini" } && settings.geminiKeys.any { it.isNotBlank() }) return true
-        if (profiles.any { it.providerId == "openrouter" } && settings.openRouterKey.isNotBlank()) return true
+        if (profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI } && settings.geminiKeys.any { it.isNotBlank() }) return true
+        if (profiles.any { it.providerId.toProviderId() == ProviderId.OPENROUTER } && settings.openRouterKey.isNotBlank()) return true
         return false
     }
 
     private fun hasFallbackKey(settings: V2Settings): Boolean {
-        return settings.profiles.any { it.providerId == "openrouter" } && settings.openRouterKey.isNotBlank()
+        return settings.profiles.any { it.providerId.toProviderId() == ProviderId.OPENROUTER } && settings.openRouterKey.isNotBlank()
     }
 
     /** 中止判定：Gemini枠の枯渇（OpenRouter代替なし）または辞書用Geminiモデルの枯渇。OpenRouter単独構成はここでは止めない */
     private suspend fun shouldAbort(pool: QuotaPool, settings: V2Settings): Boolean {
         val gemini = geminiModels(settings.profiles)
         if (gemini.isNotEmpty() && pool.isExhausted(gemini) && !hasFallbackKey(settings)) return true
-        if (settings.dict.enabled && settings.dict.providerId == "gemini") {
+        if (settings.dict.enabled && settings.dict.providerId.toProviderId() == ProviderId.GEMINI) {
             val dictModels = listOfNotNull(
                 settings.dict.model.ifBlank { null },
                 settings.dict.mergeModel.ifBlank { null }
@@ -184,8 +191,8 @@ class RunEngine(
     }
 
     private fun handlerFor(profile: V2ModelProfile, key: String, settings: V2Settings): com.example.novelscraper.translation.v2.domain.ProviderHandler {
-        return when (profile.providerId) {
-            "gemini" -> GeminiHandler(apiKey = key)
+        return when (profile.providerId.toProviderId()) {
+            ProviderId.GEMINI -> GeminiHandler(apiKey = key)
             else -> {
                 val resolved = resolveOpenRouterParams(profile)
                 OpenRouterHandler(
@@ -210,7 +217,7 @@ class RunEngine(
                 else -> sb.append(ch)
             }
         }
-        return sb.toString().replace(Regex("\n{3,}"), "\n\n")
+        return sb.toString().replace(BLANK_LINE_COLLAPSE_REGEX, "\n\n")
     }
 
     companion object {
@@ -489,7 +496,10 @@ class RunEngine(
         val primaryOrder = profilePromptOrders[primary.id] ?: listOf(1, 1)
         val promptOrder = primaryOrder
         val claims = Collections.synchronizedSet(mutableSetOf<String>())
-        val workerCount = settings.limits.parallelWorkers.coerceIn(1, 6)
+        val workerCount = settings.limits.parallelWorkers.coerceIn(
+            TranslationLimits.WORKER_COUNT_RANGE.first,
+            TranslationLimits.WORKER_COUNT_RANGE.last
+        )
         // 参加プロファイルの最小 maxOutputChars を採用（小型モデルへのローテーション時にもトークン溢れを完全防止）
         val targetOutputChars = profiles.minOfOrNull { it.maxOutputChars } ?: 15000
         val optimalInputBytes = V2Settings.calculateInputLimitBytes(sourceLang, targetOutputChars)
@@ -505,54 +515,77 @@ class RunEngine(
             enabled = settings.prevContext.enabled
         )
 
-        val jobs = mutableListOf<Deferred<Unit>>()
-        for (wId in 1..workerCount) {
-            val claimed = if (profiles.any { it.providerId == "gemini" }) {
-                pool.claimNew(geminiModels(profiles))
-            } else {
-                0 to ""
-            }
-            if (claimed == null) {
-                addLog("worker #$wId skipped (no key)")
-                continue
-            }
-            val rotation = Rotation(
-                workerId = wId,
-                profiles = profiles,
-                pool = pool,
-                keyIndex = claimed.first,
-                key = claimed.second,
-                descriptors = mapOf("gemini" to GEMINI_DESCRIPTOR, "openrouter" to OPENROUTER_DESCRIPTOR),
-                handlerFactory = { profile, key -> buildHandler(settings, profile, key) },
-                openRouterKey = settings.openRouterKey,
-                switchCooldownSec = options.switchCooldownSec,
-                maxSameRetries = options.maxSameRetries,
-                sendGate = sendGate,
-                sendGateIntervalMs = if (options.minSendIntervalMs == 0L) settings.limits.requestDelaySec * 1000L else maxOf(settings.limits.requestDelaySec * 1000L, options.minSendIntervalMs),
-                stopped = { stopFlag.get() },
-                meter = meter,
-                log = { addLog("[W#$wId] $it") }
-            )
-            jobs.add(scope.async(kotlinx.coroutines.Dispatchers.IO) {
-                try {
-                    if (wId > 1 && options.workerStaggerSec > 0) {
-                        delay(options.workerStaggerSec * 1000L * (wId - 1))
-                    }
-                    runWorker(
-                        wId, files, outputDir.uri, existing, claims,
-                        settings, rotation, novelDict,
-                        completed, total,
-                        batchMaxBytes, splitThresholdBytes, chunkSizeBytes,
-                        sourceLang, promptOrder,
-                        profiles, profilePromptOrders,
-                        contextTracker
-                    )
-                } finally {
-                    rotation.release()
+        // 技術的根拠1行：経路選択を実行時分岐にせず型で固定する（S-2のプール誤用を構造的に防止）。
+        // なおワーカー群はsupervisorScopeで隔離し、想定外例外が兄弟ワーカーや親スコープへ波及しないようにする。
+        supervisorScope {
+            for (wId in 1..workerCount) {
+                val claimed = if (profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI }) {
+                    pool.claimNew(geminiModels(profiles))
+                } else {
+                    0 to ""
                 }
-            })
+                if (claimed == null) {
+                    addLog("worker #$wId skipped (no key)")
+                    continue
+                }
+                val router: PromptRouter = if (profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI }) {
+                    Rotation(
+                        workerId = wId,
+                        profiles = profiles,
+                        pool = pool,
+                        keyIndex = claimed.first,
+                        key = claimed.second,
+                        descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR, ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR),
+                        handlerFactory = { profile, key -> buildHandler(settings, profile, key) },
+                        openRouterKey = settings.openRouterKey,
+                        switchCooldownSec = options.switchCooldownSec,
+                        maxSameRetries = options.maxSameRetries,
+                        sendGate = sendGate,
+                        sendGateIntervalMs = if (options.minSendIntervalMs == 0L) settings.limits.requestDelaySec * 1000L else maxOf(settings.limits.requestDelaySec * 1000L, options.minSendIntervalMs),
+                        stopped = { stopFlag.get() },
+                        meter = meter,
+                        log = { addLog("[W#$wId] $it") }
+                    )
+                } else {
+                    UnmanagedRotation(
+                        workerId = wId,
+                        profiles = profiles,
+                        key = settings.openRouterKey,
+                        descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR, ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR),
+                        handlerFactory = { profile, key -> buildHandler(settings, profile, key) },
+                        cooldownSec = options.unmanagedCooldownSec,
+                        maxSameRetries = options.maxSameRetries,
+                        sendGate = sendGate,
+                        sendGateIntervalMs = if (options.minSendIntervalMs == 0L) settings.limits.requestDelaySec * 1000L else maxOf(settings.limits.requestDelaySec * 1000L, options.minSendIntervalMs),
+                        stopped = { stopFlag.get() },
+                        meter = meter,
+                        log = { addLog("[W#$wId] $it") }
+                    )
+                }
+                launch(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        if (wId > 1 && options.workerStaggerSec > 0) {
+                            delay(options.workerStaggerSec * 1000L * (wId - 1))
+                        }
+                        runWorker(
+                            wId, files, outputDir.uri, existing, claims,
+                            settings, router, novelDict,
+                            completed, total,
+                            batchMaxBytes, splitThresholdBytes, chunkSizeBytes,
+                            sourceLang, promptOrder,
+                            profiles, profilePromptOrders,
+                            contextTracker
+                        )
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        addLog("❌ [W#$wId] worker failed: ${e.message}")
+                    } finally {
+                        router.release()
+                    }
+                }
+            }
         }
-        jobs.awaitAll()
         return completed.get() to total
     }
 
@@ -593,10 +626,12 @@ class RunEngine(
                 dict.providerId, model, prompt, text,
                 com.example.novelscraper.translation.v2.engine.resolveProfileOptions(
                     profile.copy(thinkingLevel = dict.thinkingLevel),
-                    mapOf("gemini" to GEMINI_DESCRIPTOR, "openrouter" to OPENROUTER_DESCRIPTOR)[dict.providerId]
+                    dict.providerId.toProviderId()?.let {
+                        mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR, ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR)[it]
+                    }
                 )
             )
-            if (dict.providerId == "openrouter") {
+            if (dict.providerId.toProviderId() == ProviderId.OPENROUTER) {
                 try {
                     buildHandler(settings, profile, settings.openRouterKey).call(dictRequest(settings.openRouterKey))
                 } catch (e: CancellationException) {
@@ -626,10 +661,14 @@ class RunEngine(
                 maxFiles = dict.totalParts,
                 maxBatchBytes = dict.batchMaxBytes,
                 maxTotalScanBytes = dict.maxTotalScanBytes,
-                parallelism = (dict.workerCount * dict.concurrencyPerWorker).coerceIn(1, 30),
+                parallelism = (dict.workerCount * dict.concurrencyPerWorker).coerceIn(
+                    TranslationLimits.DICT_PARALLELISM_RANGE.first,
+                    TranslationLimits.DICT_PARALLELISM_RANGE.last
+                ),
                 maxRetriesPerBatch = 4
-            )
-        ) { addLog(it) }
+            ),
+            log = { addLog(it) }
+        )
         if (result != null) {
             publishDictionary(folderUri, workDir.uri)
         }
@@ -757,7 +796,7 @@ class RunEngine(
         existing: MutableSet<String>,
         claims: MutableSet<String>,
         settings: V2Settings,
-        rotation: Rotation,
+        router: PromptRouter,
         novelDict: NovelDict?,
         completed: AtomicInteger,
         total: Int,
@@ -795,10 +834,10 @@ class RunEngine(
         val primaryPromptNum = promptOrder.firstOrNull() ?: 1
         // 技術的根拠: 構造化出力の適用範囲をバッチ枠に限定するため、枠種別で送信bindingを使い分ける
         val useJsonBatch = profiles.any { profile ->
-            profile.useJsonSchema && when (profile.providerId) {
-                "gemini" -> GEMINI_DESCRIPTOR.capabilitiesFor(profile.model).structuredOutput
-                "openrouter" -> OPENROUTER_DESCRIPTOR.capabilitiesFor(profile.model).structuredOutput
-                else -> false
+            profile.useJsonSchema && when (profile.providerId.toProviderId()) {
+                ProviderId.GEMINI -> GEMINI_DESCRIPTOR.capabilitiesFor(profile.model).structuredOutput
+                ProviderId.OPENROUTER -> OPENROUTER_DESCRIPTOR.capabilitiesFor(profile.model).structuredOutput
+                null -> false
             }
         }
         fun bindCall(forBatch: Boolean): suspend (String, String, String) -> LlmResult {
@@ -814,7 +853,7 @@ class RunEngine(
                         )
                     }
                 }
-                rotation.execute(listOf(prompt), source, profilePrompts, forBatch)
+                router.execute(listOf(prompt), source, profilePrompts, forBatch)
             }
         }
         val ctx = TranslateContext(
@@ -834,7 +873,7 @@ class RunEngine(
             log = { addLog("[W#$workerId] $it") }
         )
         for ((fileIdx, file) in files.withIndex()) {
-            if (stopFlag.get() || rotation.exhausted) break
+            if (stopFlag.get() || router.exhausted) break
             val fileName = file.name
             if (existing.contains(fileName) || existing.contains("${fileName}.failed")) continue
             if (!claim(fileName)) continue

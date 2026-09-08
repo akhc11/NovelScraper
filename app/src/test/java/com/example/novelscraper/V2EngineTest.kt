@@ -6,11 +6,13 @@ import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
+import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
 import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.engine.EngineOptions
 import com.example.novelscraper.translation.v2.engine.Rotation
 import com.example.novelscraper.translation.v2.engine.RunEngine
+import com.example.novelscraper.translation.v2.engine.UnmanagedRotation
 import com.example.novelscraper.translation.v2.engine.resolveProfileOptions
 import com.example.novelscraper.translation.v2.infra.InMemoryFileStore
 import com.example.novelscraper.translation.v2.settings.V2Limits
@@ -53,7 +55,7 @@ class V2EngineTest {
             pool = pool,
             keyIndex = keyIndex,
             key = key,
-            descriptors = mapOf("gemini" to GEMINI_DESCRIPTOR, "openrouter" to OPENROUTER_DESCRIPTOR),
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR, ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR),
             handlerFactory = { _, _ -> handler },
             openRouterKey = "or",
             maxSameRetries = 0,
@@ -78,7 +80,7 @@ class V2EngineTest {
             pool = QuotaPool(listOf("k1")),
             keyIndex = 0,
             key = "k1",
-            descriptors = mapOf("gemini" to GEMINI_DESCRIPTOR),
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR),
             handlerFactory = { _, _ -> handler },
             openRouterKey = "",
             maxSameRetries = 0,
@@ -128,7 +130,7 @@ class V2EngineTest {
             pool = pool,
             keyIndex = 0,
             key = "k1",
-            descriptors = mapOf("gemini" to GEMINI_DESCRIPTOR),
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR),
             handlerFactory = { _, _ -> handler },
             openRouterKey = "",
             maxSameRetries = 0,
@@ -164,7 +166,7 @@ class V2EngineTest {
             pool = pool,
             keyIndex = 0,
             key = "k1",
-            descriptors = mapOf("gemini" to GEMINI_DESCRIPTOR),
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR),
             handlerFactory = { _, _ -> handler },
             openRouterKey = "",
             maxSameRetries = 0,
@@ -189,25 +191,42 @@ class V2EngineTest {
 
     @Test
     fun testRotation_OpenRouterOnlyQuotaRecoversWithoutPool() = kotlinx.coroutines.runBlocking {
-        // S-2回帰：非管理のみ構成はGeminiプールに触れず、同一キー待機再送で復帰する（誤枯渇しない）
-        val pool = QuotaPool(emptyList())
+        // 非管理のみ構成はプールを持たず、同一キー待機再送で復帰する（S-2の構造的防止）
         val script: Map<String, MutableList<LlmResult>> = mapOf("x/y" to mutableListOf(quotaMinute()))
         val handler = scriptedHandler(script)
-        val rotation = Rotation(
+        val rotation = UnmanagedRotation(
             workerId = 1,
             profiles = listOf(V2ModelProfile(providerId = "openrouter", model = "x/y")),
-            pool = pool,
-            keyIndex = 0,
-            key = "",
-            descriptors = mapOf("gemini" to GEMINI_DESCRIPTOR, "openrouter" to OPENROUTER_DESCRIPTOR),
+            key = "or",
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR, ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR),
             handlerFactory = { _, _ -> handler },
-            openRouterKey = "or",
-            unmanagedCooldownSec = 0,
+            cooldownSec = 0,
             maxSameRetries = 0,
             log = {}
         )
         val result = rotation.execute(listOf("prompt"), "src")
         assertTrue(result is LlmResult.Success)
+        assertFalse(rotation.exhausted)
+    }
+
+    @Test
+    fun testRotation_RejectsUnmanagedProfiles() = kotlinx.coroutines.runBlocking {
+        // 管理巡回器に非管理のみを渡す構成ミスは、プール誤用ではなく即時確定する
+        val script: Map<String, MutableList<LlmResult>> = mapOf("x/y" to mutableListOf(quotaMinute()))
+        val rotation = Rotation(
+            workerId = 1,
+            profiles = listOf(V2ModelProfile(providerId = "openrouter", model = "x/y")),
+            pool = QuotaPool(emptyList()),
+            keyIndex = 0,
+            key = "",
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR, ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR),
+            handlerFactory = { _, _ -> scriptedHandler(script) },
+            openRouterKey = "or",
+            maxSameRetries = 0,
+            log = {}
+        )
+        val result = rotation.execute(listOf("prompt"), "src")
+        assertTrue(result is LlmResult.Failure)
         assertFalse(rotation.exhausted)
     }
 
@@ -398,6 +417,50 @@ class V2EngineTest {
         val published = store.findChild(folder.uri, "dictionary.json")
         assertNotNull(published)
         assertTrue((store.readText(published!!.uri) ?: "").contains("タロウ"))
+    }
+
+    @Test
+    fun testRunEngine_OpenRouterOnlyQuotaRecovers() = kotlinx.coroutines.runBlocking {
+        // 経路選択の回帰：OR単独はUnmanagedRotationに乗り、一時429から復帰する（プール誤用なし）
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-or-quota")
+        val doc = store.createFile(folder.uri, "a.txt", "text/plain")!!
+        store.writeText(doc.uri, "これはテストの本文です。勇者が旅に出ました。")
+        val firstCall = java.util.concurrent.atomic.AtomicBoolean(true)
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                if (firstCall.getAndSet(false)) {
+                    return LlmResult.Failure(ClassifiedFailure(FailureKind.QUOTA_MINUTE))
+                }
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(
+                workerStaggerSec = 0,
+                minSendIntervalMs = 0L,
+                maxSameRetries = 0,
+                unmanagedCooldownSec = 0
+            ),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = emptyList(),
+            openRouterKey = "or-key",
+            profiles = listOf(V2ModelProfile(providerId = "openrouter", model = "x/y")),
+            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0)
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(1, summary.completedFiles)
+        val outDir = store.findChild(folder.uri, "翻訳完了_LLM")!!
+        assertEquals(
+            "これはテストの本文です。勇者が旅に出ました。",
+            store.readText(store.findChild(outDir.uri, "a.txt")!!.uri)
+        )
     }
 
     @Test

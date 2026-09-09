@@ -33,21 +33,73 @@ class V2TranslationService : Service() {
         const val EXTRA_PROGRESS_CURRENT = "extra_progress_current"
         const val EXTRA_PROGRESS_TOTAL = "extra_progress_total"
 
-        private const val NOTIFICATION_ID_FOREGROUND = 2
-        private const val NOTIFICATION_ID_COMPLETE = 1002
+        const val NOTIFICATION_ID_FOREGROUND = 2
+        const val NOTIFICATION_ID_COMPLETE = 1002
 
         /** 通知の停止ボタン押下時に ViewModel へ通知するコールバック */
         var onStopRequested: (() -> Unit)? = null
+
+        /** チャンネル初期化（Controllerの直接完了通知投稿時にも安全に呼べるよう共有） */
+        fun ensureChannels(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val manager = context.getSystemService(NotificationManager::class.java) ?: return
+                val serviceChannel = NotificationChannel(
+                    CHANNEL_ID_SERVICE, "LLM翻訳 実行中", NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "LLM翻訳の進行状況を表示します"
+                }
+                manager.createNotificationChannel(serviceChannel)
+
+                val completeChannel = NotificationChannel(
+                    CHANNEL_ID_COMPLETE, "LLM翻訳 完了通知", NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "LLM翻訳の完了を通知します"
+                    enableVibration(true)
+                }
+                manager.createNotificationChannel(completeChannel)
+            }
+        }
+
+        /** 完了通知の生成・表示（ControllerとService共通の単一実装） */
+        fun showCompletionNotification(context: Context, title: String, msg: String) {
+            ensureChannels(context)
+            val openIntent = Intent(context, MainActivity::class.java)
+            val openPendingIntent = PendingIntent.getActivity(
+                context, 0, openIntent,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+            )
+
+            val notification = NotificationCompat.Builder(context, CHANNEL_ID_COMPLETE)
+                .setContentTitle(title)
+                .setContentText(msg)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentIntent(openPendingIntent)
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setDefaults(Notification.DEFAULT_ALL)
+                .build()
+
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            manager?.notify(NOTIFICATION_ID_COMPLETE, notification)
+        }
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannels()
+        ensureChannels(this)
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NovelScraper::TranslationWakelock")
         wakeLock?.acquire(30 * 60 * 1000L) // 30分で自動解放（onStartCommandで再延長）
+
+        // 技術的根拠1行：startForegroundService直後の破棄・停止によるRemoteServiceException即死クラッシュを構造的に防止するため生成直後に昇格する。
+        val initNotification = buildForegroundNotification("LLM小説翻訳", "開始準備中...", 0, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID_FOREGROUND, initNotification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(NOTIFICATION_ID_FOREGROUND, initNotification)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -69,7 +121,7 @@ class V2TranslationService : Service() {
                 ACTION_SHOW_COMPLETE -> {
                     val title = intent.getStringExtra(EXTRA_TITLE) ?: "LLM翻訳完了"
                     val msg = intent.getStringExtra(EXTRA_MSG) ?: "すべてのファイルの翻訳が完了しました"
-                    showCompletionNotification(title, msg)
+                    showCompletionNotification(this, title, msg)
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
@@ -94,7 +146,7 @@ class V2TranslationService : Service() {
         super.onDestroy()
     }
 
-    private fun updateForegroundNotification(title: String, msg: String, current: Int, total: Int) {
+    private fun buildForegroundNotification(title: String, msg: String, current: Int, total: Int): Notification {
         val openIntent = Intent(this, MainActivity::class.java)
         val openPendingIntent = PendingIntent.getActivity(
             this, 0, openIntent,
@@ -126,8 +178,11 @@ class V2TranslationService : Service() {
             builder.setProgress(0, 0, true)
         }
 
-        val notification: Notification = builder.build()
+        return builder.build()
+    }
 
+    private fun updateForegroundNotification(title: String, msg: String, current: Int, total: Int) {
+        val notification = buildForegroundNotification(title, msg, current, total)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID_FOREGROUND, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
@@ -135,45 +190,5 @@ class V2TranslationService : Service() {
         }
     }
 
-    private fun showCompletionNotification(title: String, msg: String) {
-        val openIntent = Intent(this, MainActivity::class.java)
-        val openPendingIntent = PendingIntent.getActivity(
-            this, 0, openIntent,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        )
-
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID_COMPLETE)
-            .setContentTitle(title)
-            .setContentText(msg)
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .setContentIntent(openPendingIntent)
-            .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(Notification.DEFAULT_ALL)
-            .build()
-
-        getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID_COMPLETE, notification)
-    }
-
     override fun onBind(intent: Intent?): IBinder? = null
-
-    private fun createNotificationChannels() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(NotificationManager::class.java) ?: return
-            val serviceChannel = NotificationChannel(
-                CHANNEL_ID_SERVICE, "LLM翻訳 実行中", NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "LLM翻訳の進行状況を表示します"
-            }
-            manager.createNotificationChannel(serviceChannel)
-
-            val completeChannel = NotificationChannel(
-                CHANNEL_ID_COMPLETE, "LLM翻訳 完了通知", NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "LLM翻訳の完了を通知します"
-                enableVibration(true)
-            }
-            manager.createNotificationChannel(completeChannel)
-        }
-    }
 }

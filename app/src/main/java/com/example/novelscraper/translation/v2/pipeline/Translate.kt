@@ -547,7 +547,7 @@ data class LargeOptions(
     val chunkSizeBytes: Int = 30000,
     val tailLines: Int = 20,
     /** 上限（これを超えたらfalseを返して呼出側でスキップ扱いにする） */
-    val maxInputBytes: Int = 1_000_000
+    val maxInputBytes: Int = 10_000_000
 )
 
 /**

@@ -265,19 +265,34 @@ suspend fun generateDictionary(
         }
         val clean = readText(name)?.trim() ?: continue
         if (clean.isEmpty()) continue
-        val bytes = utf8Bytes(clean)
-        scannedBytes += bytes
-        if (bufferBytes + bytes > options.maxBatchBytes && buffer.isNotEmpty()) {
-            batches.add(buffer.toString())
-            buffer.clear()
-            bufferBytes = 0
+        // 技術的根拠1行：物理分割OFF時などの大ファイルでバッチ上限（トークン溢れ・413エラー）を超えないようチャンク分割して詰める。
+        val pieces = if (utf8Bytes(clean) > options.maxBatchBytes) {
+            splitIntoChunks(clean, options.maxBatchBytes)
+        } else {
+            listOf(clean)
         }
-        if (buffer.isNotEmpty()) {
-            buffer.append("\n\n")
-            bufferBytes += 2
+        var reachedScanLimit = false
+        for (piece in pieces) {
+            if (scannedBytes >= options.maxTotalScanBytes) {
+                log("📖 辞書生成: 走査上限に達しました（残りは対象外）")
+                reachedScanLimit = true
+                break
+            }
+            val bytes = utf8Bytes(piece)
+            scannedBytes += bytes
+            if (bufferBytes + bytes > options.maxBatchBytes && buffer.isNotEmpty()) {
+                batches.add(buffer.toString())
+                buffer.clear()
+                bufferBytes = 0
+            }
+            if (buffer.isNotEmpty()) {
+                buffer.append("\n\n")
+                bufferBytes += 2
+            }
+            buffer.append(piece)
+            bufferBytes += bytes
         }
-        buffer.append(clean)
-        bufferBytes += bytes
+        if (reachedScanLimit) break
     }
     if (buffer.isNotEmpty()) batches.add(buffer.toString())
     if (batches.isEmpty()) {

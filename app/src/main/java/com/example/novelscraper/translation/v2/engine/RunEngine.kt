@@ -52,7 +52,7 @@ import kotlin.coroutines.coroutineContext
 data class EngineOptions(
     val batchMaxFiles: Int = 3,
     /** チャンク翻訳に渡す上限。これを超える入力はスキップ確定（.failed保存）する */
-    val maxInputBytes: Int = 1_000_000,
+    val maxInputBytes: Int = 10_000_000,
     val kanaFloor: Double = 0.2,
     val markerEnabled: Boolean = true,
     val maxSameRetries: Int = 2,
@@ -226,7 +226,7 @@ class RunEngine(
         } catch (e: CancellationException) {
             addLog("stopped by user")
             _state.update { it.copy(statusText = "停止しました") }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             val errType = e::class.java.simpleName
             val errMsg = e.message ?: e.cause?.message ?: "原因不明のエラー"
             addLog("unexpected ($errType): $errMsg")
@@ -578,8 +578,8 @@ class RunEngine(
                         )
                     } catch (e: CancellationException) {
                         throw e
-                    } catch (e: Exception) {
-                        addLog("❌ [W#$wId] worker failed: ${e.message}")
+                    } catch (t: Throwable) {
+                        addLog("❌ [W#$wId] worker failed: ${t.message}")
                     } finally {
                         router.release()
                     }

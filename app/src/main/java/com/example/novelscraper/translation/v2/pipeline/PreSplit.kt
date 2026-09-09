@@ -78,6 +78,27 @@ data class PreSplitResult(
 )
 
 /**
+ * サンプルバイト列から、マルチバイト文字の途中切断（underflow）を防ぐため
+ * 末尾の直近改行（\n = 0x0A）まで安全に切り詰める。
+ * 改行がない場合は、UTF-8の継続バイト境界を安全にトリムする。
+ */
+fun trimIncompleteMultibyte(bytes: ByteArray): ByteArray {
+    if (bytes.isEmpty()) return bytes
+    val lastNl = bytes.lastIndexOf(0x0A.toByte())
+    if (lastNl >= 1024) {
+        return bytes.copyOf(lastNl + 1)
+    }
+    var end = bytes.size
+    while (end > 0 && (bytes[end - 1].toInt() and 0xC0) == 0x80) {
+        end--
+    }
+    if (end > 0 && (bytes[end - 1].toInt() and 0x80) != 0) {
+        end--
+    }
+    return if (end > 0) bytes.copyOf(end) else bytes
+}
+
+/**
  * Split one raw text file into <splitRoot>/<novel>/part_XXXX.txt.
  * Returns null on skip/failure/stop (the reason is logged, never swallowed).
  */
@@ -142,13 +163,15 @@ suspend fun splitSingleTextFile(
         val commonDeclared = declared?.let {
             com.example.novelscraper.translation.common.ingest.DeclaredEncoding.valueOf(it.name)
         }
-        val bytes = store.readBytes(fileUri, com.example.novelscraper.translation.common.ingest.TextIngest.MAX_INGEST_BYTES + 1)
+        // 技術的根拠1行：OOMを完全に防止するため先頭128KBをサンプル読込し、末尾境界切断文字をトリムして文字コード(Charset)のみ確定する。
+        val sampleBytes = store.readBytes(fileUri, 131072)
             ?: run {
                 log("❌ ファイルを開けませんでした ($fileName)")
                 rollback()
                 return null
             }
-        val ingested = com.example.novelscraper.translation.common.ingest.TextIngest.ingest(bytes, commonDeclared)
+        val safeBytes = trimIncompleteMultibyte(sampleBytes)
+        val ingested = com.example.novelscraper.translation.common.ingest.TextIngest.ingest(safeBytes, commonDeclared)
         if (ingested !is com.example.novelscraper.translation.common.ingest.IngestResult.Success) {
             val (reason, evidence) = when (ingested) {
                 is com.example.novelscraper.translation.common.ingest.IngestResult.Quarantined -> ingested.reason.name to ingested.evidence
@@ -160,11 +183,17 @@ suspend fun splitSingleTextFile(
             rollback()
             return null
         }
-        val fullText = ingested.text
+        val charset = ingested.provenance.charset
         val charsetId = ingested.provenance.canonicalId
 
         var partNumber = 1
         suspend fun writePart(content: String): Boolean {
+            val reason = com.example.novelscraper.translation.common.ingest.ChunkVerifier.verify(content, charsetId)
+            if (reason != null) {
+                log("⚠️ 文字化け検出のためスキップ ($fileName: mojibake $reason)")
+                onSkipped("mojibake $reason")
+                return false
+            }
             val partName = "part_" + partNumber.toString().padStart(4, '0') + ".txt"
             val doc = findOrCreateFile(store, novelDir.uri, partName, "text/plain")
             val ok = doc != null && store.writeText(doc.uri, content)
@@ -172,24 +201,70 @@ suspend fun splitSingleTextFile(
             return ok
         }
 
-        for (chunk in splitTextToParts(fullText, size)) {
-            if (stopped()) {
-                rollback()
-                return null
-            }
-            val reason = com.example.novelscraper.translation.common.ingest.ChunkVerifier.verify(chunk, charsetId)
-            if (reason != null) {
-                log("⚠️ 文字化け検出のためスキップ ($fileName: mojibake $reason)")
-                onSkipped("mojibake $reason")
-                rollback()
-                return null
-            }
-            if (!writePart(chunk)) {
-                log("❌ パート書き込みに失敗しました ($fileName part $partNumber)")
-                rollback()
-                return null
-            }
+        val inputStream = store.openInputStream(fileUri) ?: run {
+            log("❌ ファイルを開けませんでした ($fileName)")
+            rollback()
+            return null
         }
+
+        // 技術的根拠1行：巨大テキストの全文String化によるOOM（128MB超）を排し、ストリーミング行読込＋直接part書き出しを行う。
+        val sampleSb = StringBuilder()
+        val cur = StringBuilder()
+        suspend fun flushCur(): Boolean {
+            if (cur.isNotEmpty()) {
+                val ok = writePart(cur.toString())
+                cur.clear()
+                return ok
+            }
+            return true
+        }
+
+        val streamOk = try {
+            inputStream.reader(charset).buffered().use { reader ->
+                while (true) {
+                    if (stopped()) return@use false
+                    val rawLine = reader.readLine() ?: break
+                    val line = cleanseForSplit(rawLine)
+                    if (sampleSb.length < PRE_SPLIT_SAMPLE_CHARS) {
+                        sampleSb.append(line).append("\n")
+                    }
+                    if (line.length > size) {
+                        var start = 0
+                        while (start < line.length) {
+                            val end = (start + size).coerceAtMost(line.length)
+                            val seg = line.substring(start, end)
+                            if (cur.length + seg.length >= size && cur.isNotEmpty()) {
+                                if (!flushCur()) return@use false
+                            }
+                            cur.append(seg).append("\n")
+                            if (cur.length >= size) {
+                                if (!flushCur()) return@use false
+                            }
+                            start = end
+                        }
+                    } else {
+                        if (cur.length + line.length + 1 > size && cur.isNotEmpty()) {
+                            if (!flushCur()) return@use false
+                        }
+                        cur.append(line).append("\n")
+                    }
+                }
+                if (!flushCur()) return@use false
+                true
+            }
+        } catch (e: CancellationException) {
+            rollback()
+            throw e
+        } catch (e: Exception) {
+            log("❌ ストリーミング分割エラー: $fileName (${e.message})")
+            false
+        }
+
+        if (!streamOk) {
+            rollback()
+            return null
+        }
+
         if (partNumber == 1) {
             if (!writePart("")) {
                 log("❌ 空パート書き込みに失敗しました ($fileName)")
@@ -200,7 +275,8 @@ suspend fun splitSingleTextFile(
         val total = partNumber - 1
         log("✅ 物理分割完了: $novelBase (全 $total パート)")
         // 技術的根拠1行：sampleは言語判定専用のため全文を保持せず先頭抜粋に統一する（再開経路＝先頭partと一致）。
-        return PreSplitResult(novelDir.uri, novelBase, fullText.take(PRE_SPLIT_SAMPLE_CHARS), total)
+        val sampleText = if (sampleSb.length > PRE_SPLIT_SAMPLE_CHARS) sampleSb.substring(0, PRE_SPLIT_SAMPLE_CHARS) else sampleSb.toString()
+        return PreSplitResult(novelDir.uri, novelBase, sampleText, total)
     } catch (e: CancellationException) {
         rollback()
         throw e

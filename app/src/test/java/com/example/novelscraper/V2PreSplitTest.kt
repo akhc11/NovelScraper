@@ -184,4 +184,29 @@ class V2PreSplitTest {
         val first = store.readText(store.findChild(result!!.subfolderUri, "part_0001.txt")!!.uri) ?: ""
         assertTrue(first.contains("勇者"))
     }
+
+    @Test
+    fun testTrimIncompleteMultibyte_WithNewline() {
+        val base = "あ".repeat(1000) + "\n" + "い".repeat(10)
+        val bytes = base.toByteArray(Charsets.UTF_8)
+        // 末尾1文字を途中で切断
+        val truncated = bytes.copyOf(bytes.size - 1)
+        val trimmed = com.example.novelscraper.translation.v2.pipeline.trimIncompleteMultibyte(truncated)
+        // 改行で綺麗にトリムされていることを確認
+        val text = String(trimmed, Charsets.UTF_8)
+        assertTrue(text.endsWith("\n"))
+        assertEquals("あ".repeat(1000) + "\n", text)
+    }
+
+    @Test
+    fun testTrimIncompleteMultibyte_WithoutNewlineUtf8() {
+        val base = "あいうえお"
+        val bytes = base.toByteArray(Charsets.UTF_8) // 15 bytes (3 bytes each)
+        // 最後の「お」の3バイト目だけ切り落とす (14 bytes)
+        val truncated = bytes.copyOf(14)
+        val trimmed = com.example.novelscraper.translation.v2.pipeline.trimIncompleteMultibyte(truncated)
+        // 「お」全体が安全に切り落とされ、「あいうえ」の12バイトになることを確認
+        assertEquals(12, trimmed.size)
+        assertEquals("あいうえ", String(trimmed, Charsets.UTF_8))
+    }
 }

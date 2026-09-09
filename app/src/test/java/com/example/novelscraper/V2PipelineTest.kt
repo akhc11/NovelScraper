@@ -1098,6 +1098,44 @@ class V2PipelineTest {
         val blankDst = "   \n  \n  "
         assertFalse(com.example.novelscraper.translation.v2.pipeline.lineCountOk(src, blankDst))
     }
+
+    @Test
+    fun testLargeOptions_MaxInputBytesIs10MB() {
+        assertEquals(10_000_000, com.example.novelscraper.translation.v2.pipeline.LargeOptions().maxInputBytes)
+        assertEquals(10_000_000, com.example.novelscraper.translation.v2.engine.EngineOptions().maxInputBytes)
+    }
+
+    @Test
+    fun testDictStage_OversizedFileIsChunked() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val workDir = store.createRoot("dict_chunk_test")
+        val bigFileContent = "段落1の内容です。".repeat(500) + "\n\n" + "段落2の内容です。".repeat(500)
+        val fileNames = listOf("big_novel.txt")
+        val batchesReceived = mutableListOf<String>()
+
+        val options = com.example.novelscraper.translation.v2.pipeline.DictOptions(
+            maxBatchBytes = 3000,
+            maxTotalScanBytes = 10000
+        )
+
+        val result = com.example.novelscraper.translation.v2.pipeline.generateDictionary(
+            store = store,
+            workDirUri = workDir.uri,
+            fileNames = fileNames,
+            readText = { bigFileContent },
+            call = { _, _, text ->
+                batchesReceived.add(text)
+                ok("""{"characters": [{"original": "主人公", "japanese": "主人公"}]}""")
+            },
+            options = options
+        )
+
+        assertNotNull(result)
+        assertTrue("バッチに分割されていること", batchesReceived.size > 1)
+        for (batch in batchesReceived) {
+            assertTrue("各バッチがmaxBatchBytes近傍で上限遵守していること", com.example.novelscraper.translation.v2.pipeline.utf8Bytes(batch) <= options.maxBatchBytes + 100)
+        }
+    }
 }
 
 /**

@@ -22,8 +22,10 @@ import com.example.novelscraper.translation.v2.service.V2TranslationServiceContr
 import com.example.novelscraper.translation.v2.settings.DataStoreSettingsRepository
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2Settings
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -44,6 +46,24 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
     companion object {
         private const val NOTIFICATION_TITLE = "LLM小説翻訳"
         private const val NOTIFY_THROTTLE_MS = 1500L
+
+        // 技術的根拠1行：Activity破棄時のonClearedによる翻訳強制中断を防ぎフォアグラウンドサービスと共に完走させるためプロセス生存スコープで実行する。
+        private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        @Volatile
+        private var sharedEngine: RunEngine? = null
+        private var runJob: Job? = null
+        private var notifyJob: Job? = null
+        private var lastNotifyEmit = 0L
+        private var lastNotifySig = ""
+
+        fun requestGlobalStop(serviceController: V2TranslationServiceController? = null) {
+            sharedEngine?.requestStop()
+            runJob?.cancel()
+            runJob = null
+            notifyJob?.cancel()
+            notifyJob = null
+            serviceController?.stopService()
+        }
     }
 
     private val repository = DataStoreSettingsRepository(application)
@@ -53,8 +73,13 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
     val settings: StateFlow<V2Settings> = repository.settings
         .stateIn(viewModelScope, SharingStarted.Eagerly, V2Settings())
 
-    private val engine = RunEngine(store = store, scope = viewModelScope)
-    val engineState: StateFlow<EngineState> = engine.state
+    private val engine: RunEngine
+        get() {
+            return sharedEngine ?: synchronized(V2TranslationViewModel::class.java) {
+                sharedEngine ?: RunEngine(store = store, scope = processScope).also { sharedEngine = it }
+            }
+        }
+    val engineState: StateFlow<EngineState> get() = engine.state
 
     private val _folders = MutableStateFlow<List<V2FolderItem>>(emptyList())
     val folders: StateFlow<List<V2FolderItem>> = _folders.asStateFlow()
@@ -62,14 +87,8 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
     private val _importWarnings = MutableStateFlow<List<String>>(emptyList())
     val importWarnings: StateFlow<List<String>> = _importWarnings.asStateFlow()
 
-    private var runJob: Job? = null
-    private var notifyJob: Job? = null
-
-    /** 通知バー停止ボタン→エンジン停止の結線（Serviceのstaticコールバックに自身を登録） */
-    private val serviceStopCallback: () -> Unit = { stopFromNotification() }
-
     init {
-        V2TranslationService.onStopRequested = serviceStopCallback
+        V2TranslationService.onStopRequested = { requestGlobalStop(serviceController) }
     }
 
     fun addFolder(uri: Uri, name: String) {
@@ -127,7 +146,7 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
         lastNotifySig = ""
         // 即時フォアグラウンド昇格（startForegroundService後の10秒ANR制限内にstartForegroundさせる）
         serviceController.updateNotification(NOTIFICATION_TITLE, "開始準備中...", 0, 0)
-        notifyJob = viewModelScope.launch(Dispatchers.IO) {
+        notifyJob = processScope.launch {
             engineState.collect { s ->
                 if (!s.isRunning) return@collect
                 val (done, total) = s.progress
@@ -143,11 +162,11 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
                 }
             }
         }
-        runJob = viewModelScope.launch(Dispatchers.IO) {
+        runJob = processScope.launch {
             var summary: RunSummary? = null
             try {
                 summary = engine.runWithNames(items, current)
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
                 // エンジン内部でログ・状態更新済みのため、ここでは通知の後片付けのみ行う
             } finally {
                 notifyJob?.cancel()
@@ -158,25 +177,8 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
     }
 
     fun stop() {
-        engine.requestStop()
-        runJob?.cancel()
-        runJob = null
-        notifyJob?.cancel()
-        notifyJob = null
-        serviceController.stopService()
+        requestGlobalStop(serviceController)
     }
-
-    /** 通知バー停止ボタン経由（Serviceは自前でstopForeground+stopSelf済みのため収集停止のみ） */
-    private fun stopFromNotification() {
-        engine.requestStop()
-        runJob?.cancel()
-        runJob = null
-        notifyJob?.cancel()
-        notifyJob = null
-    }
-
-    private var lastNotifyEmit = 0L
-    private var lastNotifySig = ""
 
     private fun buildProgressMessage(s: EngineState): String {
         val head = s.statusText.ifBlank { "翻訳を実行中..." }
@@ -243,14 +245,10 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
     }
 
     override fun onCleared() {
-        runJob?.cancel()
-        runJob = null
-        notifyJob?.cancel()
-        notifyJob = null
-        if (V2TranslationService.onStopRequested === serviceStopCallback) {
-            V2TranslationService.onStopRequested = null
+        // 技術的根拠1行：画面離脱・Activity再生成時もバックグラウンド翻訳を継続させるため、未実行時のみサービス停止する。
+        if (!engineState.value.isRunning) {
+            serviceController.stopService()
         }
-        serviceController.stopService()
         super.onCleared()
     }
 }

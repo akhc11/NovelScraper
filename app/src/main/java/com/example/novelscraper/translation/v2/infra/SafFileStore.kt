@@ -147,13 +147,26 @@ class SafFileStore(private val context: Context) : FileStore {
         }
     }
 
+    override suspend fun openInputStream(fileUri: String): java.io.InputStream? = withContext(Dispatchers.IO) {
+        try {
+            val parsed = safeParseUri(fileUri) ?: return@withContext null
+            context.contentResolver.openInputStream(parsed)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     override suspend fun readText(fileUri: String): String? = withContext(Dispatchers.IO) {
         try {
             val parsed = safeParseUri(fileUri) ?: return@withContext null
             context.contentResolver.openInputStream(parsed)?.use { stream ->
-                stream.bufferedReader(Charsets.UTF_8).readText()
+                // 技術的根拠1行：UTF-8固定を排しTextIngestでGBK等の文字コードを自動判別・安全にデコードする（物理分割OFF時の文字化け・OOM防止）。
+                when (val res = com.example.novelscraper.translation.common.ingest.TextIngest.ingest(stream)) {
+                    is com.example.novelscraper.translation.common.ingest.IngestResult.Success -> res.text
+                    else -> null
+                }
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             null
         }
     }

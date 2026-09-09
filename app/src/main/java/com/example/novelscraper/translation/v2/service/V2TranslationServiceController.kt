@@ -33,20 +33,13 @@ class V2TranslationServiceController(private val context: Context) {
     }
 
     /**
-     * 完了通知を表示してサービスを終了
+     * 完了通知を表示してサービスを終了。
+     * 技術的根拠1行：完了時にstartForegroundServiceを呼ぶとstopSelfによるOS即死クラッシュを招くため、サービス停止後にNotificationManagerから直接投稿する。
      */
     fun showComplete(title: String, message: String) {
+        stopService()
         try {
-            val intent = Intent(context, V2TranslationService::class.java).apply {
-                action = V2TranslationService.ACTION_SHOW_COMPLETE
-                putExtra(V2TranslationService.EXTRA_TITLE, title)
-                putExtra(V2TranslationService.EXTRA_MSG, message)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            V2TranslationService.showCompletionNotification(context, title, message)
         } catch (_: Exception) {
         }
     }

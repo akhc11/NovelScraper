@@ -340,6 +340,82 @@ class V2PipelineTest {
     }
 
     @Test
+    fun testTranslateSingle_PromptRetryOnQualityFailure() = kotlinx.coroutines.runBlocking {
+        // 1回目のプロンプト#3で品質NG（マーカー欠落）、2回目のプロンプト#7で品質合格するケース
+        val logs = mutableListOf<String>()
+        var attemptCount = 0
+        val ctx = TranslateContext(
+            basePrompts = mapOf(3 to "standard", 7 to "retry_short"),
+            promptOrder = listOf(3, 7),
+            driverNames = listOf("d1"),
+            verify = VerifyOptions(markerEnabled = true, sizeMinPct = 10, sizeMaxPct = 300, kanaFloor = 0.2),
+            call = { promptNum, _, _ ->
+                attemptCount++
+                if (promptNum == "3") {
+                    // 1回目：マーカーなし（品質不合格）
+                    ok("これはテストの訳文です。")
+                } else {
+                    // 2回目（プロンプト7）：マーカーあり（品質合格）
+                    ok("これはリトライで成功したテストの訳文です。\n[SRC_END]")
+                }
+            },
+            log = { logs.add(it) }
+        )
+
+        val r = translateSingle("テスト原文です。", ctx)
+        assertTrue("2回目のプロンプトで成功してTranslatedになるべき", r is SingleResult.Translated)
+        assertEquals("これはリトライで成功したテストの訳文です。", (r as SingleResult.Translated).text)
+        assertEquals(2, attemptCount)
+        assertTrue(logs.any { it.contains("品質チェック不合格") && it.contains("プロンプト#3") })
+        assertTrue(logs.any { it.contains("リトライに成功しました") && it.contains("プロンプト#7") })
+    }
+
+    @Test
+    fun testTranslateSingle_AllPromptsQualityFailed() = kotlinx.coroutines.runBlocking {
+        // 全プロンプトで品質NGだった場合、確定失敗（isDeterministic = true）になるケース
+        val ctx = TranslateContext(
+            basePrompts = mapOf(1 to "p1"),
+            promptOrder = listOf(1, 1),
+            driverNames = listOf("d1"),
+            verify = VerifyOptions(markerEnabled = true),
+            call = { _, _, _ ->
+                // マーカーなし（品質不合格）
+                ok("マーカーのない不正な訳文")
+            }
+        )
+
+        val r = translateSingle("テスト原文", ctx)
+        assertTrue(r is SingleResult.Failed)
+        val failed = r as SingleResult.Failed
+        assertEquals(FailureKind.FATAL, failed.terminal)
+        assertEquals("marker-missing", failed.note)
+        assertTrue("全プロンプトで品質不合格時は確定失敗(.failed作成対象)になるべき", failed.isDeterministic)
+    }
+
+    @Test
+    fun testTranslateSingle_TransientFailureBypassesPromptOrder() = kotlinx.coroutines.runBlocking {
+        // 通信障害（RETRYABLE_AFTER）発生時、プロンプト順序（例: [1, 7]）の次を無駄打ちせず即座に脱出するケース
+        var callCount = 0
+        val ctx = TranslateContext(
+            basePrompts = mapOf(1 to "p1", 7 to "p7"),
+            promptOrder = listOf(1, 7),
+            driverNames = listOf("d1"),
+            maxSameRetries = 0,
+            call = { _, _, _ ->
+                callCount++
+                fail(FailureKind.RETRYABLE_AFTER)
+            }
+        )
+
+        val r = translateSingle("テスト原文", ctx)
+        assertTrue(r is SingleResult.Failed)
+        val failed = r as SingleResult.Failed
+        assertEquals(FailureKind.RETRYABLE_AFTER, failed.terminal)
+        assertFalse("通信障害時は未完了保留(isDeterministic = false)になるべき", failed.isDeterministic)
+        assertEquals("通信障害時はプロンプト順序の次を無駄打ちせず1回で即座に脱出すべき", 1, callCount)
+    }
+
+    @Test
     fun testVerifyRejectReason() {
         val loose = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
         // 合格時は null

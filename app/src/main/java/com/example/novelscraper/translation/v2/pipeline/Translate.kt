@@ -134,7 +134,11 @@ fun verifyTranslation(sourceText: String, translatedText: String, options: Verif
 sealed interface SingleResult {
     data class Translated(val text: String) : SingleResult
     /** terminal/note はログ表示用（.failed の中身は原文のまま） */
-    data class Failed(val terminal: FailureKind, val note: String = "") : SingleResult
+    data class Failed(
+        val terminal: FailureKind,
+        val note: String = "",
+        val isDeterministic: Boolean = false
+    ) : SingleResult
     data object ConfigOnly : SingleResult
     data object Stopped : SingleResult
 }
@@ -211,7 +215,8 @@ private fun buildAttempts(
 }
 
 /**
- * 単体翻訳。成功時は検証済み訳文、全滅時は失敗種別を返す。
+ * 単体翻訳。設定されたプロンプト順序（例: [3, 7]）で試行し、品質合格時に検証済み訳文を返す。
+ * 技術的根拠1行：品質チェック不合格時は次のプロンプトで再試行し、全滅時のみ確定失敗とする。
  */
 suspend fun translateSingle(
     content: String,
@@ -220,28 +225,129 @@ suspend fun translateSingle(
     prevSourceTail: String? = null
 ): SingleResult {
     if (ctx.stopped()) return SingleResult.Stopped
-    val attempts = buildAttempts(ctx, content, prevTranslatedTail, prevSourceTail, content)
-    return when (val outcome = attemptDrivers(
-        attempts,
-        AttemptOptions(
-            maxSameRetries = ctx.maxSameRetries,
-            stopped = ctx.stopped,
-            meter = ctx.meter,
-            log = ctx.log
-        )
-    )) {
-        is DriverOutcome.Ok -> {
-            val verified = verifyTranslation(content, outcome.text, ctx.verify)
-            if (verified != null) SingleResult.Translated(verified)
-            else SingleResult.Failed(
-                FailureKind.FATAL,
-                verifyRejectReason(content, outcome.text, ctx.verify) ?: "verify-rejected"
-            )
+
+    // 辞書照合はチャンク本文のみに依存するため試行ループ外で1回だけ行う
+    val dict = ctx.dictionary
+    val dictEntries: List<String>
+    val dictExampleFallback: Boolean
+    if (dict == null) {
+        dictEntries = emptyList()
+        dictExampleFallback = false
+    } else {
+        val matched = matchDictionaryEntries(content, dict.characters, dict.genders)
+        if (matched.isNotEmpty()) {
+            dictEntries = matched
+            dictExampleFallback = false
+        } else {
+            dictEntries = matchDictionaryExamples(dict.characters, dict.genders)
+            dictExampleFallback = dictEntries.isNotEmpty()
         }
-        is DriverOutcome.GiveUp ->
-            if (outcome.configOnly) SingleResult.ConfigOnly else SingleResult.Failed(outcome.terminal, outcome.note)
-        is DriverOutcome.Stopped -> SingleResult.Stopped
     }
+
+    val source = appendMarker(content, ctx.verify.markerEnabled)
+    val drivers = ctx.driverNames.ifEmpty { listOf("default") }
+    val promptOrder = ctx.promptOrder.ifEmpty { listOf(1, 1) }
+
+    var lastFailureKind: FailureKind? = null
+    var lastNote = ""
+    var lastDeterministicKind: FailureKind? = null
+    var lastDeterministicNote: String? = null
+    var sawConfig = false
+    var sawDeterministic = false
+    var sawTransient = false
+
+    for (driver in drivers) {
+        for ((promptIdx, promptNum) in promptOrder.withIndex()) {
+            if (ctx.stopped()) return SingleResult.Stopped
+
+            val base = ctx.basePrompts[promptNum] ?: ctx.basePrompts.values.firstOrNull() ?: ""
+            val prompt = buildSystemPrompt(
+                basePrompt = base,
+                previousTranslatedTail = prevTranslatedTail,
+                previousSourceTail = prevSourceTail,
+                dictionaryEntries = dictEntries,
+                dictionaryStyle = ctx.dictionaryStyle,
+                enableCompletionMarker = ctx.verify.markerEnabled,
+                batchFormat = null,
+                dictionaryExampleFallback = dictExampleFallback
+            )
+
+            var sameRetries = 0
+            while (true) {
+                if (ctx.stopped()) return SingleResult.Stopped
+                // 技術的根拠: 第1引数に promptNum.toString() を渡し、bindCall側で試行中のプロンプト番号を正しく識別可能にする
+                when (val result = ctx.call(promptNum.toString(), prompt, source)) {
+                    is LlmResult.Success -> {
+                        val meter = ctx.meter
+                        if (meter != null && !meter.add(
+                                tokens = (result.promptTokens + result.completionTokens).toLong(),
+                                cost = 0.0
+                            )
+                        ) {
+                            ctx.log("cost cap reached, halt")
+                            return SingleResult.Stopped
+                        }
+
+                        // 品質チェック
+                        val verified = verifyTranslation(content, result.text, ctx.verify)
+                        if (verified != null) {
+                            if (promptIdx > 0) {
+                                ctx.log("✨ プロンプト#$promptNum でのリトライに成功しました")
+                            }
+                            return SingleResult.Translated(verified)
+                        }
+
+                        // 品質チェック不合格
+                        val rejectReason = verifyRejectReason(content, result.text, ctx.verify) ?: "verify-rejected"
+                        ctx.log("⚠️ 品質チェック不合格 ($rejectReason): プロンプト#$promptNum (${promptIdx + 1}/${promptOrder.size})")
+                        lastFailureKind = FailureKind.FATAL
+                        lastNote = rejectReason
+                        // 次のプロンプトへ進む
+                        break
+                    }
+                    is LlmResult.Failure -> {
+                        lastNote = result.failure.note
+                        lastFailureKind = result.failure.kind
+                        when (result.failure.kind) {
+                            FailureKind.BLOCKED_DETERMINISTIC, FailureKind.FATAL -> {
+                                sawDeterministic = true
+                                lastDeterministicKind = result.failure.kind
+                                lastDeterministicNote = result.failure.note
+                                break
+                            }
+                            FailureKind.CONFIG -> {
+                                sawConfig = true
+                                break
+                            }
+                            FailureKind.QUOTA_DAILY, FailureKind.QUOTA_MINUTE, FailureKind.RETRYABLE_AFTER -> {
+                                sawTransient = true
+                                if (sameRetries < ctx.maxSameRetries) {
+                                    sameRetries++
+                                    delay(1000L * sameRetries)
+                                    continue
+                                }
+                                break
+                            }
+                        }
+                    }
+                }
+                break
+            }
+            if (sawConfig || sawTransient) break
+        }
+        if (sawConfig || sawTransient) break
+    }
+
+    if (ctx.stopped()) return SingleResult.Stopped
+    if (sawConfig && !sawDeterministic && !sawTransient) return SingleResult.ConfigOnly
+
+    val terminal = when {
+        sawDeterministic -> lastDeterministicKind ?: FailureKind.BLOCKED_DETERMINISTIC
+        else -> lastFailureKind ?: FailureKind.FATAL
+    }
+    val finalNote = if (sawDeterministic) (lastDeterministicNote ?: lastNote) else lastNote
+    val isDeterministic = isDeterministicFailure(terminal, finalNote)
+    return SingleResult.Failed(terminal, finalNote, isDeterministic = isDeterministic)
 }
 
 data class BatchOutcome(
@@ -385,7 +491,7 @@ private suspend fun resolveBatchItems(
                 settled++
             }
             is SingleResult.Failed -> {
-                if (com.example.novelscraper.translation.v2.domain.isDeterministicFailure(r.terminal, r.note)) {
+                if (r.isDeterministic || com.example.novelscraper.translation.v2.domain.isDeterministicFailure(r.terminal, r.note)) {
                     if (writeFailed(store, outputDirUri, fileName, content, ctx.log)) {
                         saved.add("$fileName.failed")
                     }
@@ -507,7 +613,7 @@ suspend fun translateLarge(
             }
             is SingleResult.Failed -> {
                 ctx.log("large: chunk $name failed (${r.terminal} ${r.note})".trim())
-                if (isDeterministicFailure(r.terminal, r.note)) {
+                if (r.isDeterministic || isDeterministicFailure(r.terminal, r.note)) {
                     writeFailed(store, outDir.uri, name, chunkText, ctx.log)
                 }
                 return false

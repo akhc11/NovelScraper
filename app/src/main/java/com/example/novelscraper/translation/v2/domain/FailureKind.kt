@@ -67,7 +67,13 @@ fun isDeterministicFailure(kind: FailureKind, note: String = ""): Boolean = when
     FailureKind.FATAL -> {
         note.contains("context-length") ||
         note.contains("verify-rejected") ||
-        note.contains("residual")
+        note.contains("marker-missing") ||
+        note.contains("size-ratio") ||
+        note.contains("kana-floor") ||
+        note.contains("line-count") ||
+        note.contains("blank") ||
+        note.contains("residual") ||
+        note.contains("quality-rejected")
     }
     else -> false
 }

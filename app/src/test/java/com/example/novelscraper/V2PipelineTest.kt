@@ -784,8 +784,8 @@ class V2PipelineTest {
     }
 
     @Test
-    fun testDictExamples_Fallback() = kotlinx.coroutines.runBlocking {
-        // 完全一致ゼロ時は参考例が指示に入る（表記揺れでも表記パターンを伝える）
+    fun testDictExamples_NoFallbackWhenNoMatch() = kotlinx.coroutines.runBlocking {
+        // 完全一致ゼロ時は参考例のフォールバック注入を行わず、辞書ブロックを一切注入しない（トークン浪費・ハルシネーション防止）
         val prompts = mutableListOf<String>()
         val ctx = TranslateContext(
             basePrompts = mapOf(1 to "base"),
@@ -801,8 +801,9 @@ class V2PipelineTest {
         val r = translateSingle("本文に名前なし", ctx)
         assertTrue(r is SingleResult.Translated)
         assertEquals(1, prompts.size)
-        assertTrue(prompts[0].contains("参考例"))
-        assertTrue(prompts[0].contains("ヤマダ"))
+        assertFalse("完全一致ゼロ時は参考例が注入されないこと", prompts[0].contains("参考例"))
+        assertFalse("完全一致ゼロ時は登場人物対応表が注入されないこと", prompts[0].contains("登場人物対応表"))
+        assertFalse("完全一致ゼロ時は無関係な人物名が注入されないこと", prompts[0].contains("ヤマダ"))
     }
 
     @Test
@@ -938,6 +939,30 @@ class V2PipelineTest {
         val prompt = buildSystemPrompt("base", previousTranslatedTail = "prev", dictionaryEntries = entries)
         assertTrue(prompt.contains("PREVIOUS CONTEXT"))
         assertTrue(prompt.contains(COMPLETION_MARKER))
+    }
+
+    @Test
+    fun testDictionary_NoInjectionWhenNoCharactersInText() = kotlinx.coroutines.runBlocking {
+        // 本文に辞書掲載の登場人物が1人もいない場合、無関係な参考例は注入されず辞書ブロックがゼロになること
+        val dict = NovelDict(
+            style = "カタカナ",
+            characters = mapOf("山田" to "ヤマダ", "佐藤" to "サトウ")
+        )
+        val textWithoutCharacters = "風が吹き抜ける静かな森の中、鳥たちがさえずっていた。"
+
+        var capturedPrompt: String? = null
+        val ctx = looseCtx(call = { _, prompt, _ ->
+            capturedPrompt = prompt
+            ok("風が吹き抜ける静かな森の中、鳥たちがさえずっていた。\n[SRC_END]")
+        }).copy(dictionary = dict)
+
+        val result = translateSingle(textWithoutCharacters, ctx)
+        assertTrue(result is SingleResult.Translated)
+        assertNotNull(capturedPrompt)
+        assertFalse("本文に一致しない場合、辞書ルールが注入されないこと", capturedPrompt!!.contains("[人名の表記統一ルール]"))
+        assertFalse("本文に一致しない場合、登場人物対応表が注入されないこと", capturedPrompt!!.contains("[登場人物対応表]"))
+        assertFalse("無関係な人物名が注入されないこと", capturedPrompt!!.contains("山田"))
+        assertFalse("無関係な人物名が注入されないこと", capturedPrompt!!.contains("佐藤"))
     }
 
     @Test

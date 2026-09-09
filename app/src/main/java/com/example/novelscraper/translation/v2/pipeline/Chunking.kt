@@ -2,16 +2,18 @@ package com.example.novelscraper.translation.v2.pipeline
 
 import com.example.novelscraper.translation.v2.infra.FileStore
 
-/** 呼出毎コンパイルを避けるための共有正規表現 */
-private val PARAGRAPH_SPLIT_REGEX = Regex("(?<=\n\n+)")
+/** 呼出毎コンパイルを避けるための共有正規表現（固定長後読みで安全に行末改行を保持） */
 private val LINE_SPLIT_REGEX = Regex("(?<=\n)")
 
 /**
- * 段落（空行区切り）優先、次に行区切り、超長行はサロゲートペアを保護して機械分割する（文境界の検出はしない）。
- * 末端の微小余り（上限の15%または1000バイトのいずれか大きい方未満）は独立リクエストの浪費・短文サイズ比誤爆を防ぐため直前チャンクへスマート吸収する。
+ * 行区切り（\n）を保持しながら走査し、limitBytes を超えない範囲でチャンクにまとめる。
+ * 超長行（改行なしで limitBytes を超える行）はサロゲートペアを保護して安全に機械分割する。
+ * 末端の微小余り（上限の15%または1000バイトのいずれか大きい方未満）は独立リクエスト浪費・短文サイズ比誤爆を防ぐため直前チャンクへスマート吸収する。
  */
 fun splitIntoChunks(text: String, limitBytes: Int): List<String> {
     require(limitBytes > 0)
+    if (text.isEmpty()) return emptyList()
+
     val chunks = mutableListOf<String>()
     val current = StringBuilder()
     var currentBytes = 0
@@ -31,28 +33,15 @@ fun splitIntoChunks(text: String, limitBytes: Int): List<String> {
         currentBytes += pieceBytes
     }
 
-    // 1. 段落（空行区切り）でまず大まかに走査
-    // (?<=\n\n+) で空行境界を保持しながら分割
-    val paragraphs = text.split(PARAGRAPH_SPLIT_REGEX)
-    for (paragraph in paragraphs) {
-        if (paragraph.isEmpty()) continue
-        val pBytes = utf8Bytes(paragraph)
-        if (pBytes <= limitBytes) {
-            emit(paragraph)
-            continue
-        }
-
-        // 2. 段落が上限を超える場合：行単位（\n）で分割
-        val lines = paragraph.split(LINE_SPLIT_REGEX)
-        for (line in lines) {
-            if (line.isEmpty()) continue
-            val lBytes = utf8Bytes(line)
-            if (lBytes <= limitBytes) {
-                emit(line)
-                continue
-            }
-
-            // 3. 1行が上限を超える場合（改行のない超長行）：サロゲートペア安全に機械分割
+    // 技術的根拠: 固定長後読み (?<=\n) で改行を行末に保持したまま1パス走査。段落境界も改行も1バイトも失われない
+    val lines = text.split(LINE_SPLIT_REGEX)
+    for (line in lines) {
+        if (line.isEmpty()) continue
+        val lBytes = utf8Bytes(line)
+        if (lBytes <= limitBytes) {
+            emit(line)
+        } else {
+            // 改行のない超長行：サロゲートペア安全に機械分割
             // 技術的根拠: UTF-8マルチバイト（CJK=3バイト）での上限超過を防ぐため最大文字数を換算
             val safeMaxChars = (limitBytes / 3).coerceAtLeast(100)
             for (segment in splitSafeOversized(line, safeMaxChars)) {
@@ -62,9 +51,8 @@ fun splitIntoChunks(text: String, limitBytes: Int): List<String> {
     }
     flush()
 
-    // 4. 末尾の微小チャンク吸収（スマートマージ）:
-    // 2つ以上のチャンクがあり、末尾チャンクが上限の15%と1000バイトのいずれか大きい方未満の場合、
-    // たった1行・数行のために独立したAPIリクエストを浪費したり、短文サイズ比チェックで誤爆するのを防ぐため直前チャンクに合体する。
+    // 末尾の微小チャンク吸収（スマートマージ）:
+    // 2つ以上のチャンクがあり、末尾チャンクが上限の15%と1000バイトのいずれか大きい方未満の場合、直前チャンクに合体する。
     if (chunks.size >= 2) {
         val last = chunks.last()
         val absorbThresholdBytes = (limitBytes * 0.15).toInt().coerceAtLeast(1000)

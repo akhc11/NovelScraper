@@ -15,7 +15,9 @@ import com.example.novelscraper.translation.v2.engine.Rotation
 import com.example.novelscraper.translation.v2.engine.RunEngine
 import com.example.novelscraper.translation.v2.engine.UnmanagedRotation
 import com.example.novelscraper.translation.v2.engine.resolveProfileOptions
+import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.InMemoryFileStore
+import com.example.novelscraper.translation.v2.infra.VDoc
 import com.example.novelscraper.translation.v2.settings.V2DictSettings
 import com.example.novelscraper.translation.v2.settings.V2Limits
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
@@ -740,6 +742,63 @@ class V2EngineTest {
     }
 
     @Test
+    fun testRunEngine_DictModelFallbackToProfile() = kotlinx.coroutines.runBlocking {
+        // 辞書モデル名が空欄でも、登録プロファイルのモデル名へ自動フォールバックして辞書生成が成功する
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-dict-fallback")
+        for (name in listOf("ch1.txt", "ch2.txt")) {
+            val doc = store.createFile(folder.uri, name, "text/plain")!!
+            store.writeText(doc.uri, "主人公の李雲は剣を抜いた。ヒロインの雨花が微笑む。")
+        }
+        val receivedModels = mutableListOf<String>()
+        val dictJson = """{"style":"カタカナ","characters":{"李雲":"リウン","雨花":"ウカ"},"genders":{}}"""
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                receivedModels.add(request.model)
+                val sys = request.systemPrompt
+                if (sys.contains("Extract person names") ||
+                    sys.contains("Merge the dictionary") ||
+                    sys.contains("Review the merged")
+                ) {
+                    return LlmResult.Success(dictJson)
+                }
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        // 辞書モデルを空文字にする（設定未入力状態を模倣）
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0),
+            split = V2SplitSettings(enabled = false), // 物理分割OFF
+            dict = com.example.novelscraper.translation.v2.settings.V2DictSettings(
+                enabled = true,
+                providerId = "gemini",
+                model = "", // 空文字
+                mergeModel = ""
+            )
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(2, summary.completedFiles)
+        assertTrue(receivedModels.isNotEmpty())
+        assertTrue("空文字モデルへのリクエストが一切ないこと", receivedModels.none { it.isBlank() })
+        assertTrue("プロファイルのモデルにフォールバックしていること", receivedModels.all { it == "gemini-3.5-flash" })
+        val published = store.findChild(folder.uri, "dictionary.json")
+        assertNotNull("辞書ファイルが生成されること", published)
+        val loaded = DictionaryBuilder.parseDictJson(store.readText(published!!.uri) ?: "")
+        assertNotNull(loaded)
+        assertEquals(2, loaded!!.characters.size)
+    }
+
+    @Test
     fun testRunEngine_FailedFilesNotReprocessed() = kotlinx.coroutines.runBlocking {
         // 単体失敗は既存集合に登録され、後続ワーカーが拾い直さない（低速ワーカーの追いつき対策）
         val store = InMemoryFileStore()
@@ -788,6 +847,64 @@ class V2EngineTest {
             listOf("a.txt.failed", "b.txt.failed", "c.txt.failed"),
             store.children(outDir.uri).map { it.name }.filter { it != ".lang_cache" }.sorted()
         )
+    }
+
+    @Test
+    fun testRunEngine_WorkerSurvivesLargeTranslationException() = kotlinx.coroutines.runBlocking {
+        // 大ファイル分割翻訳中に作業フォルダ作成や分割処理で予期せぬ例外が発生しても、
+        // ワーカーは死なずに.failedを作成し後続ファイルを完走する
+        val mem = InMemoryFileStore()
+        val store = object : FileStore by mem {
+            override suspend fun createDir(parentUri: String, name: String): VDoc? {
+                if (name.startsWith(".parts_001_large")) {
+                    throw RuntimeException("Simulated unexpected disk/SAF crash during parts creation")
+                }
+                return mem.createDir(parentUri, name)
+            }
+        }
+        val folder = mem.createRoot("novel-large-resilience")
+        val doc1 = mem.createFile(folder.uri, "001_large.txt", "text/plain")!!
+        // 60,000バイトの大きなファイル（JAのsplitThresholdBytes 45,000Bを確実に超える）
+        store.writeText(doc1.uri, "これは大きなファイルの本文です。\n\n".repeat(1200))
+        val doc2 = store.createFile(folder.uri, "002_normal.txt", "text/plain")!!
+        store.writeText(doc2.uri, "正常に処理されるべき後続の本文です。")
+
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body の日本語訳\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(
+                workerStaggerSec = 0,
+                minSendIntervalMs = 0L,
+                batchMaxFiles = 1
+            ),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(
+                V2ModelProfile(
+                    providerId = "gemini",
+                    model = "gemini-3.5-flash",
+                    promptOrder = listOf(1),
+                    useCustomPromptOrder = true
+                )
+            ),
+            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0)
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse("エンジンが中断終了していないこと", summary.aborted)
+        assertEquals(2, summary.completedFiles)
+
+        val outDir = store.findChild(folder.uri, "翻訳完了_LLM")!!
+        val children = store.children(outDir.uri).map { it.name }.filter { it != ".lang_cache" }.sorted()
+        assertTrue("001_large.txt.failed が生成され他ワーカーの連鎖死が防がれること", children.contains("001_large.txt.failed"))
+        assertTrue("002_normal.txt がワーカー生存により正常に翻訳保存されること", children.contains("002_normal.txt"))
     }
 
     @Test

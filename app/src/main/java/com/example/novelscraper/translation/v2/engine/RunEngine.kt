@@ -12,6 +12,9 @@ import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.domain.V2DeclaredEncoding
 import com.example.novelscraper.translation.v2.domain.V2SendGate
+import com.example.novelscraper.translation.v2.domain.NovelTarget
+import com.example.novelscraper.translation.v2.domain.PartitionBatchResult
+import com.example.novelscraper.translation.v2.domain.DictResolveResult
 import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
 import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.VDoc
@@ -238,101 +241,31 @@ class RunEngine(
         return RunSummary(foldersDone, filesDone, filesTotal, aborted = stopFlag.get())
     }
 
-    private suspend fun sampleTextForLanguage(
-        files: List<VDoc>,
-        targetChars: Int = 1200,
-        maxFiles: Int = 5
-    ): String {
-        val sb = StringBuilder()
-        for (f in files.take(maxFiles)) {
-            // 技術的根拠1行：巨大ファイルのOOM防止および非UTF-8（GBK等）の文字コード自動判別のため先頭8KBをバイト読込・デコードする。
-            val bytes = store.readBytes(f.uri, 8192)
-            val text = if (bytes != null && bytes.isNotEmpty()) {
-                when (val res = TextIngest.ingest(bytes)) {
-                    is IngestResult.Success -> res.text
-                    else -> store.readText(f.uri) ?: continue
-                }
-            } else {
-                store.readText(f.uri) ?: continue
-            }
-            for (line in text.lineSequence()) {
-                val trimmed = line.trim()
-                if (trimmed.length >= 2 && !trimmed.all { it in "*=-_#~ 　\t" }) {
-                    sb.append(trimmed).append('\n')
-                    if (sb.length >= targetChars) return sb.toString()
-                }
-            }
-        }
-        return sb.toString()
-    }
-
-    /**
-     * 言語判定または既存キャッシュ (.lang_cache) の取得。
-     * 技術的根拠1行：言語は小説全体の属性のため親フォルダ直下に保存し、OSの拡張子付与を防ぐため application/octet-stream で作成する。
-     */
     private suspend fun detectOrLoadLanguage(
         folderUri: String,
         files: List<VDoc>,
         inherited: SourceLang? = null
     ): SourceLang {
-        val cache = store.findChild(folderUri, ".lang_cache")
-            ?: store.findChild(folderUri, ".lang_cache.txt")
-        val cachedCode = cache?.let { store.readText(it.uri) }?.trim() ?: ""
-        val cached = when (cachedCode) {
-            "ZH" -> SourceLang.ZH
-            "KO" -> SourceLang.KO
-            "EN" -> SourceLang.EN
-            "JA" -> SourceLang.JA
-            else -> null
-        }
-        if (cached != null) return cached
-
-        val lang = if (inherited != null) {
-            inherited
-        } else {
-            val sample = sampleTextForLanguage(files)
-            val detected = detectLanguage(sample)
-            addLog("detected language: ${detected.language} (${detected.reason})")
-            detected.language
-        }
-
-        val doc = cache ?: findOrCreateFile(store, folderUri, ".lang_cache", "application/octet-stream")
-        if (doc != null) {
-            if (!store.writeText(doc.uri, lang.name)) {
-                addLog("⚠️ 言語キャッシュの書き込みに失敗しました: $folderUri")
-            }
-        } else {
-            addLog("⚠️ 言語キャッシュの作成に失敗しました: $folderUri")
-        }
-        return lang
+        return LanguageDetectStage.detectOrLoadLanguage(
+            store = store,
+            folderUri = folderUri,
+            files = files,
+            inherited = inherited,
+            onLog = { addLog(it) }
+        )
     }
 
-    /** 事前物理分割の結果。skipped は文字化け確定で翻訳対象外にするファイル名。 */
-    private data class PreSplitOutcome(val done: Int, val total: Int, val skipped: Set<String>)
-
     /**
-     * Physical pre-split pass. Returns accumulated (done, total) when at least
-     * one part was translated (parent direct translation is then skipped),
-     * or null when there is nothing to translate this way (normal path continues,
-     * e.g. no raw files). Files quarantined as mojibake are reported in [PreSplitOutcome.skipped]
-     * and must be excluded from the normal path (they are never translated).
-     * One blocked novel never stops the others: each part file translates and
-     * resumes independently, so no combine step can get stuck mid-file.
+     * 物理事前分割ステージ。
+     * 生テキストファイル群（part_ 以外）を物理分割し、分割後サブフォルダをNovelTargetとして抽出する。
+     * 技術的根拠1行：翻訳ワーカーや辞書生成を再帰呼び出しせず、純粋に分割成果物（NovelTarget）のリストとして返却することで密結合と副作用を完全に排除する。
      */
-    private suspend fun processPreSplit(
+    private suspend fun partitionStage(
         folderUri: String,
         folderName: String,
-        settings: V2Settings,
-        pool: QuotaPool,
-        meter: CostMeter,
-        sourceLang: SourceLang
-    ): PreSplitOutcome? {
-        val rawFiles = store.children(folderUri)
-            .filter {
-                !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) &&
-                    !it.name.startsWith("part_", ignoreCase = true)
-            }
-            .sortedBy { it.name }
+        rawFiles: List<VDoc>,
+        settings: V2Settings
+    ): PartitionBatchResult? {
         if (rawFiles.isEmpty()) return null
         val splitRoot = store.findChild(folderUri, "分割済み")
             ?: store.createDir(folderUri, "分割済み")
@@ -340,8 +273,7 @@ class RunEngine(
                 addLog("❌ 「分割済み」フォルダの作成に失敗しました: $folderName")
                 return null
             }
-        var done = 0
-        var total = 0
+        val targets = mutableListOf<NovelTarget>()
         val skipped = mutableSetOf<String>()
         for ((rawIndex, raw) in rawFiles.withIndex()) {
             if (stopFlag.get() || !coroutineContext.isActive) break
@@ -359,60 +291,43 @@ class RunEngine(
                 onSkipped = { skipped.add(raw.name) }
             )
             if (result != null && !stopFlag.get() && coroutineContext.isActive) {
-                // 技術的根拠1行：親で確定済みの sourceLang をそのまま引き継ぎ、重複判定・重複保存を排除する。
-                val subName = result.novelName
-                _state.update { it.copy(statusText = "🚀 分割完了・翻訳開始: $subName") }
-                addLog("🚀 [翻訳開始] サブフォルダ: $subName (${result.partCount} パート)")
-                val (d, t) = processFolder(result.subfolderUri, subName, settings, pool, meter, sourceLang)
-                done += d
-                total += t
+                val subFiles = store.children(result.subfolderUri)
+                    .filter { !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) }
+                    .sortedBy { it.name }
+                targets.add(
+                    NovelTarget(
+                        novelName = result.novelName,
+                        folderUri = result.subfolderUri,
+                        isPreSplit = true,
+                        files = subFiles,
+                        sampleText = result.sampleText
+                    )
+                )
             }
         }
-        return PreSplitOutcome(done, total, skipped)
+        return PartitionBatchResult(targets, skipped)
     }
 
-    private suspend fun processFolder(
-        folderUri: String,
-        folderName: String,
+    /**
+     * 単一小説ターゲットに対する直線パイプライン実行。
+     * [完了判定 ➔ 辞書ロード/生成 ➔ 並行翻訳ワーカー実行] を一本道で処理する。
+     */
+    private suspend fun executeNovelPipeline(
+        target: NovelTarget,
+        sourceLang: SourceLang,
         settings: V2Settings,
         pool: QuotaPool,
-        meter: CostMeter,
-        inheritedLang: SourceLang? = null
+        meter: CostMeter
     ): Pair<Int, Int> {
-        if (shouldAbort(pool, settings)) {
-            addLog("⚠️ 利用可能なキー枠が枯渇したためフォルダ処理を中止: $folderName")
-            stopFlag.set(true)
-            return 0 to 0
-        }
-
-        val files = store.children(folderUri)
-            .filter {
-                !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true)
-            }
-            .sortedBy { it.name }
+        val folderUri = target.folderUri
+        val folderName = target.novelName
+        val files = target.files
         if (files.isEmpty()) {
             addLog("⚠️ 対象ファイルなし: $folderName (直下に.txtファイルがありません)")
             _state.update { it.copy(statusText = "⚠️ .txtファイルがありません: $folderName") }
             return 0 to 0
         }
 
-        // 技術的根拠1行：物理分割や完了スキップの前に親フォルダ直下の言語を確定・永続化し、下流に一貫して伝播する。
-        _state.update { it.copy(statusText = "🔍 言語判定中: $folderName") }
-        val sourceLang = detectOrLoadLanguage(folderUri, files, inheritedLang)
-
-        // Physical pre-split first (same order as the frozen spec):
-        // each raw file is split and its subfolder translated immediately,
-        // direct translation of the parent is skipped afterwards.
-        if (settings.split.enabled && inheritedLang == null) {
-            val splitResult = processPreSplit(folderUri, folderName, settings, pool, meter, sourceLang)
-            if (splitResult != null) {
-                // 技術的根拠1行：物理分割対象が存在した場合、サブフォルダ側で辞書未完成等のスキップがあっても親の生テキストを直訳してはならない（巨大ファイル事故防止）。
-                if (splitResult.skipped.isNotEmpty()) {
-                    addLog("⏭️ 文字化けのため翻訳しません: ${splitResult.skipped.sorted().joinToString(", ")}")
-                }
-                return splitResult.done to splitResult.total
-            }
-        }
         val outSubDir = settings.limits.outputSubDir.ifBlank { "翻訳完了_LLM" }
         _state.update { it.copy(statusText = "📁 フォルダ内を検索中: $folderName") }
         val outputDir = store.findChild(folderUri, outSubDir)
@@ -448,23 +363,25 @@ class RunEngine(
             return total to total
         }
 
-        // 辞書
-        var novelDict: NovelDict? = null
+        // 辞書ステージ
         if (settings.dict.enabled) {
             _state.update { it.copy(statusText = "📖 登場人物辞書を生成中: $folderName") }
-            val existingDict = store.findChild(folderUri, "dictionary.json")
-            val dictJson = existingDict?.let { store.readText(it.uri) } ?: ""
-            novelDict = DictionaryBuilder.parseDictJson(dictJson)
-            if (novelDict == null) {
-                novelDict = DictionaryBuilder(
-                    store = store,
-                    buildHandler = { s, p, k -> buildHandler(s, p, k) },
-                    stopped = { stopFlag.get() },
-                    log = { addLog(it) }
-                ).build(folderUri, files, settings, pool)
-            }
-            if (novelDict == null) {
-                addLog("⚠️ 辞書未完成のため「$folderName」の翻訳を中断しました（トークン浪費防止）")
+        }
+        val dictResult = DictionaryStage.resolveDictionary(
+            store = store,
+            folderUri = folderUri,
+            folderName = folderName,
+            files = files,
+            settings = settings,
+            pool = pool,
+            buildHandler = { s, p, k -> buildHandler(s, p, k) },
+            stopped = { stopFlag.get() },
+            onLog = { addLog(it) }
+        )
+        val novelDict = when (dictResult) {
+            is DictResolveResult.Ready -> dictResult.dict
+            is DictResolveResult.Aborted -> {
+                addLog(dictResult.reason)
                 _state.update { it.copy(statusText = "⚠️ 辞書未完成のため中断: $folderName") }
                 return preCompleted to total
             }
@@ -490,9 +407,7 @@ class RunEngine(
             )
             profile.id to order
         }
-        val primary = profiles.first()
-        val primaryOrder = profilePromptOrders[primary.id] ?: listOf(1, 1)
-        val promptOrder = primaryOrder
+        val promptOrder = profilePromptOrders[profiles.first().id] ?: listOf(1, 1)
         val claims = Collections.synchronizedSet(mutableSetOf<String>())
         val workerCount = settings.limits.parallelWorkers.coerceIn(
             TranslationLimits.WORKER_COUNT_RANGE.first,
@@ -513,8 +428,6 @@ class RunEngine(
             enabled = settings.prevContext.enabled
         )
 
-        // 技術的根拠1行：経路選択を実行時分岐にせず型で固定する（S-2のプール誤用を構造的に防止）。
-        // なおワーカー群はsupervisorScopeで隔離し、想定外例外が兄弟ワーカーや親スコープへ波及しないようにする。
         supervisorScope {
             for (wId in 1..workerCount) {
                 val claimed = if (profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI }) {
@@ -526,42 +439,7 @@ class RunEngine(
                     addLog("worker #$wId skipped (no key)")
                     continue
                 }
-                val router: PromptRouter = if (profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI }) {
-                    Rotation(
-                        workerId = wId,
-                        profiles = profiles,
-                        pool = pool,
-                        keyIndex = claimed.first,
-                        key = claimed.second,
-                        descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR, ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR),
-                        handlerFactory = { profile, key -> buildHandler(settings, profile, key) },
-                        openRouterKey = settings.openRouterKey,
-                        geminiCooldownSec = settings.geminiCooldownSec,
-                        transientRetryDelaySec = settings.transientRetryDelaySec,
-                        maxSameRetries = options.maxSameRetries,
-                        sendGate = sendGate,
-                        sendGateIntervalMs = if (options.minSendIntervalMs == 0L) settings.limits.requestDelaySec * 1000L else maxOf(settings.limits.requestDelaySec * 1000L, options.minSendIntervalMs),
-                        stopped = { stopFlag.get() },
-                        meter = meter,
-                        log = { addLog("[W#$wId] $it") }
-                    )
-                } else {
-                    UnmanagedRotation(
-                        workerId = wId,
-                        profiles = profiles,
-                        key = settings.openRouterKey,
-                        descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR, ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR),
-                        handlerFactory = { profile, key -> buildHandler(settings, profile, key) },
-                        cooldownSec = settings.geminiCooldownSec,
-                        transientRetryDelaySec = settings.transientRetryDelaySec,
-                        maxSameRetries = options.maxSameRetries,
-                        sendGate = sendGate,
-                        sendGateIntervalMs = if (options.minSendIntervalMs == 0L) settings.limits.requestDelaySec * 1000L else maxOf(settings.limits.requestDelaySec * 1000L, options.minSendIntervalMs),
-                        stopped = { stopFlag.get() },
-                        meter = meter,
-                        log = { addLog("[W#$wId] $it") }
-                    )
-                }
+                val router = createRouter(wId, profiles, pool, claimed, settings, meter)
                 launch(kotlinx.coroutines.Dispatchers.IO) {
                     try {
                         if (wId > 1 && options.workerStaggerSec > 0) {
@@ -587,6 +465,76 @@ class RunEngine(
             }
         }
         return completed.get() to total
+    }
+
+    private suspend fun processFolder(
+        folderUri: String,
+        folderName: String,
+        settings: V2Settings,
+        pool: QuotaPool,
+        meter: CostMeter
+    ): Pair<Int, Int> {
+        if (shouldAbort(pool, settings)) {
+            addLog("⚠️ 利用可能なキー枠が枯渇したためフォルダ処理を中止: $folderName")
+            stopFlag.set(true)
+            return 0 to 0
+        }
+
+        val allTxtFiles = store.children(folderUri)
+            .filter { !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) }
+            .sortedBy { it.name }
+        if (allTxtFiles.isEmpty()) {
+            addLog("⚠️ 対象ファイルなし: $folderName (直下に.txtファイルがありません)")
+            _state.update { it.copy(statusText = "⚠️ .txtファイルがありません: $folderName") }
+            return 0 to 0
+        }
+
+        // 技術的根拠1行：物理分割や完了スキップの前に親フォルダ直下の言語を確定・永続化し、下流に一貫して伝播する。
+        _state.update { it.copy(statusText = "🔍 言語判定中: $folderName") }
+        val sourceLang = detectOrLoadLanguage(folderUri, allTxtFiles)
+
+        // 物理事前分割またはターゲット決定
+        val rawFiles = allTxtFiles.filter { !it.name.startsWith("part_", ignoreCase = true) }
+        val targets: List<NovelTarget>
+        if (settings.split.enabled && rawFiles.isNotEmpty()) {
+            val partitionResult = partitionStage(folderUri, folderName, rawFiles, settings)
+            if (partitionResult != null) {
+                if (partitionResult.skippedFiles.isNotEmpty()) {
+                    addLog("⏭️ 文字化けのため翻訳しません: ${partitionResult.skippedFiles.sorted().joinToString(", ")}")
+                }
+                targets = partitionResult.targets
+            } else {
+                targets = emptyList()
+            }
+        } else {
+            targets = listOf(
+                NovelTarget(
+                    novelName = folderName,
+                    folderUri = folderUri,
+                    isPreSplit = false,
+                    files = allTxtFiles
+                )
+            )
+        }
+
+        if (targets.isEmpty()) {
+            return 0 to 0
+        }
+
+        var doneTotal = 0
+        var filesTotal = 0
+        for (target in targets) {
+            if (stopFlag.get() || !coroutineContext.isActive) break
+            if (target.isPreSplit) {
+                val subName = target.novelName
+                _state.update { it.copy(statusText = "🚀 分割完了・翻訳開始: $subName") }
+                addLog("🚀 [翻訳開始] サブフォルダ: $subName (${target.files.size} パート)")
+            }
+            val (done, total) = executeNovelPipeline(target, sourceLang, settings, pool, meter)
+            doneTotal += done
+            filesTotal += total
+        }
+        return doneTotal to filesTotal
     }
 
     private suspend fun runWorker(
@@ -642,6 +590,66 @@ class RunEngine(
             },
             log = { addLog(it) }
         ).run()
+    }
+
+    private fun createRouter(
+        workerId: Int,
+        profiles: List<V2ModelProfile>,
+        pool: QuotaPool,
+        claimed: Pair<Int, String>,
+        settings: V2Settings,
+        meter: CostMeter
+    ): PromptRouter {
+        val descriptors = mapOf(
+            ProviderId.GEMINI to GEMINI_DESCRIPTOR,
+            ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR
+        )
+        val handlerFactory: (V2ModelProfile, String) -> ProviderHandler = { profile, key ->
+            buildHandler(settings, profile, key)
+        }
+        val sendInterval = if (options.minSendIntervalMs == 0L) {
+            settings.limits.requestDelaySec * 1000L
+        } else {
+            maxOf(settings.limits.requestDelaySec * 1000L, options.minSendIntervalMs)
+        }
+        val isGemini = profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI }
+
+        return if (isGemini) {
+            Rotation(
+                workerId = workerId,
+                profiles = profiles,
+                pool = pool,
+                keyIndex = claimed.first,
+                key = claimed.second,
+                descriptors = descriptors,
+                handlerFactory = handlerFactory,
+                openRouterKey = settings.openRouterKey,
+                geminiCooldownSec = settings.geminiCooldownSec,
+                transientRetryDelaySec = settings.transientRetryDelaySec,
+                maxSameRetries = options.maxSameRetries,
+                sendGate = sendGate,
+                sendGateIntervalMs = sendInterval,
+                stopped = { stopFlag.get() },
+                meter = meter,
+                log = { addLog("[W#$workerId] $it") }
+            )
+        } else {
+            UnmanagedRotation(
+                workerId = workerId,
+                profiles = profiles,
+                key = settings.openRouterKey,
+                descriptors = descriptors,
+                handlerFactory = handlerFactory,
+                cooldownSec = settings.geminiCooldownSec,
+                transientRetryDelaySec = settings.transientRetryDelaySec,
+                maxSameRetries = options.maxSameRetries,
+                sendGate = sendGate,
+                sendGateIntervalMs = sendInterval,
+                stopped = { stopFlag.get() },
+                meter = meter,
+                log = { addLog("[W#$workerId] $it") }
+            )
+        }
     }
 
 }

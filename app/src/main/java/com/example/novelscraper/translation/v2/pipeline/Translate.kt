@@ -176,23 +176,11 @@ private fun buildAttempts(
     val attempts = mutableListOf<Attempt>()
     // 技術的根拠1行：構造化出力の適用範囲をバッチ枠に限定するため、枠種別で送信bindingを使い分ける
     val invoke = if (batchFormat != null) (ctx.callBatch ?: ctx.call) else ctx.call
-    // 技術的根拠1行：辞書照合はチャンク本文のみに依存するため試行ループ外で1回だけ行う
-    // 完全一致ゼロ時は参考例を入れる（表記揺れでも表記パターンを伝える。旧版の例示フォールバック復活）
-    val dictEntries: List<String>
-    val dictExampleFallback: Boolean
-    val dict = ctx.dictionary
-    if (dict == null) {
-        dictEntries = emptyList()
-        dictExampleFallback = false
+    // 技術的根拠1行：本文中に登場する人物のみを注入し、該当なし時は無関係な参考例を注入せずトークン浪費とハルシネーションを防ぐ
+    val dictEntries = if (ctx.dictionary != null) {
+        matchDictionaryEntries(chunkText, ctx.dictionary.characters, ctx.dictionary.genders)
     } else {
-        val matched = matchDictionaryEntries(chunkText, dict.characters, dict.genders)
-        if (matched.isNotEmpty()) {
-            dictEntries = matched
-            dictExampleFallback = false
-        } else {
-            dictEntries = matchDictionaryExamples(dict.characters, dict.genders)
-            dictExampleFallback = dictEntries.isNotEmpty()
-        }
+        emptyList()
     }
     for (driver in ctx.driverNames) {
         for (promptNum in ctx.promptOrder.ifEmpty { listOf(1, 1) }) {
@@ -204,8 +192,7 @@ private fun buildAttempts(
                 dictionaryEntries = dictEntries,
                 dictionaryStyle = ctx.dictionaryStyle,
                 enableCompletionMarker = ctx.verify.markerEnabled,
-                batchFormat = batchFormat,
-                dictionaryExampleFallback = dictExampleFallback
+                batchFormat = batchFormat
             )
             val source = appendMarker(sourceForMarker, ctx.verify.markerEnabled)
             attempts.add(Attempt(driver, prompt, source) { invoke(driver, prompt, source) })
@@ -226,22 +213,11 @@ suspend fun translateSingle(
 ): SingleResult {
     if (ctx.stopped()) return SingleResult.Stopped
 
-    // 辞書照合はチャンク本文のみに依存するため試行ループ外で1回だけ行う
-    val dict = ctx.dictionary
-    val dictEntries: List<String>
-    val dictExampleFallback: Boolean
-    if (dict == null) {
-        dictEntries = emptyList()
-        dictExampleFallback = false
+    // 技術的根拠1行：本文中に登場する人物のみを注入し、該当なし時は無関係な参考例を注入せずトークン浪費とハルシネーションを防ぐ
+    val dictEntries = if (ctx.dictionary != null) {
+        matchDictionaryEntries(content, ctx.dictionary.characters, ctx.dictionary.genders)
     } else {
-        val matched = matchDictionaryEntries(content, dict.characters, dict.genders)
-        if (matched.isNotEmpty()) {
-            dictEntries = matched
-            dictExampleFallback = false
-        } else {
-            dictEntries = matchDictionaryExamples(dict.characters, dict.genders)
-            dictExampleFallback = dictEntries.isNotEmpty()
-        }
+        emptyList()
     }
 
     val source = appendMarker(content, ctx.verify.markerEnabled)
@@ -268,8 +244,7 @@ suspend fun translateSingle(
                 dictionaryEntries = dictEntries,
                 dictionaryStyle = ctx.dictionaryStyle,
                 enableCompletionMarker = ctx.verify.markerEnabled,
-                batchFormat = null,
-                dictionaryExampleFallback = dictExampleFallback
+                batchFormat = null
             )
 
             var sameRetries = 0

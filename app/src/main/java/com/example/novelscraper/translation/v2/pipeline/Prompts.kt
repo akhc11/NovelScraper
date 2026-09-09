@@ -8,15 +8,34 @@ const val V2_PROMPT_1_ZH = """あなたはプロの小説翻訳家です。以�
 
 【厳格な翻訳ルール】
 1. 中国語残留の完全禁止（最重要）:
-   - 登場人物名、地名、固有名詞、効果音・擬音語、感嘆詞を含め、すべての中国語を1文字も残さず自然な日本語（カタカナまたは漢字）に翻訳・音訳すること。
+   - 登場人物名、地名、固有名詞、効果音・擬音語、感嘆詞を含め、すべての中国語を1文字も残さず自然な日本語に翻訳・音訳すること。
    - 純粋な簡体字（说、这、个、着、们 など）をそのまま残すことは厳禁。日本の常用漢字またはカタカナに変換すること。
    - カッコ書き等で原文の中国語を併記することは厳禁。
-2. 完全な翻訳:
+2. 固有名詞・人名の表記ルール（作品のジャンルに左右されず、名前自体のルーツで厳格に判定すること）:
+   作品全体のジャンルにかかわらず、登場人物名・固有名詞はその語源（ルーツ）に応じて個別に以下のように表記を統一すること。
+   - 【西洋風・外国語の音訳名 ➔ カタカナ】:
+     漢字で書かれていても、英語・西洋名・架空ファンタジー名の当て字（音訳）である場合は、漢字のまま残さず必ず自然なカタカナに音訳すること。
+     [具体例]
+     ・克莱恩 → クライン (Klein)
+     ・奥黛丽 → オードリー (Audrey)
+     ・爱丽丝 → アリス (Alice)
+     ・阿尔杰 → アルジャー (Alger)
+     ・罗恩 → ロン (Ron)
+     ・贝克兰德 → バックランド (Backlund / 地名)
+     ※「克莱恩」「奥黛麗」のように漢字のまま残すことは厳禁。
+   - 【中華・東洋伝統の姓名 ➔ 日本の常用漢字】:
+     漢民族・東洋伝統の姓名（姓1文字＋名1〜2文字等）は、カタカナ音読み（リー・ユン等）に崩さず、日本の漢字で表記すること。
+     その際、中国の簡体字は日本の常用漢字・新字体に必ず復元・変換すること。
+     [具体例]
+     ・李云 → 李雲 (「云」は簡体字。「リー・ユン」とカタカナ化せず「李雲」と日本の漢字にすること)
+     ・叶凡 → 葉凡 (簡体字「叶」は伝統姓の「葉」)
+     ・林动 → 林動 (簡体字「动」→ 新字体「動」)
+     ・萧炎 → 蕭炎 (簡体字「萧」→ 伝統漢字「蕭」)
+     ・张楚岚 → 張楚嵐 (簡体字「张/岚」→ 新字体「張/嵐」)
+     ・王铁柱 → 王鉄柱 (簡体字「铁」→ 新字体「鉄」)
+3. 完全な翻訳:
    - すべての文を省略せず、一文ずつ丁寧に意訳すること。
    - 登場人物の感情や情景描写のニュアンスを正確に日本語で表現すること。
-3. 表記の統一:
-   - 人名や用語は、提供された人名辞書や作品の世界観に合わせて一貫したカタカナ／漢字表記にすること。
-   - 中華伝統の姓名や武侠・仙侠の固有名詞は自然な日本の漢字表記、西洋風の名前はカタカナで整えること。
 4. 出力制約:
    - 翻訳した日本語本文のみを出力すること。前後の挨拶、解説、注釈は一切含めないこと。
    - 本文を ``` などのマークダウンのコードブロックで囲まないこと（指示された構造タグやマーカーがある場合は、それを削除せず正しく出力すること）。
@@ -170,9 +189,7 @@ fun buildSystemPrompt(
     dictionaryEntries: List<String> = emptyList(),
     dictionaryStyle: String? = null,
     enableCompletionMarker: Boolean = true,
-    batchFormat: String? = null,
-    /** 参考例時は対応表である旨を明示する（完全一致ゼロ時のフォールバック） */
-    dictionaryExampleFallback: Boolean = false
+    batchFormat: String? = null
 ): String {
     val sb = StringBuilder(basePrompt)
 
@@ -191,8 +208,7 @@ fun buildSystemPrompt(
     }
 
     if (dictionaryEntries.isNotEmpty()) {
-        val tableLabel = if (dictionaryExampleFallback) "登場人物対応表（参考例：本文に一致なし）" else "登場人物対応表"
-        sb.append("\n\n[人名の表記統一ルール]\n人名の表記は【${dictionaryStyle ?: "カタカナ"}】で統一してください。\n\n[$tableLabel]\n")
+        sb.append("\n\n[人名の表記統一ルール]\n人名の表記は【${dictionaryStyle ?: "カタカナ"}】で統一してください。\n\n[登場人物対応表]\n")
         for (entry in dictionaryEntries) {
             sb.append(entry).append("\n")
         }
@@ -295,22 +311,6 @@ fun matchDictionaryEntries(
     return entries
 }
 
-/**
- * 参考例：完全一致ゼロ時に辞書の先頭から抜粋する（上限付き）。
- * 技術的根拠1行：表記揺れで一致しなくても表記パターンをモデルへ伝える（旧版の例示フォールバック復活）。
- */
-fun matchDictionaryExamples(
-    characters: Map<String, String>,
-    genders: Map<String, String>? = null,
-    limit: Int = 10
-): List<String> {
-    val entries = mutableListOf<String>()
-    for ((key, value) in characters) {
-        if (entries.size >= limit) break
-        entries.add(formatDictEntry(key, value, genders))
-    }
-    return entries
-}
 
 /**
  * プロファイル固有のプロンプトを組み立てる（純粋関数）。

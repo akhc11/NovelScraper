@@ -143,10 +143,7 @@ suspend fun joinOutputsStreaming(
     finalUri: String,
     log: (String) -> Unit = {}
 ): Boolean {
-    if (!store.writeText(finalUri, "")) {
-        log("join init failed")
-        return false
-    }
+    val sb = StringBuilder()
     var first = true
     var prevEndingNewlines = 0
     for (name in chunkNames) {
@@ -164,11 +161,14 @@ suspend fun joinOutputsStreaming(
                 else -> "\n" + trimmed
             }
         }
-        if (!store.appendText(finalUri, piece)) return false
+        sb.append(piece)
 
         // 末尾の改行数を記録
         prevEndingNewlines = text.takeLast(2).count { it == '\n' }
         first = false
     }
-    return true
+    // 技術的根拠1行：SAFの"wa"追記非互換（Google Driveや特定プロバイダで失敗）を物理排除するため、メモリ結合してwtで一括保存する。
+    val ok = store.writeText(finalUri, sb.toString())
+    if (!ok) log("join writeText failed")
+    return ok
 }

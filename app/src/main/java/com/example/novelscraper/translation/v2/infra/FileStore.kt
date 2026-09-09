@@ -18,6 +18,7 @@ data class VDoc(
  */
 interface FileStore {
     suspend fun children(dirUri: String): List<VDoc>
+    suspend fun openInputStream(fileUri: String): java.io.InputStream?
     suspend fun readText(fileUri: String): String?
     /**
      * 生バイト読込（取込の文字コード判定用）。巨大ファイル対策に上限付き。

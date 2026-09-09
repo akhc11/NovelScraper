@@ -102,7 +102,7 @@ class WorkerRunner(
                         buildProfilePrompt(
                             originalPrompt = prompt,
                             basePrompts = allBasePrompts,
-                            originalPromptNum = primaryPromptNum,
+                            originalPromptNum = currentPromptNum,
                             targetPromptNum = targetPromptNum
                         )
                     )
@@ -156,7 +156,8 @@ class WorkerRunner(
                 if (contentBytes > splitThresholdBytes) {
                     if (contentBytes > options.maxInputBytes) {
                         // 技術的根拠1行：上限超えの巨大入力は実行時分割も事前分割への自動回送もせず、その場でスキップ確定する
-                        log("⏭️ [W#$workerId] 上限超過のためスキップ: $fileName (${contentBytes}B)")
+                        val mb = options.maxInputBytes / 1_000_000
+                        log("⏭️ [W#$workerId] 上限超過(${mb}MB)のためスキップ: $fileName (${contentBytes}B)。設定で「物理分割」を有効にしてください")
                         writeFailed(store, outputDirUri, fileName, content) { log(it) }
                         existing.add("$fileName.failed")
                         bump(fileName)
@@ -285,9 +286,7 @@ class WorkerRunner(
                     }
                 } finally {
                     for (item in batch.drop(1)) {
-                        val name = item.first.name
-                        val settled = existing.contains(name) || existing.contains("$name.failed")
-                        if (settled) unclaim(name)
+                        unclaim(item.first.name)
                     }
                 }
             } finally {

@@ -9,11 +9,12 @@ data class Resolved<T>(val value: T, val coerced: Boolean)
 
 /** 選択肢式（thinkingLevel等）。非対応なら何が来ても未指定に落とす */
 fun resolveOption(allowedValues: Set<String>?, preset: String?, override: String?): String? {
-    val chosen = override?.takeIf { it.isNotBlank() }
+    val raw = override?.takeIf { it.isNotBlank() }
         ?: preset?.takeIf { it.isNotBlank() }
         ?: return null
-    if (allowedValues != null && chosen !in allowedValues) return null
-    return chosen
+    val normalized = raw.trim().lowercase()
+    if (allowedValues != null && normalized !in allowedValues.map { it.lowercase() }) return null
+    return normalized
 }
 
 /** 数値式。範囲外は丸める。非有限数（NaN/Infinity）は未指定に落とす（送るとJSON化で必ず失敗するため） */

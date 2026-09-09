@@ -77,13 +77,11 @@ internal fun buildOpenRouterBody(
         providerOrder,
         providerAllowFallbacks
     )
-    val reasoning = when {
-        resolved.reasoningEnabled != null ->
-            JsonObject(mapOf("enabled" to JsonPrimitive(resolved.reasoningEnabled)))
-        resolved.reasoningEffort != null ->
-            JsonObject(mapOf("effort" to JsonPrimitive(resolved.reasoningEffort)))
-        else -> null
+    val reasoningMap = buildMap {
+        resolved.reasoningEffort?.let { put("effort", JsonPrimitive(it)) }
+        resolved.reasoningEnabled?.let { put("enabled", JsonPrimitive(it)) }
     }
+    val reasoning = if (reasoningMap.isNotEmpty()) JsonObject(reasoningMap) else null
     val responseFormat = if (req.options.jsonSchema != null) {
         JsonObject(mapOf("type" to JsonPrimitive("json_object")))
     } else null

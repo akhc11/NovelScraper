@@ -92,7 +92,7 @@ internal data class V2GeminiFeedback(val blockReason: String? = null)
 internal fun buildGeminiBody(req: LlmRequest): String {
     val thinking = when {
         !req.options.thinkingLevel.isNullOrBlank() ->
-            V2GeminiThinking(thinkingLevel = req.options.thinkingLevel)
+            V2GeminiThinking(thinkingLevel = req.options.thinkingLevel.trim().lowercase())
         req.options.thinkingBudget != null ->
             V2GeminiThinking(thinkingBudget = req.options.thinkingBudget)
         else -> null

@@ -6,15 +6,15 @@ import com.example.novelscraper.translation.v2.settings.V2ModelProfile
  * OpenRouter固有4項目の解決則（pure・副作用なし）。
  * 技術的根拠1行：能力表で覆えない社方言（reasoning/provider）は送信直前で正規化・除去し、400級誤爆を未然に防ぐ。
  */
-val OPENROUTER_REASONING_EFFORTS: Set<String> = setOf("low", "medium", "high")
+val OPENROUTER_REASONING_EFFORTS: Set<String> = setOf("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 const val OPENROUTER_PROVIDER_ORDER_MAX: Int = 10
 const val OPENROUTER_PROVIDER_NAME_MAX: Int = 64
 
-/** 空・"none"・表外値は未指定（未送信）に落とす。大文字・前後空白は正規化する */
+/** 空・表外値は未指定（未送信）に落とす。大文字・前後空白は正規化する */
 fun resolveReasoningEffort(raw: String?): String? {
     val normalized = raw?.trim()?.lowercase() ?: return null
-    if (normalized.isEmpty() || normalized == "none") return null
+    if (normalized.isEmpty()) return null
     return if (normalized in OPENROUTER_REASONING_EFFORTS) normalized else null
 }
 

@@ -93,24 +93,26 @@ class WorkerRunner(
             }
         }
         fun bindCall(forBatch: Boolean): suspend (String, String, String) -> LlmResult {
-            return { _, prompt, source ->
+            return { promptOrDriver, prompt, source ->
+                val currentPromptNum = promptOrDriver.toIntOrNull() ?: primaryPromptNum
                 val profilePrompts = profiles.associate { profile ->
                     val order = profilePromptOrders[profile.id] ?: promptOrder
-                    profile.id to order.map { targetPromptNum ->
+                    val targetPromptNum = if (order.contains(currentPromptNum)) currentPromptNum else order.firstOrNull() ?: currentPromptNum
+                    profile.id to listOf(
                         buildProfilePrompt(
                             originalPrompt = prompt,
                             basePrompts = allBasePrompts,
                             originalPromptNum = primaryPromptNum,
                             targetPromptNum = targetPromptNum
                         )
-                    }
+                    )
                 }
                 router.execute(listOf(prompt), source, profilePrompts, forBatch)
             }
         }
         val ctx = TranslateContext(
             basePrompts = allBasePrompts,
-            promptOrder = listOf(primaryPromptNum), // 技術的根拠: プロンプト順巡回はRotation側に一本化し、外側attemptDriversとの二重ループ(NxN)を防止
+            promptOrder = promptOrder, // 技術的根拠: translateSingleで品質チェックNG時のプロンプト順序リトライを実行するため設定順序を渡す
             driverNames = listOf("w$workerId"),
             dictionary = novelDict,
             verify = verify,
@@ -261,7 +263,7 @@ class WorkerRunner(
                                 }
                             }
                             is SingleResult.Failed -> {
-                                if (isDeterministicFailure(r.terminal, r.note)) {
+                                if (r.isDeterministic || isDeterministicFailure(r.terminal, r.note)) {
                                     log("❌ [W#$workerId] 翻訳失敗: $fileName (${r.terminal} ${r.note})".trim())
                                     // 技術的根拠1行：確定的エラーのみ.failedを作成し、後続ワーカーの拾い直しを防ぐ。
                                     if (writeFailed(store, outputDirUri, fileName, content) { log(it) }) {

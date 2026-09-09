@@ -45,6 +45,9 @@ private val GEMINI_FLASH_LEVELS_ALL =
 /** Gemini系の共通サンプリング対応（temperature 0.0〜2.0）。topP/repetitionPenaltyは未対応のため送らない */
 private val GEMINI_SAMPLING = mapOf("temperature" to SamplingParam(0.0, 2.0))
 
+/** Gemini 2.5系用の思考予算範囲（-1: 動的, 0: OFF, 1..24576: 上限トークン数） */
+private val GEMINI_2_5_BUDGET = ThinkingSupport.Budget(-1..24576)
+
 /** Gemini既知表。公式対応表の写し（MINIMAL未対応＝3.7/3.8系）。Gemma系は思考なし（None）として収録 */
 val GEMINI_DESCRIPTOR = ProviderDescriptor(
     id = "gemini",
@@ -74,8 +77,8 @@ val GEMINI_DESCRIPTOR = ProviderDescriptor(
             structuredOutput = true,
             maxOutputTokens = 65536
         ),
-        "gemini-2.5-flash" to ModelCapabilities(thinking = GEMINI_FLASH_LEVELS_ALL, sampling = GEMINI_SAMPLING, structuredOutput = true, maxOutputTokens = 65536),
-        "gemini-2.5-pro" to ModelCapabilities(thinking = GEMINI_FLASH_LEVELS_ALL, sampling = GEMINI_SAMPLING, structuredOutput = true, maxOutputTokens = 65536),
+        "gemini-2.5-flash" to ModelCapabilities(thinking = GEMINI_2_5_BUDGET, sampling = GEMINI_SAMPLING, structuredOutput = true, maxOutputTokens = 65536),
+        "gemini-2.5-pro" to ModelCapabilities(thinking = GEMINI_2_5_BUDGET, sampling = GEMINI_SAMPLING, structuredOutput = true, maxOutputTokens = 65536),
         "gemini-2.0-flash" to ModelCapabilities(thinking = ThinkingSupport.None, sampling = GEMINI_SAMPLING, maxOutputTokens = 8192),
         "gemini-1.5-flash" to ModelCapabilities(thinking = ThinkingSupport.None, sampling = GEMINI_SAMPLING, maxOutputTokens = 8192),
         "gemini-1.5-pro" to ModelCapabilities(thinking = ThinkingSupport.None, sampling = GEMINI_SAMPLING, maxOutputTokens = 8192),

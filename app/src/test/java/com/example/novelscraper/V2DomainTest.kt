@@ -336,10 +336,10 @@ class V2DomainTest {
 
     @Test
     fun testOpenRouterParams_Gating() {
-        // reasoningEffort: 表外値・none・空白は落とす。大文字・前後空白は正規化する
+        // reasoningEffort: 表外値・空白は落とす。大文字・前後空白は正規化する。noneは公式指定値として通す
         assertEquals(null, resolveReasoningEffort(null))
         assertEquals(null, resolveReasoningEffort(""))
-        assertEquals(null, resolveReasoningEffort("none"))
+        assertEquals("none", resolveReasoningEffort("none"))
         assertEquals(null, resolveReasoningEffort("ultra"))
         assertEquals("high", resolveReasoningEffort("high"))
         assertEquals("high", resolveReasoningEffort(" HIGH "))
@@ -373,10 +373,10 @@ class V2DomainTest {
         // 大文字は正規化されて送られる
         val normalized = buildOpenRouterBody(req, reasoningEffort = " HIGH ")
         assertTrue(normalized.contains("\"effort\":\"high\""))
-        // enabled優先でeffortは無視される
+        // enabledとeffortは両立して送られる（公式仕様準拠）
         val both = buildOpenRouterBody(req, reasoningEffort = "high", reasoningEnabled = true)
         assertTrue(both.contains("\"enabled\":true"))
-        assertTrue(!both.contains("effort"))
+        assertTrue(both.contains("\"effort\":\"high\""))
         // orderの空要素・重複は除去される
         val order = buildOpenRouterBody(req, providerOrder = listOf(" b ", "", "b", "a"))
         assertTrue(order.contains("\"order\":[\"b\",\"a\"]"))

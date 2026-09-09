@@ -195,6 +195,8 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
                     TranslationLimits.DICT_BATCH_BYTES_RANGE.first,
                     TranslationLimits.DICT_BATCH_BYTES_RANGE.last
                 ),
+                // 技術的根拠1行：辞書走査上限を設定保存から正しく復元し、再起動時の固定値フォールバックを防ぐ。
+                maxTotalScanBytes = root.intOr("dictMaxTotalScanBytes", 10000000).coerceAtLeast(100000),
                 requestDelaySec = root.intOr("dictRequestDelaySec", 0).coerceAtLeast(0),
                 cooldown429Sec = root.intOr("dict429CooldownSec", 60).coerceIn(
                     TranslationLimits.COOLDOWN_MIN_SEC,

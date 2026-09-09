@@ -28,6 +28,7 @@ import com.example.novelscraper.translation.v2.pipeline.writeFailed
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
 
 /**
  * 単一ワーカーのファイル走査・翻訳を担う。RunEngineからはフォルダ処理のワーカー段階だけを委譲される。
@@ -167,23 +168,37 @@ class WorkerRunner(
                         ?: store.createDir(outputDirUri, ".parts_${fileName}")
                     if (workDir == null) {
                         log("❌ [W#$workerId] 大ファイル用作業フォルダ作成失敗: $fileName")
+                        writeFailed(store, outputDirUri, fileName, content) { log(it) }
+                        existing.add("$fileName.failed")
+                        bump(fileName)
                     } else {
                         log("📦 [W#$workerId] 大ファイル分割翻訳開始: $fileName (${contentBytes}B)")
-                        val ok = translateLarge(
-                            store, workDir.uri, outputDirUri, fileName, content, ctx,
-                            LargeOptions(
-                                chunkSizeBytes = chunkSizeBytes,
-                                tailLines = settings.prevContext.lines.coerceIn(
-                                    TranslationLimits.PREV_LINES_RANGE.first,
-                                    TranslationLimits.PREV_LINES_RANGE.last
+                        val ok = try {
+                            translateLarge(
+                                store, workDir.uri, outputDirUri, fileName, content, ctx,
+                                LargeOptions(
+                                    chunkSizeBytes = chunkSizeBytes,
+                                    tailLines = settings.prevContext.lines.coerceIn(
+                                        TranslationLimits.PREV_LINES_RANGE.first,
+                                        TranslationLimits.PREV_LINES_RANGE.last
+                                    ),
+                                    maxInputBytes = options.maxInputBytes
                                 ),
-                                maxInputBytes = options.maxInputBytes
-                            ),
-                            prevSourceTail = contextTracker.getPrevSourceTail(fileIdx),
-                            onChunkProgress = { cur, tot ->
-                                onChunkProgress(cur, tot)
-                            }
-                        )
+                                prevSourceTail = contextTracker.getPrevSourceTail(fileIdx),
+                                onChunkProgress = { cur, tot ->
+                                    onChunkProgress(cur, tot)
+                                }
+                            )
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (t: Throwable) {
+                            // 技術的根拠: 分割処理中の例外でワーカーを死なせず、.failedを記録して他ワーカーの連鎖死を防ぎ次へ進む
+                            log("❌ [W#$workerId] 大ファイル分割翻訳で予期せぬ例外: $fileName (${t.javaClass.simpleName}: ${t.message})")
+                            writeFailed(store, outputDirUri, fileName, content) { log(it) }
+                            existing.add("$fileName.failed")
+                            bump(fileName)
+                            false
+                        }
                         onChunkProgress(0, 0)
                         if (ok) {
                             existing.add(fileName)
@@ -289,6 +304,15 @@ class WorkerRunner(
                         unclaim(item.first.name)
                     }
                 }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                // 技術的根拠: ファイル走査・処理中の予期せぬ例外でワーカーを死なせず、.failedを記録して他ワーカーの連鎖死を防ぎ次へ進む
+                log("❌ [W#$workerId] ファイル処理中に予期せぬ例外: $fileName (${t.javaClass.simpleName}: ${t.message})")
+                val fallbackContent = try { store.readText(file.uri) ?: "" } catch (_: Throwable) { "" }
+                writeFailed(store, outputDirUri, fileName, fallbackContent) { log(it) }
+                existing.add("$fileName.failed")
+                bump(fileName)
             } finally {
                 if (!retainPrimaryClaim) unclaim(fileName)
             }

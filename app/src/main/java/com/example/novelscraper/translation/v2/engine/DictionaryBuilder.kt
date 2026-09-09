@@ -52,7 +52,12 @@ class DictionaryBuilder(
             // 技術的根拠: 1,000ファイル超の長編小説フォルダでメモリ枯渇（OOM）を起こさないよう、
             // ファイル名だけ先に渡し、本文はサンプリング後に1件ずつ遅延読込する
             val docByName = files.associateBy { it.name }
-            val scopes = listOf(dict.model.ifBlank { "dict" })
+            // 技術的根拠1行：辞書モデル未指定時にプロファイルのモデルへ安全にフォールバックし、空文字送信による400/404エラー即死を防ぐ。
+            val effectiveModel = dict.model.ifBlank {
+                settings.profiles.firstOrNull()?.model?.ifBlank { null } ?: "gemini-3.5-flash"
+            }
+            val effectiveMergeModel = dict.mergeModel.ifBlank { effectiveModel }
+            val scopes = listOf(effectiveModel)
             // 技術的根拠1行：OpenRouterは単一キー共有でGeminiプールを使わない（空プールでの誤枯渇を防ぐ。送って作って統合するだけ）。
             val dictCall: suspend (String, String, String) -> LlmResult = { model, prompt, text ->
                 // 技術的根拠1行：辞書設定のproviderOrder/allowFallbacksが無視されるとOpenRouterの振分け指定が死に設定になるため引継ぐ（解決はhandlerFor側）。
@@ -108,8 +113,8 @@ class DictionaryBuilder(
                 },
                 dictCall,
                 DictOptions(
-                    model = dict.model,
-                    mergeModel = dict.mergeModel,
+                    model = effectiveModel,
+                    mergeModel = effectiveMergeModel,
                     thinkingLevel = dict.thinkingLevel,
                     maxFiles = dict.totalParts,
                     maxBatchBytes = dict.batchMaxBytes,

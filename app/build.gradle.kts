@@ -41,8 +41,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-    kotlinOptions {
-        jvmTarget = "11"
+    // 技術的根拠1行：非推奨kotlinOptionsからcompilerOptionsへ移行し、出力ターゲット11は維持する（外部振る舞い不変）。
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
+        }
     }
     testOptions {
         unitTests {

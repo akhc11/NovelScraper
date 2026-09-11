@@ -161,7 +161,8 @@ class RunEngine(
     companion object {
         fun extractReadableFolderName(uriString: String): String {
             return try {
-                val decoded = java.net.URLDecoder.decode(uriString, "UTF-8")
+                // 技術的根拠1行：非推奨のString charset overloadをStandardCharsets版に置換し、復号結果は同一にする（外部振る舞い不変）。
+                val decoded = java.net.URLDecoder.decode(uriString, java.nio.charset.StandardCharsets.UTF_8)
                 val afterTree = if (decoded.contains("/tree/")) decoded.substringAfter("/tree/") else decoded
                 val afterDoc = if (afterTree.contains("/document/")) afterTree.substringAfter("/document/") else afterTree
                 val clean = afterDoc.substringAfterLast(':').substringAfterLast('/')

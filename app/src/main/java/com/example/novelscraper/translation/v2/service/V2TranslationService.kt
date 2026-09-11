@@ -145,6 +145,28 @@ class V2TranslationService : Service() {
         return START_NOT_STICKY
     }
 
+    /**
+     * Android 15 dataSync 6時間制限のタイムアウト通知。
+     * 技術的根拠1行：公式doc・OSS実例(WhiteDNS/media3/rouse-context)通り数秒以内のstopSelfが必須で、呼ばないとForegroundServiceDidNotStopInTimeExceptionで強制終了するため。
+     * 動作例：夜間放置で6h超→「時間制限のため安全に一時停止しました。次回は続きから再開します」と止まり、中間状態(.parts_xxx/out/確定分)は保持して次回レジュームする。
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        super.onTimeout(startId, fgsType)
+        android.util.Log.w("V2TranslationService", "dataSync timeout (startId=$startId type=$fgsType): stopping gracefully")
+        try {
+            onStopRequested?.invoke()
+        } catch (e: Exception) {
+            android.util.Log.w("V2TranslationService", "onTimeout stop callback failed", e)
+        }
+        onStopRequested = null
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (e: Exception) {
+            android.util.Log.w("V2TranslationService", "onTimeout stopForeground failed", e)
+        }
+        stopSelf()
+    }
+
     override fun onDestroy() {
         if (wakeLock?.isHeld == true) {
             try {

@@ -146,14 +146,12 @@ data class V2Settings(
     val transientRetryDelaySec: Int = 2
 ) {
     companion object {
-        val DEFAULT_GEMINI_API_KEYS = listOf(
-            "***REMOVED***",
-            "***REMOVED***",
-            "***REMOVED***",
-            "***REMOVED***",
-            "***REMOVED***",
-            "***REMOVED***"
-        )
+        /**
+         * 同梱既定キーは廃止（空）。技術的根拠1行：APK内の秘密情報は逆コンパイルで必ず漏洩するため(BYOK化)、既定値は持たず利用者入力のみとする。
+         * 動作例：新規導入→鍵欄は空で「鍵未設定のため開始できません」と案内し、自分の鍵を貼って開始する。旧定数は互換のため残すが中身は空。
+         * 注意：漏洩済みの旧6鍵は各プロバイダ側で無効化(ローテーション)すること。履歴からも消えないためgit履歴の掃除は別途必要。
+         */
+        val DEFAULT_GEMINI_API_KEYS: List<String> = emptyList()
 
         /**
          * 言語ごとの情報密度と日本語翻訳時の膨張率から、AIモデルの出力上限（maxOutputChars）に

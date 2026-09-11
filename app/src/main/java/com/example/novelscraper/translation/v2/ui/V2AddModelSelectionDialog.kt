@@ -34,7 +34,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import com.example.novelscraper.translation.v2.domain.capabilitiesFor
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.ui.theme.AppColors
 
@@ -181,12 +180,9 @@ fun V2AddModelSelectionDialog(
                             onClick = {
                                 if (customModelName.isNotBlank()) {
                                     val trimmedModel = customModelName.trim()
-                                    val desc = if (customProvider == "gemini") {
-                                        com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
-                                    } else {
-                                        com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
-                                    }
-                                    val maxTokens = desc.capabilitiesFor(trimmedModel).maxOutputTokens
+                                    // 技術的根拠1行：追加時の上限解決を表示用登録簿に一本化し、未知はOpenRouter互換の従来通り。
+                                    val maxTokens = com.example.novelscraper.translation.v2.domain.ProviderRegistry
+                                        .capabilitiesForOrOpenRouter(customProvider, trimmedModel).maxOutputTokens
                                     onSelect(
                                         V2ModelProfile(
                                             id = java.util.UUID.randomUUID().toString(),

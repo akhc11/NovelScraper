@@ -20,10 +20,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
-import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
+import com.example.novelscraper.translation.v2.domain.ProviderRegistry
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
-import com.example.novelscraper.translation.v2.domain.capabilitiesFor
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2PromptPreset
 import com.example.novelscraper.translation.v2.settings.V2Settings
@@ -51,10 +49,10 @@ internal fun V2ProfileCard(
     onRequestSavePreset: (List<Int>) -> Unit,
     onTest: (() -> Unit)?
 ) {
-    val caps = when (profile.providerId) {
-        "gemini" -> GEMINI_DESCRIPTOR.capabilitiesFor(profile.model.ifBlank { "gemini-3.5-flash" })
-        else -> OPENROUTER_DESCRIPTOR.capabilitiesFor(profile.model.ifBlank { "unknown" })
-    }
+    // 技術的根拠1行：表示用能力を登録簿に一本化し、空欄既定・未知フォールバックは従来通り（gemini完全一致のみflash既定）。
+    // 動作例：モデルを選ぶと出る項目（温度・思考・構造化）は今と同じに出し分けられる。
+    val defaultModel = if (profile.providerId == "gemini") "gemini-3.5-flash" else "unknown"
+    val caps = ProviderRegistry.capabilitiesForOrOpenRouter(profile.providerId, profile.model.ifBlank { defaultModel })
 
     Card(
         modifier = Modifier.fillMaxWidth(),

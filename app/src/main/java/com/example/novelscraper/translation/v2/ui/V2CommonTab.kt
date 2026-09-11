@@ -15,10 +15,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
-import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
+import com.example.novelscraper.translation.v2.domain.ProviderRegistry
 import com.example.novelscraper.translation.v2.domain.V2_ENCODING_OPTIONS
-import com.example.novelscraper.translation.v2.domain.capabilitiesFor
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import com.example.novelscraper.translation.v2.settings.V2SizeRatios
 import com.example.novelscraper.ui.theme.AppColors
@@ -489,10 +487,12 @@ internal fun V2CommonTab(
             }
         }
 
-        val dictCaps = when (state.dictProvider.value) {
-            "gemini" -> GEMINI_DESCRIPTOR.capabilitiesFor(state.dictModel.value.ifBlank { "gemini-3.5-flash" })
-            else -> OPENROUTER_DESCRIPTOR.capabilitiesFor(state.dictModel.value)
-        }
+        // 技術的根拠1行：辞書の表示用能力を登録簿に一本化し、空欄既定・未知フォールバックは従来通り。
+        val dictDefault = if (state.dictProvider.value.trim().lowercase() == "gemini") "gemini-3.5-flash" else state.dictModel.value
+        val dictCaps = ProviderRegistry.capabilitiesForOrOpenRouter(
+            state.dictProvider.value,
+            state.dictModel.value.ifBlank { dictDefault }
+        )
         ThinkingLevelEditor(
             selected = state.dictThinking.value,
             supported = dictCaps.thinking,

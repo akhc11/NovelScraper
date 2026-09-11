@@ -1,13 +1,11 @@
 package com.example.novelscraper.translation.v2.ui
 
-import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
-import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.OPENROUTER_PROVIDER_ORDER_MAX
 import com.example.novelscraper.translation.v2.domain.ProviderId
+import com.example.novelscraper.translation.v2.domain.ProviderRegistry
 import com.example.novelscraper.translation.v2.domain.SamplingParam
 import com.example.novelscraper.translation.v2.domain.ThinkingSupport
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
-import com.example.novelscraper.translation.v2.domain.capabilitiesFor
 import com.example.novelscraper.translation.v2.domain.resolveDouble
 import com.example.novelscraper.translation.v2.domain.resolveProviderOrderReport
 import com.example.novelscraper.translation.v2.domain.resolveReasoningEffort
@@ -36,11 +34,8 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
             issues.add(V2SettingsIssue("$label: モデル名が空です", true))
             return@forEachIndexed
         }
-        val descriptor = when (provider) {
-            ProviderId.GEMINI -> GEMINI_DESCRIPTOR
-            ProviderId.OPENROUTER -> OPENROUTER_DESCRIPTOR
-        }
-        val caps = descriptor.capabilitiesFor(profile.model)
+        // 技術的根拠1行：能力表を登録簿に一本化する（nullは上部で除外済みのため仕様同一）。
+        val caps = ProviderRegistry.capabilitiesFor(provider, profile.model)
         val thinking = caps.thinking
         if (profile.thinkingLevel != null) {
             val allowed = (thinking as? ThinkingSupport.Levels)?.supported
@@ -111,11 +106,7 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
         }
     }
     if (settings.dict.enabled && settings.dict.thinkingLevel != null && settings.dict.model.isNotBlank()) {
-        val dictCaps = when (settings.dict.providerId.toProviderId()) {
-            ProviderId.GEMINI -> GEMINI_DESCRIPTOR
-            ProviderId.OPENROUTER -> OPENROUTER_DESCRIPTOR
-            null -> null
-        }?.capabilitiesFor(settings.dict.model)
+        val dictCaps = ProviderRegistry.capabilitiesForOrNull(settings.dict.providerId, settings.dict.model)
         val dictAllowed = (dictCaps?.thinking as? ThinkingSupport.Levels)?.supported
         if (dictAllowed == null) {
             issues.add(V2SettingsIssue("辞書: ${settings.dict.model} は思考非対応のため thinkingLevel は送られません", false))

@@ -1,12 +1,8 @@
 package com.example.novelscraper.translation.v2.engine
 
-import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.LlmResult
-import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
-import com.example.novelscraper.translation.v2.domain.ProviderId
+import com.example.novelscraper.translation.v2.domain.ProviderRegistry
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
-import com.example.novelscraper.translation.v2.domain.capabilitiesFor
-import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.VDoc
 import com.example.novelscraper.translation.v2.pipeline.LargeOptions
@@ -88,11 +84,9 @@ class WorkerRunner(
         val primaryPromptNum = promptOrder.firstOrNull() ?: 1
         // 技術的根拠: 構造化出力の適用範囲をバッチ枠に限定するため、枠種別で送信bindingを使い分ける
         val useJsonBatch = profiles.any { profile ->
-            profile.useJsonSchema && when (profile.providerId.toProviderId()) {
-                ProviderId.GEMINI -> GEMINI_DESCRIPTOR.capabilitiesFor(profile.model).structuredOutput
-                ProviderId.OPENROUTER -> OPENROUTER_DESCRIPTOR.capabilitiesFor(profile.model).structuredOutput
-                null -> false
-            }
+            // 技術的根拠1行：能力判定を登録簿に一本化し、未知プロバイダーは非対応扱いにする（従来のnull->falseと同一）。
+            profile.useJsonSchema &&
+                ProviderRegistry.capabilitiesForOrNull(profile.providerId, profile.model)?.structuredOutput == true
         }
         fun bindCall(forBatch: Boolean): suspend (String, String, String) -> LlmResult {
             return { promptOrDriver, prompt, source ->

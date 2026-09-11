@@ -1,12 +1,11 @@
 package com.example.novelscraper.translation.v2.engine
 
 import com.example.novelscraper.translation.v2.domain.CostMeter
-import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.LlmResult
-import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.ProviderDescriptor
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
 import com.example.novelscraper.translation.v2.domain.ProviderId
+import com.example.novelscraper.translation.v2.domain.ProviderRegistry
 import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.toProviderId
@@ -95,10 +94,8 @@ class RunEngine(
     private val store: FileStore,
     private val scope: CoroutineScope,
     private val options: EngineOptions = EngineOptions(),
-    private val descriptors: Map<ProviderId, ProviderDescriptor> = mapOf(
-        ProviderId.GEMINI to GEMINI_DESCRIPTOR,
-        ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR
-    ),
+    // 技術的根拠1行：記述子既定値を登録簿に一本化し、新会社追加は登録簿の1行で追従する（既存2社の内容同一）。
+    private val descriptors: Map<ProviderId, ProviderDescriptor> = ProviderRegistry.descriptors,
     /** テスト用の差し替え口。null時は内蔵生成を使う */
     private val handlerFactory: ((V2Settings, V2ModelProfile, String) -> ProviderHandler)? = null
 ) {
@@ -641,10 +638,7 @@ class RunEngine(
         settings: V2Settings,
         meter: CostMeter
     ): PromptRouter {
-        val descriptors = mapOf(
-            ProviderId.GEMINI to GEMINI_DESCRIPTOR,
-            ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR
-        )
+        val descriptors = ProviderRegistry.descriptors
         val handlerFactory: (V2ModelProfile, String) -> ProviderHandler = { profile, key ->
             buildHandler(settings, profile, key)
         }

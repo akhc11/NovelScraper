@@ -3,12 +3,11 @@ package com.example.novelscraper.translation.v2.engine
 import com.example.novelscraper.translation.v2.domain.AcquireResult
 import com.example.novelscraper.translation.v2.domain.ClassifiedFailure
 import com.example.novelscraper.translation.v2.domain.FailureKind
-import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
-import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
 import com.example.novelscraper.translation.v2.domain.ProviderId
+import com.example.novelscraper.translation.v2.domain.ProviderRegistry
 import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.isQuotaLike
@@ -71,9 +70,8 @@ class DictionaryBuilder(
                     dict.providerId, model, prompt, text,
                     resolveProfileOptions(
                         profile.copy(thinkingLevel = dict.thinkingLevel),
-                        dict.providerId.toProviderId()?.let {
-                            mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR, ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR)[it]
-                        }
+                        // 技術的根拠1行：辞書の記述子解決を登録簿に一本化する（内容同一）。
+                        dict.providerId.toProviderId()?.let { ProviderRegistry.descriptors[it] }
                     )
                 )
                 if (dict.providerId.toProviderId() == ProviderId.OPENROUTER) {

@@ -216,4 +216,22 @@ class V2SettingsValidationTest {
         assertTrue(ok.settings.prevContext.enabled)
         assertEquals(30, ok.settings.prevContext.lines)
     }
+
+    @Test
+    fun testMaxOutputChars_OutOfRange_WarnsAndCoerces() {
+        val settings = base().copy(
+            profiles = listOf(
+                V2ModelProfile(providerId = "gemini", model = "m1", maxOutputChars = 1500),
+                V2ModelProfile(providerId = "gemini", model = "m2", maxOutputChars = 150000)
+            )
+        )
+        val issues = validateV2Settings(settings)
+        assertFalse(issues.any { it.blocksSave }) // 保存自体はブロックしない
+        val warnings = issues.filter { !it.blocksSave && it.message.contains("目標文字数") }
+        assertEquals(2, warnings.size)
+
+        val coerced = coercedV2Settings(settings)
+        assertEquals(2000, coerced.profiles[0].maxOutputChars) // 2000に丸められる
+        assertEquals(100000, coerced.profiles[1].maxOutputChars) // 100000に丸められる
+    }
 }

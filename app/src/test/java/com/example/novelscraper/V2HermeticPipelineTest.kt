@@ -5,6 +5,7 @@ import com.example.novelscraper.translation.v2.domain.FailureKind
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.engine.EngineOptions
+import com.example.novelscraper.translation.v2.engine.LangCacheStore
 import com.example.novelscraper.translation.v2.engine.RunEngine
 import com.example.novelscraper.translation.v2.infra.GeminiHandler
 import com.example.novelscraper.translation.v2.infra.InMemoryFileStore
@@ -355,9 +356,14 @@ class V2HermeticPipelineTest {
         // 2. 二重処理なく4ファイル全てが処理されたこと
         assertEquals("4ファイル全てが処理されたこと", 4, processedFiles.size)
 
-        // 3. 成果物が翻訳フォルダに出力されていること
+        // 3. 成果物が翻訳フォルダに出力されていること（言語キャッシュの正本1件を除く）
         val outChildren = store.children(outputDir.uri)
+            .filter { !LangCacheStore.isCacheFileName(it.name) }
         assertEquals("4つの成果物ファイルが出力されたこと", 4, outChildren.size)
+        assertNotNull(
+            "言語キャッシュの正本が出力フォルダに1件あること",
+            store.findChild(outputDir.uri, LangCacheStore.FILE_NAME)
+        )
         for (i in 1..4) {
             val doc = store.findChild(outputDir.uri, "ch_$i.txt")
             assertNotNull("ch_$i.txt が存在すること", doc)
@@ -513,6 +519,7 @@ class V2HermeticPipelineTest {
         assertTrue("パート数が1より大きいこと", result!!.partCount > 1)
 
         val partDocs = store.children(result.subfolderUri)
+            .filter { it.name.startsWith("part_") && it.name.endsWith(".txt") }
         assertEquals(result.partCount, partDocs.size)
 
         var restoredLineCount = 0

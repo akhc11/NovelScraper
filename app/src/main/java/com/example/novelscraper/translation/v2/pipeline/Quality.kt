@@ -48,8 +48,9 @@ fun checkAndStripMarker(text: String, enabled: Boolean): String? {
 fun stripFences(text: String): String {
     var t = text.trim()
     if (t.startsWith("```")) {
+        // 技術的根拠1行：言語名なしの異常な fence でも本文を捨てず枠記号だけ剥がす。
         val firstNl = t.indexOf('\n')
-        t = if (firstNl == -1) "" else t.substring(firstNl + 1)
+        t = if (firstNl == -1) t.substring(3) else t.substring(firstNl + 1)
     }
     if (t.endsWith("```")) {
         t = t.removeSuffix("```")
@@ -57,7 +58,36 @@ fun stripFences(text: String): String {
     return t.trim()
 }
 
-fun utf8Bytes(text: String): Int = text.toByteArray(Charsets.UTF_8).size
+/**
+ * UTF-8バイト数をヒープ割り当て（toByteArray）なしで計算する。
+ * 技術的根拠1行: 大量テキストや走査ループでのByteArray生成によるヒープ浪費とGC Jitterを完全に防止する。
+ * 不正な単独サロゲートはJVMの符号化（? 置換＝1バイト）に合わせる。
+ */
+fun utf8Bytes(text: String): Int {
+    var bytes = 0
+    var i = 0
+    val len = text.length
+    while (i < len) {
+        val ch = text[i].code
+        when {
+            ch <= 0x7F -> bytes += 1
+            ch <= 0x7FF -> bytes += 2
+            ch in 0xD800..0xDBFF -> {
+                if (i + 1 < len && text[i + 1].code in 0xDC00..0xDFFF) {
+                    bytes += 4
+                    i++
+                } else {
+                    // 不正な単独上位サロゲートはJVMの符号化（? 置換＝1バイト）に合わせる。
+                    bytes += 1
+                }
+            }
+            ch in 0xDC00..0xDFFF -> bytes += 1
+            else -> bytes += 3
+        }
+        i++
+    }
+    return bytes
+}
 
 /**
  * サイズ比検証（原文に対する訳文のバイト比率%）。範囲は呼出側指定。
@@ -77,11 +107,9 @@ fun sizeRatioOk(sourceText: String, translatedText: String, minPct: Int, maxPct:
     return ratio >= minPct && ratio <= maxPct
 }
 
-private fun isKana(ch: Char): Boolean =
-    ch in '\u3040'..'\u309F' || ch in '\u30A0'..'\u30FF'
+private fun isKana(ch: Char): Boolean = ScriptKinds.isKana(ch.code)
 
-private fun isKanji(ch: Char): Boolean =
-    ch in '\u4E00'..'\u9FFF' || ch in '\u3400'..'\u4DBF'
+private fun isKanji(ch: Char): Boolean = ScriptKinds.isHan(ch.code)
 
 /** かな率＝かな／（かな＋漢字）。日本語訳文らしさの下限判定に使う */
 fun kanaRate(text: String): Double {

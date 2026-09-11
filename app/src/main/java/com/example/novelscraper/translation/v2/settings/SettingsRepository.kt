@@ -36,6 +36,7 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
 
     private object Keys {
         val SETTINGS = stringPreferencesKey("v2_settings_json")
+        val BACKUP = stringPreferencesKey("v2_settings_json.corrupt")
     }
 
     override val settings: Flow<V2Settings> = context.v2DataStore.data.map { prefs ->
@@ -43,15 +44,26 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
         try {
             v2Json.decodeFromString(V2Settings.serializer(), raw)
         } catch (_: Exception) {
-            // 破損時は既存保護：既定値を返し、上書きしない
+            // 破損時は既定値を流すが、上書きはしない（下記の保存時隔離で保護する）。
             V2Settings()
         }
     }
 
     override suspend fun save(settings: V2Settings) = withContext(Dispatchers.IO) {
         try {
-            val raw = v2Json.encodeToString(V2Settings.serializer(), settings)
-            context.v2DataStore.edit { it[Keys.SETTINGS] = raw }
+            context.v2DataStore.edit { prefs ->
+                // 技術的根拠1行：破損した既存値を既定値で上書き確定させないよう、保存前に隔離する（表示は既定値のまま）。
+                val raw = prefs[Keys.SETTINGS]
+                if (raw != null && prefs[Keys.BACKUP] == null) {
+                    try {
+                        v2Json.decodeFromString(V2Settings.serializer(), raw)
+                    } catch (_: Exception) {
+                        prefs[Keys.BACKUP] = raw
+                        android.util.Log.w("V2Settings", "quarantined corrupt settings (${raw.length} chars)")
+                    }
+                }
+                prefs[Keys.SETTINGS] = v2Json.encodeToString(V2Settings.serializer(), settings)
+            }
             } catch (e: Exception) {
                 android.util.Log.w("V2Settings", "save failed", e)
             }
@@ -105,16 +117,20 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
                     },
                     dict = dict,
                     limits = importLimits(root),
-                    split = importSplit(root),
+                    split = importSplit(root, warnings),
                     prevContext = importPrevContext(root),
                     promptSelection = importPromptSelection(root),
                     customPrompts = importCustomPrompts(root),
                     promptPresets = importPromptPresets(root).ifEmpty { defaultV2PromptPresets() },
-                    sizeRatios = importSizeRatios(root),
+                    sizeRatios = importSizeRatios(root, warnings),
                     geminiRotationEnabled = root.booleanOr("geminiRotationEnabled", true),
-                    geminiCooldownSec = root.intOr("geminiCooldownSec", 60).coerceIn(
-                        TranslationLimits.COOLDOWN_MIN_SEC,
-                        TranslationLimits.COOLDOWN_MAX_SEC
+                    geminiCooldownSec = root.importBoundedInt(
+                        "geminiCooldownSec", 60,
+                        TranslationLimits.COOLDOWN_MIN_SEC, TranslationLimits.COOLDOWN_MAX_SEC, warnings
+                    ),
+                    transientRetryDelaySec = root.importBoundedInt(
+                        "transientRetryDelaySec", 2,
+                        0, TranslationLimits.WAIT_MAX_SEC.toInt(), warnings
                     )
                 ),
                 warnings
@@ -217,13 +233,18 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
             )
         }
 
-        private fun importSplit(root: JsonObject): V2SplitSettings {
+        private fun importSplit(root: JsonObject, warnings: MutableList<String>): V2SplitSettings {
+            val encodingRaw = root.stringOr("inputEncoding", "AUTO")
+            val encoding = encodingRaw
+                .takeIf { V2DeclaredEncoding.parseOrNull(it) != null || it == "AUTO" }
+                ?: run {
+                    warnings.add("文字コード指定が不明のためAUTO扱い ($encodingRaw)")
+                    "AUTO"
+                }
             return V2SplitSettings(
                 enabled = root.booleanOr("enableTextSplit", false),
                 splitSizeChars = root.intOr("textSplitSizeChars", 7000).coerceAtLeast(TranslationLimits.SPLIT_MIN_CHARS),
-                inputEncoding = root.stringOr("inputEncoding", "AUTO")
-                    .takeIf { V2DeclaredEncoding.parseOrNull(it) != null || it == "AUTO" }
-                    ?: "AUTO"
+                inputEncoding = encoding
             )
         }
 
@@ -276,17 +297,46 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
             return promptPresets
         }
 
-        private fun importSizeRatios(root: JsonObject): V2SizeRatios {
+        private fun importSizeRatios(root: JsonObject, warnings: MutableList<String>): V2SizeRatios {
+            fun bounded(key: String, default: Int): Int =
+                root.importBoundedInt(key, default, TranslationLimits.SIZE_RATIO_RANGE.first, TranslationLimits.SIZE_RATIO_RANGE.last, warnings)
             return V2SizeRatios(
-                zhMin = root.intOr("sizeRatioZhMin", 102),
-                zhMax = root.intOr("sizeRatioZhMax", 200),
-                koMin = root.intOr("sizeRatioKoMin", 90),
-                koMax = root.intOr("sizeRatioKoMax", 150),
-                enMin = root.intOr("sizeRatioEnMin", 105),
-                enMax = root.intOr("sizeRatioEnMax", 220),
-                jaMin = root.intOr("sizeRatioJaMin", 100),
-                jaMax = root.intOr("sizeRatioJaMax", 200)
+                zhMin = bounded("sizeRatioZhMin", 102),
+                zhMax = bounded("sizeRatioZhMax", 200),
+                koMin = bounded("sizeRatioKoMin", 90),
+                koMax = bounded("sizeRatioKoMax", 150),
+                enMin = bounded("sizeRatioEnMin", 105),
+                enMax = bounded("sizeRatioEnMax", 220),
+                jaMin = bounded("sizeRatioJaMin", 100),
+                jaMax = bounded("sizeRatioJaMax", 200)
             )
+        }
+
+        /**
+         * 範囲付き整数の取込。欠落・不正は既定値、範囲外は丸めて警告する。
+         * 技術的根拠1行：無言の既定値化・無言丸めをなくし、取込の採用／警告分岐をここに閉じる。
+         */
+        private fun JsonObject.importBoundedInt(
+            key: String,
+            default: Int,
+            min: Int,
+            max: Int,
+            warnings: MutableList<String>
+        ): Int {
+            val raw = try {
+                primitiveOrNull(key)?.content
+            } catch (_: Exception) {
+                null
+            } ?: return default
+            val parsed = raw.toIntOrNull()
+            if (parsed == null) {
+                warnings.add("$key が数値でないため既定値を使用")
+                return default
+            }
+            if (parsed < min || parsed > max) {
+                warnings.add("$key が範囲外のため丸め ($parsed)")
+            }
+            return parsed.coerceIn(min, max)
         }
 
         private fun JsonObject.primitiveOrNull(key: String): JsonPrimitive? {
@@ -366,9 +416,5 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
                 null
             }
         }
-
-        private fun JsonElement.jsonObjectOrNull(): JsonObject? = this as? JsonObject
-
-        private fun JsonElement.jsonArrayOrNull(): JsonArray? = this as? JsonArray
     }
 }

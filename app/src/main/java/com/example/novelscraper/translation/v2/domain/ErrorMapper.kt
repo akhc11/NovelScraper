@@ -11,6 +11,7 @@ interface ErrorMapper {
 /**
  * 社共通の既定配器。状態符号で安全側に倒し、400は本文で設定起因と要求不良を分ける。
  * 429は一時制限扱い（日次判別は社別配器の責務）。
+ * 技術的根拠1行：400の部分一致は広めに取る（狭めると設定不良の見逃し、広げると内容不良の誤停止のいずれも起きるため、現行の均衡を保つ）。
  */
 object GenericErrorMapper : ErrorMapper {
 
@@ -37,6 +38,8 @@ object GenericErrorMapper : ErrorMapper {
             404, 410 -> ClassifiedFailure(FailureKind.CONFIG, configKind = ConfigKind.MODEL_NOT_FOUND, note = "$code")
             400 -> mapBadRequest(lowerBody)
             500, 502, 503, 504 -> ClassifiedFailure(FailureKind.RETRYABLE_AFTER, note = "$code")
+            // 技術的根拠1行：408（タイムアウト）・425（順序尚早）は標準的に再送可能なため再送対象にする。
+            408, 425 -> ClassifiedFailure(FailureKind.RETRYABLE_AFTER, note = "$code")
             else -> ClassifiedFailure(FailureKind.FATAL, note = "$code")
         }
     }

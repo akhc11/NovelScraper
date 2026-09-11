@@ -13,7 +13,6 @@ import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.domain.V2DeclaredEncoding
 import com.example.novelscraper.translation.v2.domain.V2SendGate
 import com.example.novelscraper.translation.v2.domain.NovelTarget
-import com.example.novelscraper.translation.v2.domain.PartitionBatchResult
 import com.example.novelscraper.translation.v2.domain.DictResolveResult
 import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
 import com.example.novelscraper.translation.v2.infra.FileStore
@@ -32,7 +31,6 @@ import com.example.novelscraper.translation.v2.pipeline.V2_PROMPT_7_RETRY
 import com.example.novelscraper.translation.common.ingest.IngestResult
 import com.example.novelscraper.translation.common.ingest.TextIngest
 import com.example.novelscraper.translation.v2.pipeline.detectLanguage
-import com.example.novelscraper.translation.v2.pipeline.findOrCreateFile
 import com.example.novelscraper.translation.v2.pipeline.resolvePromptOrder
 import com.example.novelscraper.translation.v2.pipeline.splitSingleTextFile
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
@@ -241,71 +239,65 @@ class RunEngine(
         return RunSummary(foldersDone, filesDone, filesTotal, aborted = stopFlag.get())
     }
 
-    private suspend fun detectOrLoadLanguage(
+    /** 読み取り専用の言語判定。キャッシュへの書き込みは行わない。 */
+    private suspend fun detectLanguage(
         folderUri: String,
         files: List<VDoc>,
-        inherited: SourceLang? = null
+        inherited: SourceLang? = null,
+        outputDirUri: String? = null
     ): SourceLang {
-        return LanguageDetectStage.detectOrLoadLanguage(
+        return LanguageDetectStage.detectLanguage(
             store = store,
-            folderUri = folderUri,
+            inputFolderUri = folderUri,
             files = files,
+            outputDirUri = outputDirUri,
             inherited = inherited,
             onLog = { addLog(it) }
         )
     }
 
     /**
-     * 物理事前分割ステージ。
-     * 生テキストファイル群（part_ 以外）を物理分割し、分割後サブフォルダをNovelTargetとして抽出する。
-     * 技術的根拠1行：翻訳ワーカーや辞書生成を再帰呼び出しせず、純粋に分割成果物（NovelTarget）のリストとして返却することで密結合と副作用を完全に排除する。
+     * 単一小説のオンデマンド物理分割。
+     * 翻訳直前にこの1ファイルのみ分割し、分割後サブフォルダをNovelTargetとして返す。
+     * 契約: 一件ずつ分割→即翻訳すること。全件先行分割に戻さないこと（未翻訳の無駄I/O・残骸を作らない）。
+     * 技術的根拠1行：翻訳しない小説まで先行分割しないよう分割と翻訳を1件ずつ直列化し、Web側オンデマンドと同型の単一パイプラインにする。
      */
-    private suspend fun partitionStage(
-        folderUri: String,
-        folderName: String,
-        rawFiles: List<VDoc>,
-        settings: V2Settings
-    ): PartitionBatchResult? {
-        if (rawFiles.isEmpty()) return null
-        val splitRoot = store.findChild(folderUri, "分割済み")
-            ?: store.createDir(folderUri, "分割済み")
-            ?: run {
-                addLog("❌ 「分割済み」フォルダの作成に失敗しました: $folderName")
-                return null
+    private suspend fun partitionOne(
+        raw: VDoc,
+        splitRootUri: String,
+        rawIndex: Int,
+        rawTotal: Int,
+        settings: V2Settings,
+        onSkipped: (String) -> Unit
+    ): NovelTarget? {
+        _state.update { it.copy(statusText = "📄 物理分割中: ${raw.name} (${rawIndex + 1}/$rawTotal)") }
+        addLog("📄 [物理分割開始] (${rawIndex + 1}/$rawTotal) ${raw.name}")
+        val result = splitSingleTextFile(
+            store = store,
+            fileUri = raw.uri,
+            fileName = raw.name,
+            splitRootUri = splitRootUri,
+            splitSizeChars = settings.split.splitSizeChars,
+            declared = V2DeclaredEncoding.parseOrNull(settings.split.inputEncoding),
+            stopped = { stopFlag.get() || !scope.isActive },
+            sourceSizeBytes = raw.length,
+            log = { addLog(it) },
+            onSkipped = { onSkipped(raw.name) }
+        )
+        if (result == null || stopFlag.get() || !coroutineContext.isActive) return null
+        val subFiles = store.children(result.subfolderUri)
+            .filter {
+                !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) &&
+                    !LangCacheStore.isCacheFileName(it.name)
             }
-        val targets = mutableListOf<NovelTarget>()
-        val skipped = mutableSetOf<String>()
-        for ((rawIndex, raw) in rawFiles.withIndex()) {
-            if (stopFlag.get() || !coroutineContext.isActive) break
-            _state.update { it.copy(statusText = "📄 物理分割中: ${raw.name} (${rawIndex + 1}/${rawFiles.size})") }
-            addLog("📄 [物理分割開始] (${rawIndex + 1}/${rawFiles.size}) ${raw.name}")
-            val result = splitSingleTextFile(
-                store = store,
-                fileUri = raw.uri,
-                fileName = raw.name,
-                splitRootUri = splitRoot.uri,
-                splitSizeChars = settings.split.splitSizeChars,
-                declared = V2DeclaredEncoding.parseOrNull(settings.split.inputEncoding),
-                stopped = { stopFlag.get() || !scope.isActive },
-                log = { addLog(it) },
-                onSkipped = { skipped.add(raw.name) }
-            )
-            if (result != null && !stopFlag.get() && coroutineContext.isActive) {
-                val subFiles = store.children(result.subfolderUri)
-                    .filter { !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) }
-                    .sortedBy { it.name }
-                targets.add(
-                    NovelTarget(
-                        novelName = result.novelName,
-                        folderUri = result.subfolderUri,
-                        isPreSplit = true,
-                        files = subFiles,
-                        sampleText = result.sampleText
-                    )
-                )
-            }
-        }
-        return PartitionBatchResult(targets, skipped)
+            .sortedBy { it.name }
+        return NovelTarget(
+            novelName = result.novelName,
+            folderUri = result.subfolderUri,
+            isPreSplit = true,
+            files = subFiles,
+            sampleText = result.sampleText
+        )
     }
 
     /**
@@ -338,9 +330,26 @@ class RunEngine(
                 return 0 to 0
             }
 
+        // outputDir 確保直後に言語キャッシュを正本化（唯一の正規書き込み経路）。
+        // 技術的根拠1行：出力側の固定値（ピン）を検出値より優先し、旧入力配置は正本確定後に限り削除することで三重・二重配置に収束させる。
+        val pinnedLang = LangCacheStore.load(store, outputDir.uri) { addLog(it) }
+        val effectiveLang = pinnedLang ?: sourceLang
+        if (pinnedLang == null) {
+            if (LangCacheStore.save(store, outputDir.uri, sourceLang) { addLog(it) }) {
+                LangCacheStore.migrateFromInput(store, folderUri, outputDir.uri) { addLog(it) }
+            }
+        } else {
+            if (pinnedLang != sourceLang) {
+                addLog("🌐 言語キャッシュを再利用: ${pinnedLang.name}（今回検出=${sourceLang.name}より固定値を優先）")
+            }
+            LangCacheStore.sweepDuplicates(store, outputDir.uri) { addLog(it) }
+            LangCacheStore.migrateFromInput(store, folderUri, outputDir.uri) { addLog(it) }
+        }
+
         val existing = Collections.synchronizedSet(mutableSetOf<String>())
         var zeroBytes = 0
         for (doc in store.children(outputDir.uri)) {
+            if (LangCacheStore.isCacheFileName(doc.name)) continue
             if (!doc.isDirectory && doc.name.endsWith(".txt", ignoreCase = true) && doc.length == 0L) {
                 zeroBytes++
                 continue
@@ -399,7 +408,7 @@ class RunEngine(
         )
         val profilePromptOrders: Map<String, List<Int>> = profiles.associate { profile ->
             val order = resolvePromptOrder(
-                sourceLang = sourceLang,
+                sourceLang = effectiveLang,
                 profileOrder = profile.promptOrder,
                 useCustom = profile.useCustomPromptOrder,
                 autoEnabled = settings.promptSelection.autoEnabled,
@@ -413,13 +422,13 @@ class RunEngine(
             TranslationLimits.WORKER_COUNT_RANGE.first,
             TranslationLimits.WORKER_COUNT_RANGE.last
         )
-        // 参加プロファイルの最小 maxOutputChars を採用（小型モデルへのローテーション時にもトークン溢れを完全防止）
+        // 参加プロファイルの最小 maxOutputChars を採用（小型モデルへのローテーション時のトークン溢れを抑える）
         val targetOutputChars = profiles.minOfOrNull { it.maxOutputChars } ?: 15000
-        val optimalInputBytes = V2Settings.calculateInputLimitBytes(sourceLang, targetOutputChars)
+        val optimalInputBytes = V2Settings.calculateInputLimitBytes(effectiveLang, targetOutputChars)
         val splitThresholdBytes = optimalInputBytes
         val chunkSizeBytes = (optimalInputBytes * 0.9).toInt().coerceAtLeast(3000)
         val batchMaxBytes = (optimalInputBytes * 0.85).toInt().coerceAtLeast(3000)
-        addLog("capacity: limit=${optimalInputBytes}B, chunk=${chunkSizeBytes}B, batch=${batchMaxBytes}B (source=${sourceLang.name}, maxOutput=${targetOutputChars} chars)")
+        addLog("capacity: limit=${optimalInputBytes}B, chunk=${chunkSizeBytes}B, batch=${batchMaxBytes}B (source=${effectiveLang.name}, maxOutput=${targetOutputChars} chars)")
 
         val contextTracker = SourceContextTracker(
             files = files,
@@ -443,14 +452,19 @@ class RunEngine(
                 launch(kotlinx.coroutines.Dispatchers.IO) {
                     try {
                         if (wId > 1 && options.workerStaggerSec > 0) {
-                            delay(options.workerStaggerSec * 1000L * (wId - 1))
+                            patientSleep(
+                                options.workerStaggerSec * 1000L * (wId - 1),
+                                { stopFlag.get() },
+                                { kotlinx.coroutines.delay(it) }
+                            )
+                            if (stopFlag.get()) return@launch
                         }
                         runWorker(
                             wId, files, outputDir.uri, existing, claims,
                             settings, router, novelDict,
                             completed, total,
                             batchMaxBytes, splitThresholdBytes, chunkSizeBytes,
-                            sourceLang, promptOrder,
+                            effectiveLang, promptOrder,
                             profiles, profilePromptOrders,
                             contextTracker
                         )
@@ -481,58 +495,99 @@ class RunEngine(
         }
 
         val allTxtFiles = store.children(folderUri)
-            .filter { !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) }
+            .filter {
+                !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) &&
+                    !LangCacheStore.isCacheFileName(it.name)
+            }
             .sortedBy { it.name }
+        val outSubDirName = settings.limits.outputSubDir.ifBlank { "翻訳完了_LLM" }
         if (allTxtFiles.isEmpty()) {
             addLog("⚠️ 対象ファイルなし: $folderName (直下に.txtファイルがありません)")
             _state.update { it.copy(statusText = "⚠️ .txtファイルがありません: $folderName") }
-            return 0 to 0
-        }
-
-        // 技術的根拠1行：物理分割や完了スキップの前に親フォルダ直下の言語を確定・永続化し、下流に一貫して伝播する。
-        _state.update { it.copy(statusText = "🔍 言語判定中: $folderName") }
-        val sourceLang = detectOrLoadLanguage(folderUri, allTxtFiles)
-
-        // 物理事前分割またはターゲット決定
-        val rawFiles = allTxtFiles.filter { !it.name.startsWith("part_", ignoreCase = true) }
-        val targets: List<NovelTarget>
-        if (settings.split.enabled && rawFiles.isNotEmpty()) {
-            val partitionResult = partitionStage(folderUri, folderName, rawFiles, settings)
-            if (partitionResult != null) {
-                if (partitionResult.skippedFiles.isNotEmpty()) {
-                    addLog("⏭️ 文字化けのため翻訳しません: ${partitionResult.skippedFiles.sorted().joinToString(", ")}")
-                }
-                targets = partitionResult.targets
-            } else {
-                targets = emptyList()
+            // 小説ファイルが無い場合も出力正本が確定済みなら旧入力配置だけ収束させる（値喪失なし）。
+            // 技術的根拠1行：正本参照のみで旧配置を消すため、空フォルダの残骸も翻訳実行なしに単一化できる。
+            try {
+                val peeked = store.findChild(folderUri, outSubDirName)?.takeIf { it.isDirectory }
+                if (peeked != null) LangCacheStore.migrateFromInput(store, folderUri, peeked.uri) { addLog(it) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                addLog("⚠️ 旧言語キャッシュの移行に失敗: ${t.message}")
             }
-        } else {
-            targets = listOf(
-                NovelTarget(
-                    novelName = folderName,
-                    folderUri = folderUri,
-                    isPreSplit = false,
-                    files = allTxtFiles
-                )
-            )
-        }
-
-        if (targets.isEmpty()) {
             return 0 to 0
         }
 
+        // 技術的根拠1行：既存outputDirがあればその固定値を優先し、無ければ読み取り専用で判定する。書込はexecuteNovelPipeline内でoutputDir作成後に単一所有者が行う。
+        _state.update { it.copy(statusText = "🔍 言語判定中: $folderName") }
+        val peekedOutputUri = try {
+            store.findChild(folderUri, outSubDirName)?.takeIf { it.isDirectory }?.uri
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+        val sourceLang = detectLanguage(folderUri, allTxtFiles, outputDirUri = peekedOutputUri)
+
+        // オンデマンド物理分割＋直線パイプライン: 翻訳する小説だけ一件ずつ分割し、即座に翻訳して次へ進む。
+        // 契約: 一件ずつ分割→即翻訳すること。全件分割してから全件翻訳に戻さないこと。
+        // 技術的根拠1行：全件先行分割の無駄I/Oと未翻訳残骸を排し、分割→翻訳を1件ずつ直列化して単一パイプラインにする。
+        val rawFiles = allTxtFiles.filter { !it.name.startsWith("part_", ignoreCase = true) }
+        if (!settings.split.enabled || rawFiles.isEmpty()) {
+            val single = NovelTarget(
+                novelName = folderName,
+                folderUri = folderUri,
+                isPreSplit = false,
+                files = allTxtFiles
+            )
+            val (done, total) = executeNovelPipeline(single, sourceLang, settings, pool, meter)
+            return done to total
+        }
+
+        val splitRoot = store.findChild(folderUri, "分割済み")
+            ?: store.createDir(folderUri, "分割済み")
+            ?: run {
+                addLog("❌ 「分割済み」フォルダの作成に失敗しました: $folderName")
+                return 0 to 0
+            }
+        val skipped = mutableSetOf<String>()
+        val translatedTargets = mutableListOf<NovelTarget>()
         var doneTotal = 0
         var filesTotal = 0
-        for (target in targets) {
+        for ((rawIndex, raw) in rawFiles.withIndex()) {
             if (stopFlag.get() || !coroutineContext.isActive) break
-            if (target.isPreSplit) {
-                val subName = target.novelName
-                _state.update { it.copy(statusText = "🚀 分割完了・翻訳開始: $subName") }
-                addLog("🚀 [翻訳開始] サブフォルダ: $subName (${target.files.size} パート)")
-            }
+            val target = partitionOne(raw, splitRoot.uri, rawIndex, rawFiles.size, settings) { skipped.add(it) }
+            if (target == null) continue
+            translatedTargets.add(target)
+            val subName = target.novelName
+            _state.update { it.copy(statusText = "🚀 分割完了・翻訳開始: $subName") }
+            addLog("🚀 [翻訳開始] サブフォルダ: $subName (${target.files.size} パート)")
             val (done, total) = executeNovelPipeline(target, sourceLang, settings, pool, meter)
             doneTotal += done
             filesTotal += total
+        }
+        if (skipped.isNotEmpty()) {
+            addLog("⏭️ 文字化けのため翻訳しません: ${skipped.sorted().joinToString(", ")}")
+        }
+
+        if (translatedTargets.isEmpty()) {
+            return 0 to 0
+        }
+
+        // 事前分割時は親直下の旧キャッシュを、全サブ出力の正本確定後に限り掃除する。
+        // 技術的根拠1行：正本未確定のまま親の旧配置を消すと値を失うため、全出力に固定値がある場合のみ収束させる。
+        // 技術的根拠1行：中断時は未翻訳の小説が残るため親キャッシュ掃除を見送り、再開時の言語再判定を可能にする。
+        if (!stopFlag.get() && coroutineContext.isActive && translatedTargets.any { it.isPreSplit }) {
+            try {
+                val allPinned = translatedTargets.all { t ->
+                    val out = store.findChild(t.folderUri, outSubDirName)?.takeIf { it.isDirectory }
+                    out != null && LangCacheStore.load(store, out.uri) != null
+                }
+                if (allPinned) LangCacheStore.clearInputCaches(store, folderUri) { addLog(it) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                addLog("⚠️ 親フォルダの旧言語キャッシュ掃除に失敗: ${t.message}")
+            }
         }
         return doneTotal to filesTotal
     }

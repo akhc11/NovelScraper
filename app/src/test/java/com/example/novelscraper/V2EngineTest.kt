@@ -1,6 +1,7 @@
 package com.example.novelscraper
 
 import com.example.novelscraper.translation.v2.domain.ClassifiedFailure
+import com.example.novelscraper.translation.v2.domain.CostMeter
 import com.example.novelscraper.translation.v2.domain.FailureKind
 import com.example.novelscraper.translation.v2.domain.GEMINI_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.LlmRequest
@@ -10,6 +11,8 @@ import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
 import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.engine.EngineOptions
+import com.example.novelscraper.translation.v2.engine.patientSleep
+import com.example.novelscraper.translation.v2.engine.LangCacheStore
 import com.example.novelscraper.translation.v2.engine.DictionaryBuilder
 import com.example.novelscraper.translation.v2.engine.Rotation
 import com.example.novelscraper.translation.v2.engine.RunEngine
@@ -214,6 +217,38 @@ class V2EngineTest {
     }
 
     @Test
+    fun testRotation_CostCapAbortsEpoch() = kotlinx.coroutines.runBlocking {
+        // コスト上限到達はその場で確定し、残り指示文への無駄打ちをしないこと
+        var calls = 0
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                calls++
+                return LlmResult.Success("text", promptTokens = 3, completionTokens = 4)
+            }
+        }
+        val rotation = Rotation(
+            workerId = 1,
+            profiles = listOf(
+                V2ModelProfile(providerId = "gemini", model = "m1"),
+                V2ModelProfile(providerId = "gemini", model = "m2")
+            ),
+            pool = QuotaPool(listOf("k1")),
+            keyIndex = 0,
+            key = "k1",
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR),
+            handlerFactory = { _, _ -> handler },
+            openRouterKey = "",
+            maxSameRetries = 1,
+            meter = CostMeter(maxTokens = 5),
+            log = {}
+        )
+        val result = rotation.execute(listOf("prompt"), "src")
+        assertTrue(result is LlmResult.Failure)
+        assertEquals("cost-cap", (result as LlmResult.Failure).failure.note)
+        assertEquals(1, calls)
+    }
+
+    @Test
     fun testRotation_QuotaWaitIsLogged() = kotlinx.coroutines.runBlocking {
         // 待機に入る前に理由と秒数をログに出す（無言の停止に見せない）
         val script: Map<String, MutableList<LlmResult>> = mapOf("m" to mutableListOf(quotaMinute()))
@@ -236,7 +271,8 @@ class V2EngineTest {
         )
         val result = rotation.execute(listOf("prompt"), "src")
         assertTrue(result is LlmResult.Success)
-        assertEquals(listOf(5000L), waits)
+        assertEquals(5000L, waits.sum())
+        assertTrue(waits.all { it in 1..5000L })
         assertTrue(logs.any { it.contains("待機") && it.contains("再送") })
     }
 
@@ -263,7 +299,8 @@ class V2EngineTest {
         )
         val result = rotation.execute(listOf("prompt"), "src")
         assertTrue(result is LlmResult.Success)
-        assertEquals(listOf(12000L), waits)
+        assertEquals(12000L, waits.sum())
+        assertTrue(waits.all { it in 1..12000L })
     }
 
     @Test
@@ -290,7 +327,33 @@ class V2EngineTest {
         )
         val result = rotation.execute(listOf("prompt"), "src")
         assertTrue(result is LlmResult.Success)
-        assertEquals(listOf(3000L), waits)
+        assertEquals(3000L, waits.sum())
+        assertTrue(waits.all { it in 1..3000L })
+    }
+
+    @Test
+    fun testPatientSleep_StopsEarly() = kotlinx.coroutines.runBlocking {
+        // 合計秒数は変えず、停止時は残りを捨てること
+        val waits = mutableListOf<Long>()
+        patientSleep(2500L, stopped = { false }, sleeper = { waits.add(it) })
+        assertEquals(2500L, waits.sum())
+        assertTrue(waits.all { it in 1..1000L })
+
+        val noWaits = mutableListOf<Long>()
+        patientSleep(60000L, stopped = { true }, sleeper = { noWaits.add(it) })
+        assertTrue(noWaits.isEmpty())
+
+        var first = true
+        var stopNow = false
+        val partial = mutableListOf<Long>()
+        patientSleep(5000L, stopped = { stopNow }, sleeper = {
+            partial.add(it)
+            if (first) {
+                first = false
+                stopNow = true
+            }
+        })
+        assertEquals(1000L, partial.sum())
     }
 
     @Test
@@ -957,6 +1020,7 @@ class V2EngineTest {
     @Test
     fun testRunEngine_LangCacheNoDuplicate() = kotlinx.coroutines.runBlocking {
         // 古い一覧＋自動リネーム環境でも ".lang_cache (1)" を作らない
+        // lang_cache は翻訳完了_LLM 内にのみ生成される
         val fake = StaleRenameStore()
         val folder = fake.inner.createRoot("novel-lang")
         val doc = fake.inner.createFile(folder.uri, "a.txt", "text/plain")!!
@@ -980,19 +1044,22 @@ class V2EngineTest {
         )
         val first = engine.run(listOf(folder.uri), settings)
         assertEquals(1, first.completedFiles)
-        assertNotNull(fake.inner.findChild(folder.uri, ".lang_cache"))
-        assertEquals("JA", fake.inner.readText(fake.inner.findChild(folder.uri, ".lang_cache")!!.uri))
-        // 訳文を消して再作業させる（古い一覧で既存キャッシュを見落とす状況）
         val outDir = fake.inner.findChild(folder.uri, "翻訳完了_LLM")!!
+        // lang_cache は outputDir 内にのみ存在すること
+        assertNotNull(fake.inner.findChild(outDir.uri, ".lang_cache"))
+        assertEquals("JA", fake.inner.readText(fake.inner.findChild(outDir.uri, ".lang_cache")!!.uri))
+        // 入力フォルダには lang_cache が作られていないこと
+        assertNull(fake.inner.findChild(folder.uri, ".lang_cache"))
+        // 訳文を消して再作業させる（古い一覧で既存キャッシュを見落とす状況）
         fake.inner.deleteFile(fake.inner.findChild(outDir.uri, "a.txt")!!.uri)
         fake.staleMatcher = { it == ".lang_cache" }
         fake.staleFails = 2
         val second = engine.run(listOf(folder.uri), settings)
         assertFalse(second.aborted)
         assertEquals(1, second.completedFiles)
-        val names = fake.childNames(folder.uri)
-        assertTrue(names.none { it.contains("(1)") })
-        assertEquals("JA", fake.inner.readText(fake.inner.findChild(folder.uri, ".lang_cache")!!.uri))
+        val outNames = fake.childNames(outDir.uri)
+        assertTrue(outNames.none { it.contains("(1)") })
+        assertEquals("JA", fake.inner.readText(fake.inner.findChild(outDir.uri, ".lang_cache")!!.uri))
         assertNotNull(fake.inner.findChild(outDir.uri, "a.txt"))
     }
 
@@ -1025,15 +1092,18 @@ class V2EngineTest {
         assertTrue(summary.completedFiles > 1)
         // Parts translate inside the split subfolder; the parent is not translated directly.
         assertNull(store.findChild(folder.uri, settings.limits.outputSubDir))
-        assertNotNull(store.findChild(folder.uri, ".lang_cache"))
-        assertEquals("JA", store.readText(store.findChild(folder.uri, ".lang_cache")!!.uri))
+        // 入力フォルダには lang_cache が作られないこと
+        assertNull(store.findChild(folder.uri, ".lang_cache"))
         val splitDir = store.children(folder.uri).firstOrNull { it.isDirectory }
         assertNotNull(splitDir)
         val novelDir = store.children(splitDir!!.uri).firstOrNull { it.isDirectory }
         assertNotNull(novelDir)
         val outDir = store.findChild(novelDir!!.uri, settings.limits.outputSubDir)
         assertNotNull(outDir)
-        val outputs = store.children(outDir!!.uri).filter { it.name.endsWith(".txt") }
+        // lang_cache は各サブフォルダの outputDir 内にのみ存在すること
+        assertNotNull(store.findChild(outDir!!.uri, ".lang_cache"))
+        assertEquals("JA", store.readText(store.findChild(outDir.uri, ".lang_cache")!!.uri))
+        val outputs = store.children(outDir.uri).filter { it.name.endsWith(".txt") }
         assertTrue(outputs.isNotEmpty())
         assertTrue(outputs.all { it.name.startsWith("part_") })
         assertEquals(summary.completedFiles, outputs.size)
@@ -1249,5 +1319,227 @@ class V2EngineTest {
         val summary = engine.run(listOf(root.uri), settings)
         // 辞書未完成のため翻訳は中断・スキップされ、親ファイルの生テキストが直接翻訳される事故（completedFiles > 0）がないこと
         assertEquals(0, summary.completedFiles)
+    }
+
+    @Test
+    fun testRunEngine_LargeDeterministicStallBecomesFailed() = kotlinx.coroutines.runBlocking {
+        // 同一記録での未解決停止が続くと親失敗記録に終端すること（永遠の保持にしない）
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-large-dead")
+        val doc = store.createFile(folder.uri, "001_large.txt", "text/plain")!!
+        store.writeText(doc.uri, "これは大きなファイルの本文です。\n\n".repeat(1200))
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                return LlmResult.Failure(ClassifiedFailure(FailureKind.BLOCKED_DETERMINISTIC, note = "blocked"))
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L, batchMaxFiles = 1),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0)
+        )
+        engine.run(listOf(folder.uri), settings)
+        val outDir = store.findChild(folder.uri, "翻訳完了_LLM")!!
+        // 1回目では親失敗記録を作らない（保持のみ）
+        assertNull(store.findChild(outDir.uri, "001_large.txt.failed"))
+        engine.run(listOf(folder.uri), settings)
+        assertNull(store.findChild(outDir.uri, "001_large.txt.failed"))
+        // 3回目の連続停止で終端し、親失敗記録ができる
+        engine.run(listOf(folder.uri), settings)
+        assertNotNull(store.findChild(outDir.uri, "001_large.txt.failed"))
+    }
+
+    @Test
+    fun testLangCache_LegacyTripleMigratesToSingle() = kotlinx.coroutines.runBlocking {
+        // 旧三重配置（入力の正規名＋互換名＋衝突変種）が単一正本に収束すること
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-tri")
+        val doc = store.createFile(folder.uri, "a.txt", "text/plain")!!
+        store.writeText(doc.uri, "これはテストの本文です。勇者が旅に出ました。")
+        store.writeText(store.createFile(folder.uri, LangCacheStore.FILE_NAME, "application/octet-stream")!!.uri, "JA")
+        store.writeText(store.createFile(folder.uri, ".lang_cache.txt", "application/octet-stream")!!.uri, "JA")
+        store.createFile(folder.uri, ".lang_cache (1)", "application/octet-stream")
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0)
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(1, summary.completedFiles)
+        val outDir = store.findChild(folder.uri, settings.limits.outputSubDir)!!
+        // 出力には正本が1つだけ
+        assertEquals("JA", store.readText(store.findChild(outDir.uri, LangCacheStore.FILE_NAME)!!.uri))
+        assertNull(store.findChild(outDir.uri, ".lang_cache.txt"))
+        assertTrue(store.children(outDir.uri).none { it.name.contains("(1)") })
+        // 入力の旧配置は全削除
+        assertNull(store.findChild(folder.uri, LangCacheStore.FILE_NAME))
+        assertNull(store.findChild(folder.uri, ".lang_cache.txt"))
+        assertTrue(store.children(folder.uri).none { it.name.startsWith(".lang_cache") })
+    }
+
+    @Test
+    fun testLangCache_OutputPinWinsOverRedetect() = kotlinx.coroutines.runBlocking {
+        // 出力側の固定値（ZH）は本文がJAでも上書きされず、二重化もしないこと
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-pin")
+        val doc = store.createFile(folder.uri, "a.txt", "text/plain")!!
+        store.writeText(doc.uri, "これはテストの本文です。勇者が旅に出ました。")
+        val outDir = store.createDir(folder.uri, "翻訳完了_LLM")!!
+        store.writeText(store.createFile(outDir.uri, LangCacheStore.FILE_NAME, "application/octet-stream")!!.uri, "ZH")
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0)
+        )
+        engine.run(listOf(folder.uri), settings)
+        assertEquals("ZH", store.readText(store.findChild(outDir.uri, LangCacheStore.FILE_NAME)!!.uri))
+        assertNull(store.findChild(folder.uri, LangCacheStore.FILE_NAME))
+        assertTrue(store.children(outDir.uri).none { it.name.contains("(1)") })
+    }
+
+    @Test
+    fun testLangCache_OutputDedupeKeepsCanonical() = kotlinx.coroutines.runBlocking {
+        // 同一出力内の正規＋互換の二重は正規に一本化されること
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-dedupe")
+        val doc = store.createFile(folder.uri, "a.txt", "text/plain")!!
+        store.writeText(doc.uri, "これはテストの本文です。勇者が旅に出ました。")
+        val outDir = store.createDir(folder.uri, "翻訳完了_LLM")!!
+        store.writeText(store.createFile(outDir.uri, LangCacheStore.FILE_NAME, "application/octet-stream")!!.uri, "JA")
+        store.writeText(store.createFile(outDir.uri, ".lang_cache.txt", "application/octet-stream")!!.uri, "EN")
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0)
+        )
+        engine.run(listOf(folder.uri), settings)
+        assertEquals("JA", store.readText(store.findChild(outDir.uri, LangCacheStore.FILE_NAME)!!.uri))
+        assertNull(store.findChild(outDir.uri, ".lang_cache.txt"))
+    }
+
+    @Test
+    fun testRunEngine_OnDemand_SplitTranslateInterleaved() = kotlinx.coroutines.runBlocking {
+        // オンデマンド回帰: aの翻訳開始がbの物理分割より先であること（全件先行分割の復活を検出）。
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-ondemand")
+        val bodyA = "昔々あるところに勇者あいました。\n".repeat(120)
+        val bodyB = "遠い昔に魔法使いびいました。\n".repeat(120)
+        store.writeText(store.createFile(folder.uri, "a.txt", "text/plain")!!.uri, bodyA)
+        store.writeText(store.createFile(folder.uri, "b.txt", "text/plain")!!.uri, bodyB)
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0),
+            split = V2SplitSettings(enabled = true, splitSizeChars = 1000)
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertTrue(summary.completedFiles > 2)
+        val logs = engine.state.value.logs
+        val splitA = logs.indexOfFirst { it.contains("[物理分割開始]") && it.contains("a.txt") }
+        val translateA = logs.indexOfFirst { it.contains("[翻訳開始]") && it.contains("a") }
+        val splitB = logs.indexOfFirst { it.contains("[物理分割開始]") && it.contains("b.txt") }
+        assertTrue("aの分割ログがあること", splitA >= 0)
+        assertTrue("aの翻訳開始ログがあること", translateA >= 0)
+        assertTrue("bの分割ログがあること", splitB >= 0)
+        assertTrue("aの翻訳開始がbの分割より先であること（オンデマンド）", translateA < splitB)
+    }
+
+    @Test
+    fun testRunEngine_OnDemand_CompletedSplitsKept() = kotlinx.coroutines.runBlocking {
+        // 完了分の分割済みは残り、再開時に再利用されること。
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-keep")
+        store.writeText(
+            store.createFile(folder.uri, "a.txt", "text/plain")!!.uri,
+            "昔々あるところに勇者あいました。\n".repeat(120)
+        )
+        store.writeText(
+            store.createFile(folder.uri, "b.txt", "text/plain")!!.uri,
+            "遠い昔に魔法使いびいました。\n".repeat(120)
+        )
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0),
+            split = V2SplitSettings(enabled = true, splitSizeChars = 1000)
+        )
+        val first = engine.run(listOf(folder.uri), settings)
+        assertFalse(first.aborted)
+        val splitRoot = store.findChild(folder.uri, "分割済み")
+        assertNotNull(splitRoot)
+        assertNotNull(store.findChild(splitRoot!!.uri, "a"))
+        assertNotNull(store.findChild(splitRoot.uri, "b"))
+        val second = engine.run(listOf(folder.uri), settings)
+        assertFalse(second.aborted)
+        assertNotNull(store.findChild(splitRoot.uri, "a"))
+        assertNotNull(store.findChild(splitRoot.uri, "b"))
     }
 }

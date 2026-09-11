@@ -7,8 +7,8 @@ import com.example.novelscraper.translation.common.ingest.LanguageModels
  *
  * Design (see handoff for the adversarial review):
  * - Script-first, per-segment: split the output into sentences/lines and
- *   classify each segment by Unicode script counts. A segment with Hangul
- *   and no kana, or a long Han-only segment (ZH source), is residue.
+ *   classify each segment by Unicode script counts (ranges: [ScriptKinds]).
+ *   A segment with Hangul and no kana, or a long Han-only segment (ZH source), is residue.
  * - Short Han-only blocks without simplified chars inherit the surrounding answer: when the rest of
  *   the output holds kana, they are treated as headings/names, not residue.
  *   (Industry practice for mixed-script documents: short ambiguous blocks
@@ -22,7 +22,8 @@ import com.example.novelscraper.translation.common.ingest.LanguageModels
  *
  * Threat model: accidental residue, not adversarial evasion. A model that
  * deliberately mixes one kana into residue defeats this check by design.
- * Partially-mixed sentences (kana present) are a known blind spot.
+ * Han-only residue coexisting with kana elsewhere is inherited by design
+ * (known blind spot, accepted for heading/name tolerance).
  *
  * All ranges use numeric code points (this file must stay ASCII-safe).
  */
@@ -38,17 +39,13 @@ data class ResidualOptions(
     val minLatinResidueChars: Int = 60
 )
 
-private fun isKana(code: Int): Boolean =
-    code in 0x3040..0x30FF || code in 0xFF61..0xFF9F
+private fun isKana(code: Int): Boolean = ScriptKinds.isKana(code)
 
-private fun isHangul(code: Int): Boolean =
-    code in 0xAC00..0xD7A3 || code in 0x1100..0x11FF
+private fun isHangul(code: Int): Boolean = ScriptKinds.isHangul(code)
 
-private fun isHan(code: Int): Boolean =
-    code in 0x4E00..0x9FFF || code in 0x3400..0x4DBF
+private fun isHan(code: Int): Boolean = ScriptKinds.isHan(code)
 
-private fun isLatin(code: Int): Boolean =
-    (code in 0x0041..0x005A) || (code in 0x0061..0x007A)
+private fun isLatin(code: Int): Boolean = ScriptKinds.isLatin(code)
 
 private fun isSegmentBoundary(ch: Char): Boolean {
     if (ch == '\n') return true
@@ -121,9 +118,10 @@ fun residualFailure(translatedText: String, options: ResidualOptions): String? {
         }
 
         // 中国語ソース:
-        // 1. 純粋簡体字が存在する場合: かなが文中に混ざっていても中国語残留として検知
+        // 1. 純粋簡体字が存在する場合: かなが文中に混ざっていても中国語残留として検知。
+        // 技術的根拠1行：簡体字数は漢字数に含まれるため二重計上せず、しきい値の意味を保つ。
         if (s > 0) {
-            residue += s + c
+            residue += c
             if (residueKind.isEmpty()) residueKind = "han"
             return
         }

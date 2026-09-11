@@ -143,4 +143,13 @@ class V2ResidualTest {
         assertNotNull(reason)
         assertTrue(reason!!.contains("hangul"))
     }
+
+    @Test
+    fun testResidual_SimplifiedSingleCountSuffices() {
+        // 簡体字は漢字数に含まれるため、二重計上なしでも30字で検知されること
+        val leaked = "这是简体中文测试文本。\n".repeat(4)
+        val reason = residualFailure(leaked, zh())
+        assertNotNull(reason)
+        assertTrue(reason!!.contains("han"))
+    }
 }

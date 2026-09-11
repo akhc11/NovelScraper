@@ -91,10 +91,63 @@ object ScrapingScriptBuilder {
             if (typeof node.className === 'string' && node.className.trim()) {
                 var classes = node.className.trim().split(/\s+/);
                 for (var i = 0; i < classes.length; i++) {
-                    if (isUsefulClass(classes[i])) return tag + '.' + safeEscape(classes[i]);
+                    var cls = classes[i];
+                    if (isUsefulClass(cls)) {
+                        var numMatch = cls.match(/^([a-zA-Z]{2,}[-_])\d+$/);
+                        if (numMatch && !/^(col|row|gap|span|grid)[-_]/i.test(numMatch[1])) {
+                            return tag + '[class*="' + safeEscape(numMatch[1]) + '"]';
+                        }
+                        return tag + '.' + safeEscape(cls);
+                    }
                 }
             }
             return null;
+        }
+    """.trimIndent()
+
+    private val JS_CANDIDATE_TRAVERSAL = """
+        function traverseCandidates(targetEl, onCandidate, includeLink) {
+            if (!targetEl || targetEl.nodeType !== 1) return;
+            var selfShort = shortSelector(targetEl);
+            if (selfShort) {
+                if (onCandidate(targetEl, '要素自身 (汎用)', selfShort) === false) return;
+            }
+            if (onCandidate(targetEl, '要素自身', getUniqueSelector(targetEl)) === false) return;
+
+            if (includeLink) {
+                var aEl = (targetEl.tagName === 'A') ? targetEl : (targetEl.closest ? targetEl.closest('a') : null);
+                if (aEl && aEl !== targetEl) {
+                    if (onCandidate(aEl, 'リンク(a)', shortSelector(aEl) || getUniqueSelector(aEl)) === false) return;
+                }
+            }
+
+            var p = targetEl.parentElement;
+            while (p && p.tagName !== 'BODY' && !(p.id && !String(p.id).match(/^[0-9]/))) p = p.parentElement;
+            if (p && p.tagName !== 'BODY') {
+                if (onCandidate(p, 'ID祖先', shortSelector(p) || getUniqueSelector(p)) === false) return;
+            }
+
+            var q = targetEl.parentElement;
+            while (q && q.tagName !== 'BODY' && !(typeof q.className === 'string' && q.className.trim())) q = q.parentElement;
+            if (q && q.tagName !== 'BODY') {
+                if (onCandidate(q, 'Class祖先', shortSelector(q) || getUniqueSelector(q)) === false) return;
+            }
+
+            var sem = null;
+            try { sem = targetEl.closest('article, main, [role="main"], section, .novel_honbun, #novel_honbun'); } catch(e){}
+            if (sem && sem !== p && sem !== q && sem.tagName !== 'BODY') {
+                if (onCandidate(sem, '意味コンテナ', shortSelector(sem) || sem.tagName.toLowerCase()) === false) return;
+            }
+
+            var n = targetEl.parentElement;
+            var depth = 1;
+            while (n && n.tagName !== 'BODY' && n.tagName !== 'HTML') {
+                var tag = (n.tagName || '').toLowerCase();
+                var label = (depth === 1) ? '親要素' : '祖先要素(' + tag + ')';
+                if (onCandidate(n, label, shortSelector(n) || getUniqueSelector(n)) === false) break;
+                n = n.parentElement;
+                depth++;
+            }
         }
     """.trimIndent()
 
@@ -113,20 +166,6 @@ object ScrapingScriptBuilder {
                     // --- CSS セレクタ取得ユーティリティ（共通スニペット） ---
                     ${JS_UNIQUE_SELECTOR}
 
-                    // --- 除外処理 ---
-                    try {
-                        document.querySelectorAll('.__novel_exclude').forEach(function(el) { el.classList.remove('__novel_exclude'); });
-                    } catch(e){}
-                    if (config.exclude) {
-                        try {
-                            config.exclude.split(',').forEach(function(s) {
-                                var sel = s.trim();
-                                if (sel) {
-                                    document.querySelectorAll(sel).forEach(function(el) { el.classList.add('__novel_exclude'); });
-                                }
-                            });
-                        } catch(e){}
-                    }
 
                     var meta = {};
                     try {
@@ -224,7 +263,17 @@ object ScrapingScriptBuilder {
                     }
                     if (b) {
                         var clone = b.cloneNode(true);
-                        clone.querySelectorAll('script, style, noscript, iframe, template, .ad, .ads, [class*="advertisement"], .__novel_exclude').forEach(n => n.remove());
+                        clone.querySelectorAll('script, style, noscript, iframe, template, .ad, .ads, [class*="advertisement"]').forEach(n => n.remove());
+                        if (config.exclude) {
+                            try {
+                                config.exclude.split(',').forEach(function(s) {
+                                    var sel = s.trim();
+                                    if (sel) {
+                                        clone.querySelectorAll(sel).forEach(function(el) { el.remove(); });
+                                    }
+                                });
+                            } catch(e){}
+                        }
                         if (!${useImages}) clone.querySelectorAll('img, picture, svg').forEach(n => n.remove());
                         
                         // 1. 改行の確保
@@ -518,60 +567,19 @@ object ScrapingScriptBuilder {
 
                 // 短縮セレクタ（共通スニペット）
                 ${JS_SHORT_SELECTOR}
+                ${JS_CANDIDATE_TRAVERSAL}
 
                 function getCandidates(el) {
                     var cands = [];
                     var seen = {};
-                    function push(node, label, sel) {
-                        if (!node || node.nodeType !== 1) return;
-                        var tag = (node.tagName || '').toUpperCase();
-                        if (tag === 'BODY' || tag === 'HTML') return;
-                        var s = sel || shortSelector(node);
-                        if (!s) s = getUniqueSelector(node);
+                    traverseCandidates(el, function(node, label, s) {
                         if (!s || seen[s]) return;
                         seen[s] = true;
                         var m = 0;
                         try { m = document.querySelectorAll(s).length; } catch(e) {}
                         cands.push({ node: node, selector: s, label: label, matchCount: m });
-                    }
-
-                    // 1. 要素自身
-                    push(el, '要素自身', getUniqueSelector(el));
-
-                    // 2. リンク要素 (自身または祖先に <a> があれば提示)
-                    var aEl = (el.tagName === 'A') ? el : (el.closest ? el.closest('a') : null);
-                    if (aEl && aEl !== el) {
-                        push(aEl, 'リンク(a)', shortSelector(aEl) || getUniqueSelector(aEl));
-                    }
-
-                    // 3. 有用属性・ID祖先
-                    var p = el.parentElement;
-                    while (p && p.tagName !== 'BODY' && !(p.id && !String(p.id).match(/^[0-9]/))) p = p.parentElement;
-                    if (p && p.tagName !== 'BODY') push(p, 'ID祖先');
-
-                    // 4. Class祖先
-                    var q = el.parentElement;
-                    while (q && q.tagName !== 'BODY' && !(typeof q.className === 'string' && q.className.trim())) q = q.parentElement;
-                    if (q && q.tagName !== 'BODY') push(q, 'Class祖先');
-
-                    // 5. 意味コンテナ（article, main, section, #novel_honbun等）
-                    var sem = null;
-                    try { sem = el.closest('article, main, [role="main"], section, .novel_honbun, #novel_honbun'); } catch(e){}
-                    if (sem && sem !== p && sem !== q && sem.tagName !== 'BODY') {
-                        push(sem, '意味コンテナ', shortSelector(sem) || sem.tagName.toLowerCase());
-                    }
-
-                    // フォールバック: 親要素・祖先要素連鎖 (最大10候補まで探索)
-                    var n = el.parentElement;
-                    var depth = 1;
-                    while (n && n.tagName !== 'BODY' && n.tagName !== 'HTML' && cands.length < 10) {
-                        var tag = (n.tagName || '').toLowerCase();
-                        var label = (depth === 1) ? '親要素' : '祖先要素(' + tag + ')';
-                        push(n, label);
-                        n = n.parentElement;
-                        depth++;
-                    }
-                    // 最大10候補まで提示（ユーザー要望）
+                        if (cands.length >= 10) return false;
+                    }, true);
                     return cands.slice(0, 10);
                 }
 
@@ -914,14 +922,10 @@ object ScrapingScriptBuilder {
                     if (!baseEl) return '[]';
                     ${JS_UNIQUE_SELECTOR}
                     ${JS_SHORT_SELECTOR}
+                    ${JS_CANDIDATE_TRAVERSAL}
                     var cands = [];
                     var seen = {};
-                    function push(node, label, sel) {
-                        if (!node || node.nodeType !== 1) return;
-                        var tag = (node.tagName || '').toUpperCase();
-                        if (tag === 'BODY' || tag === 'HTML') return;
-                        var s = sel || shortSelector(node);
-                        if (!s) s = getUniqueSelector(node);
+                    traverseCandidates(baseEl, function(node, label, s) {
                         if (!s || seen[s]) return;
                         seen[s] = true;
                         var count = 0, chars = 0, lines = 0, preview = '(テキストなし)';
@@ -937,29 +941,8 @@ object ScrapingScriptBuilder {
                             }
                         } catch(e){}
                         cands.push({ label: label, selector: s, metric: count + '件・約' + chars + '字/' + lines + '行', preview: preview });
-                    }
-                    push(baseEl, '要素自身', getUniqueSelector(baseEl));
-                    var p = baseEl.parentElement;
-                    while (p && p.tagName !== 'BODY' && !(p.id && !String(p.id).match(/^[0-9]/))) p = p.parentElement;
-                    if (p && p.tagName !== 'BODY') push(p, 'ID祖先');
-                    var q = baseEl.parentElement;
-                    while (q && q.tagName !== 'BODY' && !(typeof q.className === 'string' && q.className.trim())) q = q.parentElement;
-                    if (q && q.tagName !== 'BODY') push(q, 'Class祖先');
-                    var sem = null;
-                    try { sem = baseEl.closest('article, main, [role="main"], section'); } catch(e){}
-                    if (sem && sem !== p && sem !== q && sem.tagName !== 'BODY') {
-                        push(sem, '意味コンテナ', sem.tagName.toLowerCase());
-                    }
-                    // フォールバック: 親要素・祖先要素連鎖 (最大10候補まで探索)
-                    var n = baseEl.parentElement;
-                    var depth = 1;
-                    while (n && n.tagName !== 'BODY' && n.tagName !== 'HTML' && cands.length < 10) {
-                        var tag = (n.tagName || '').toLowerCase();
-                        var label = (depth === 1) ? '親要素' : '祖先要素(' + tag + ')';
-                        push(n, label);
-                        n = n.parentElement;
-                        depth++;
-                    }
+                        if (cands.length >= 10) return false;
+                    }, false);
                     return JSON.stringify(cands.slice(0, 10));
                 } catch(e) { return '[]'; }
             })();

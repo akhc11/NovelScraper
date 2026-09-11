@@ -104,4 +104,20 @@ class V2PromptTest {
         // タグ外限定禁止指示が含まれていること
         assertTrue(batchFormat.contains("OUTSIDE the tags are strictly forbidden"))
     }
+
+    @Test
+    fun testBuildSystemPrompt_NoHardcodedKatakanaStyle() {
+        val promptWithDict = buildSystemPrompt(
+            basePrompt = "ベースプロンプト",
+            dictionaryEntries = listOf("李云: 李雲", "张伟: 張偉")
+        )
+        // 勝手な人名表記固定（カタカナ等）が注入されないこと
+        assertFalse(promptWithDict.contains("[人名の表記統一ルール]"))
+        assertFalse(promptWithDict.contains("カタカナ"))
+        // 登場人物対応表とその厳守指示のみが含まれること
+        assertTrue(promptWithDict.contains("[登場人物対応表]"))
+        assertTrue(promptWithDict.contains("李云: 李雲"))
+        assertTrue(promptWithDict.contains("张伟: 張偉"))
+    }
 }
+

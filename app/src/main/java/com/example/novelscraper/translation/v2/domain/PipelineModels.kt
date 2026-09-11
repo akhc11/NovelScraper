@@ -59,7 +59,7 @@ data class PartitionBatchResult(
 
 /**
  * 辞書ステージ（DictionaryStage）の解決結果。
- * 辞書使用可能時（無効化時を含む）は Ready、生成失敗など翻訳中断を要する場合は Aborted を返す。
+ * 辞書あり・辞書なし（無効化時を含む）は Ready（後者は dict=null）、生成失敗など翻訳中断を要する場合は Aborted を返す。
  */
 sealed class DictResolveResult {
     data class Ready(val dict: com.example.novelscraper.translation.v2.pipeline.NovelDict?) : DictResolveResult()

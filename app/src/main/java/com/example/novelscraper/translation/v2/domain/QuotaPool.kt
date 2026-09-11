@@ -26,10 +26,7 @@ class QuotaPool(private val credentials: List<String>) {
         val targets = normalizeScopes(scopes)
         val now = System.currentTimeMillis()
 
-        for (i in credentials.indices) {
-            val until = cooldownUntil[i]
-            if (until != null && now >= until) cooldownUntil.remove(i)
-        }
+        sweepExpiredLocked(now)
 
         for (i in credentials.indices) {
             if (i !in claimed && !isDeadForAllLocked(i, targets) && !cooldownUntil.containsKey(i)) {
@@ -51,19 +48,21 @@ class QuotaPool(private val credentials: List<String>) {
     }
 
     suspend fun claimNew(scopes: Collection<String> = emptyList()): Pair<Int, String>? = mutex.withLock {
-        val now = System.currentTimeMillis()
         val targets = normalizeScopes(scopes)
+        sweepExpiredLocked(System.currentTimeMillis())
         for (i in credentials.indices) {
-            if (i !in claimed && !isDeadForAllLocked(i, targets)) {
-                val until = cooldownUntil[i]
-                if (until == null || now >= until) {
-                    cooldownUntil.remove(i)
-                    claimed.add(i)
-                    return@withLock i to credentials[i]
-                }
+            if (i !in claimed && !isDeadForAllLocked(i, targets) && !cooldownUntil.containsKey(i)) {
+                claimed.add(i)
+                return@withLock i to credentials[i]
             }
         }
         null
+    }
+
+    /** 期限切れ冷却の一括掃除（両確保経路で共有）。技術的根拠1行：掃除の二重実装は必ず乖離するため、期限判定はここに寄せる。 */
+    private fun sweepExpiredLocked(now: Long) {
+        val expired = cooldownUntil.filterValues { now >= it }.keys.toList()
+        for (i in expired) cooldownUntil.remove(i)
     }
 
     /** 429報告。日次なら除外、一次なら冷却する */

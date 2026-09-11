@@ -284,7 +284,9 @@ fun parseBatchXmlResponse(text: String): Map<Int, String>? {
 
     val normalized = normalizeFullWidthBatchTags(raw)
     val result = linkedMapOf<Int, String>()
-    for (m in BATCH_TRANS_REGEX.findAll(normalized)) {
+    // 技術的根拠1行：正規表現走査は1回にし、末尾救済は同一結果を使い回す。
+    val matches = BATCH_TRANS_REGEX.findAll(normalized).toList()
+    for (m in matches) {
         val id = normalizeDigits(m.groupValues[1]).toIntOrNull() ?: continue
         if (id < 0 || result.containsKey(id)) continue
         val bodyRange = m.groups[2]?.range ?: continue
@@ -296,7 +298,7 @@ fun parseBatchXmlResponse(text: String): Map<Int, String>? {
 
     // 末尾セグメントが途絶して </trans> が欠けている場合の救済（1件以上の完成タグがある場合）
     if (result.isNotEmpty()) {
-        val lastMatch = BATCH_TRANS_REGEX.findAll(normalized).lastOrNull()
+        val lastMatch = matches.lastOrNull()
         if (lastMatch != null && lastMatch.range.last < normalized.length - 1) {
             val tail = normalized.substring(lastMatch.range.last + 1)
             val unclosedMatch = BATCH_TRANS_UNCLOSED_REGEX.find(tail)
@@ -328,17 +330,18 @@ fun parseBatchResponse(text: String): Map<Int, String>? {
     if (raw.isEmpty()) return null
 
     // 1. JSON形式の優先判定（先頭が { または [、あるいは translations キーを含む場合）
-    if (raw.startsWith("{") || raw.startsWith("[") || raw.contains("\"translations\"") || raw.contains("'translations'")) {
-        val jsonParsed = parseBatchJsonResponse(raw)
-        if (!jsonParsed.isNullOrEmpty()) return jsonParsed
-    }
+    // 技術的根拠1行：JSON解析は1回だけ行い、使い回す（同一応答の再解析をしない）。
+    val looksJson = raw.startsWith("{") || raw.startsWith("[") || raw.contains("\"translations\"") || raw.contains("'translations'")
+    val jsonParsed: Map<Int, String>? = if (looksJson) parseBatchJsonResponse(raw) else null
+    if (!jsonParsed.isNullOrEmpty()) return jsonParsed
 
     // 2. XMLタグ形式のパース
     val xmlParsed = parseBatchXmlResponse(raw)
     if (!xmlParsed.isNullOrEmpty()) return xmlParsed
 
-    // 3. XMLで取れなかった場合のJSON救済
-    return parseBatchJsonResponse(raw)
+    // 3. JSON未試行の場合のみ救済（1.で試し済みの場合は繰り返さない）
+    if (!looksJson) return parseBatchJsonResponse(raw)
+    return null
 }
 
 /**

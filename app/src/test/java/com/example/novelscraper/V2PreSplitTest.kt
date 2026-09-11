@@ -1,6 +1,7 @@
 package com.example.novelscraper
 
 import com.example.novelscraper.translation.v2.infra.InMemoryFileStore
+import com.example.novelscraper.translation.v2.pipeline.PRE_SPLIT_MANIFEST_NAME
 import com.example.novelscraper.translation.v2.pipeline.PRE_SPLIT_MIN_CHARS
 import com.example.novelscraper.translation.v2.pipeline.PRE_SPLIT_SAMPLE_CHARS
 import com.example.novelscraper.translation.v2.pipeline.cleanseForSplit
@@ -68,14 +69,42 @@ class V2PreSplitTest {
         assertTrue(result.sampleText.contains("勇者"))
 
         val children = store.children(result.subfolderUri).map { it.name }.sorted()
-        assertEquals(result.partCount, children.size)
-        assertTrue(children.all { it.startsWith("part_") && it.endsWith(".txt") })
+        assertEquals(result.partCount, children.size - 1) // 宣言書 manifest.json を除く
+        assertTrue(children.filter { it != PRE_SPLIT_MANIFEST_NAME }.all { it.startsWith("part_") && it.endsWith(".txt") })
+        // 宣言書が確定していること
+        assertNotNull(store.findChild(result.subfolderUri, PRE_SPLIT_MANIFEST_NAME))
         // Round trip: parts rejoin to the cleansed source lines.
-        val rejoined = children.map { store.readText(store.findChild(result.subfolderUri, it)!!.uri) }.joinToString("")
+        val rejoined = children.filter { it != PRE_SPLIT_MANIFEST_NAME }.map { store.readText(store.findChild(result.subfolderUri, it)!!.uri) }.joinToString("")
         assertEquals(
             body.lines().filter { it.isNotBlank() },
             rejoined.lines().filter { it.isNotBlank() }
         )
+    }
+
+    @Test
+    fun testSplitFile_PartialResumeResplitsFully() = kotlinx.coroutines.runBlocking {
+        // 中断残骸（宣言書なしの部分群）は完成扱いせず作り直し、全件そろうこと
+        val store = InMemoryFileStore()
+        val root = store.createRoot("novel-partial")
+        val raw = store.createFile(root.uri, "story.txt", "text/plain")!!
+        val body = "昔々あるところに勇者がいました。\n".repeat(120)
+        store.writeText(raw.uri, body)
+        val splitRoot = store.createDir(root.uri, "split-out")!!
+        val novelDir = store.createDir(splitRoot.uri, "story")!!
+        val stale = store.createFile(novelDir.uri, "part_0001.txt", "text/plain")!!
+        store.writeText(stale.uri, "古い残骸\n")
+
+        val result = splitSingleTextFile(
+            store, raw.uri, "story.txt", splitRoot.uri, 1000
+        ) {}
+        assertNotNull(result)
+        assertTrue(result!!.partCount > 1)
+        val children = store.children(result.subfolderUri).map { it.name }
+        assertEquals(result.partCount, children.count { it.startsWith("part_") })
+        assertNotNull(store.findChild(result.subfolderUri, PRE_SPLIT_MANIFEST_NAME))
+        // 残骸は上書きされ、正規の内容になっていること
+        val firstText = store.readText(store.findChild(result.subfolderUri, "part_0001.txt")!!.uri)
+        assertTrue(firstText != null && firstText.contains("勇者がいました"))
     }
 
     @Test

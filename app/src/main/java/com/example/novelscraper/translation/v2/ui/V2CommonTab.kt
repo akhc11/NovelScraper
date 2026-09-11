@@ -487,8 +487,8 @@ internal fun V2CommonTab(
             }
         }
 
-        // 技術的根拠1行：辞書の表示用能力を登録簿に一本化し、空欄既定・未知フォールバックは従来通り。
-        val dictDefault = if (state.dictProvider.value.trim().lowercase() == "gemini") "gemini-3.5-flash" else state.dictModel.value
+        // 技術的根拠1行：辞書の表示用能力を登録簿に一本化し、空欄既定・未知フォールバックは従来通り（gemini完全一致のみflash既定）。
+        val dictDefault = if (state.dictProvider.value == "gemini") "gemini-3.5-flash" else state.dictModel.value
         val dictCaps = ProviderRegistry.capabilitiesForOrOpenRouter(
             state.dictProvider.value,
             state.dictModel.value.ifBlank { dictDefault }

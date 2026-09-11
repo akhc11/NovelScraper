@@ -139,10 +139,10 @@ class WorkerRunner(
             try {
                 val raw = store.readText(file.uri)
                 if (raw == null) {
-                    log("❌ [W#$workerId] ファイル読込失敗: $fileName")
-                    writeFailed(store, outputDirUri, fileName, "unreadable file")
-                    existing.add("${fileName}.failed")
-                    bump(fileName)
+                    // 技術的根拠1行：業界標準(Retry-After/5xx/429率は再送、400/認証/課金は確定)と仕様書§4.5/§7-9通り、I/O読込失敗は外的要因として保留し.failedを作らない。
+                    // 動作例：地下鉄でネット切断→「読込失敗のため保留、次回自動再試行」と残り、次回起動で訳し直す（.failed化してスキップ確定しない）。
+                    log("⚠️ [W#$workerId] ファイル読込失敗のため保留します: $fileName（次回再試行）")
+                    retainPrimaryClaim = true
                     continue
                 }
                 val content = cleanseBasic(raw)
@@ -167,10 +167,10 @@ class WorkerRunner(
                     val workDir = store.findChild(outputDirUri, ".parts_${fileName}")
                         ?: store.createDir(outputDirUri, ".parts_${fileName}")
                     if (workDir == null) {
-                        log("❌ [W#$workerId] 大ファイル用作業フォルダ作成失敗: $fileName")
-                        writeFailed(store, outputDirUri, fileName, content) { log(it) }
-                        existing.add("$fileName.failed")
-                        bump(fileName)
+                        // 技術的根拠1行：作業所作成失敗はSAF/I-O等の外的要因のため保留し.failedを作らない（確定は終端Dead経路のみ）。
+                        // 動作例：保存先の権限が一時的に外れる→保持のまま次へ、権限復旧後の次回に再開する。
+                        log("⚠️ [W#$workerId] 大ファイル用作業フォルダ作成失敗のため保留します: $fileName（次回再試行）")
+                        retainPrimaryClaim = true
                     } else {
                         log("📦 [W#$workerId] 大ファイル分割翻訳開始: $fileName (${contentBytes}B)")
                         val outcome: LargeOutcome? = try {
@@ -323,20 +323,40 @@ class WorkerRunner(
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                // 技術的根拠: ファイル走査・処理中の予期せぬ例外でワーカーを死なせず、.failedを記録して他ワーカーの連鎖死を防ぎ次へ進む
-                // 技術的根拠1行：判定ロジックは変えずLogcatにも残して原因追跡可能にする（外部振る舞い不変）。
-                log("❌ [W#$workerId] ファイル処理中に予期せぬ例外: $fileName (${t.javaClass.simpleName}: ${t.message})")
+                // 技術的根拠1行：I/O系の予期せぬ例外は外的要因として保留し、原因不明のバグ系のみ.failed確定する（429/5xxは再送・400/認証は確定の業界標準に準拠）。
+                // 動作例：保存中にSD抜去→「一時エラーのため保留」と残り次回再試行。プログラムバグ→「予期せぬ例外」として.failed化し連鎖死だけ防ぐ。
                 android.util.Log.w("WorkerRunner", "unexpected file error: $fileName", t)
-                val fallbackContent = try { store.readText(file.uri) ?: "" } catch (e: Throwable) {
-                    android.util.Log.w("WorkerRunner", "fallback read failed: $fileName", e)
-                    ""
+                if (isTransientStorageError(t)) {
+                    log("⚠️ [W#$workerId] 一時エラーのため保留します: $fileName (${t.javaClass.simpleName}。次回再試行）")
+                    retainPrimaryClaim = true
+                } else {
+                    log("❌ [W#$workerId] ファイル処理中に予期せぬ例外: $fileName (${t.javaClass.simpleName}: ${t.message})")
+                    val fallbackContent = try { store.readText(file.uri) ?: "" } catch (e: Throwable) {
+                        android.util.Log.w("WorkerRunner", "fallback read failed: $fileName", e)
+                        ""
+                    }
+                    writeFailed(store, outputDirUri, fileName, fallbackContent) { log(it) }
+                    existing.add("$fileName.failed")
+                    bump(fileName)
                 }
-                writeFailed(store, outputDirUri, fileName, fallbackContent) { log(it) }
-                existing.add("$fileName.failed")
-                bump(fileName)
             } finally {
                 if (!retainPrimaryClaim) unclaim(fileName)
             }
         }
+    }
+
+    /**
+     * 貯蔵I/O系の一時失敗か（cause連鎖込み）。
+     * 技術的根拠1行：LLM業界標準（接続/DNS/TLS/タイムアウト/5xx/429率は再送、400/認証/課金は確定）に合わせ、I/O・メモリ枯渇・タイムアウトは保留対象とする。
+     */
+    private fun isTransientStorageError(t: Throwable): Boolean {
+        var cur: Throwable? = t
+        while (cur != null) {
+            if (cur is java.io.IOException) return true
+            if (cur is OutOfMemoryError) return true
+            if (cur is java.util.concurrent.TimeoutException) return true
+            cur = cur.cause
+        }
+        return false
     }
 }

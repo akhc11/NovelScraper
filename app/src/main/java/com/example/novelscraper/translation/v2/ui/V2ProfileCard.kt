@@ -272,26 +272,39 @@ internal fun V2ProfileCard(
                     }
 
                     // 目標日本語出力文字数
+                    var outputCharsText by remember(profile.id) { mutableStateOf(profile.maxOutputChars.toString()) }
+
                     Column(modifier = Modifier.fillMaxWidth()) {
-                        Text("目標日本語出力文字数 (文字):", color = AppColors.textSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            "目標日本語出力文字数 (${TranslationLimits.OUTPUT_CHARS_RANGE.first}〜${TranslationLimits.OUTPUT_CHARS_RANGE.last}文字):",
+                            color = AppColors.textSecondary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                         Spacer(modifier = Modifier.height(2.dp))
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Box(modifier = Modifier.weight(1f)) {
                                 V2InputArea(
-                                    value = profile.maxOutputChars.toString(),
-                                    onValueChange = { onUpdate(profile.copy(maxOutputChars = it.toIntOrNull()?.coerceIn(2000, 100000) ?: 15000)) },
+                                    value = outputCharsText,
+                                    onValueChange = { input ->
+                                        val digits = input.filter { it.isDigit() }.take(6)
+                                        outputCharsText = digits
+                                        digits.toIntOrNull()?.let { onUpdate(profile.copy(maxOutputChars = it)) }
+                                    },
                                     singleLine = true
                                 )
                             }
+                            val displayChars = outputCharsText.toIntOrNull() ?: profile.maxOutputChars
                             Text(
-                                "約 ${(profile.maxOutputChars / 10000.0).let { String.format("%.1f", it) }} 万文字",
+                                "約 ${(displayChars / 10000.0).let { String.format("%.1f", it) }} 万文字",
                                 color = AppColors.accentTealLight,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
                         }
                         Spacer(modifier = Modifier.height(2.dp))
-                        val (zhKb, koKb, enKb) = V2Settings.inputSizeEstimateKb(profile.maxOutputChars)
+                        val currentChars = outputCharsText.toIntOrNull() ?: profile.maxOutputChars
+                        val (zhKb, koKb, enKb) = V2Settings.inputSizeEstimateKb(currentChars)
                         Text(
                             "※入力目安: 中 約${zhKb}KB / 韓 約${koKb}KB / 英 約${enKb}KB (言語別に自動逆算)" +
                                     if (totalCount > 1) " / 複数モデル時は最小モデルの値に自動同期" else "",

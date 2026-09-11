@@ -1,14 +1,20 @@
 package com.example.novelscraper.translation.v2.pipeline
 
+import com.example.novelscraper.translation.common.TextCleanser
 import com.example.novelscraper.translation.v2.domain.V2DeclaredEncoding
 import com.example.novelscraper.translation.v2.infra.FileStore
+import com.example.novelscraper.translation.v2.infra.VDoc
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 
 /**
  * Physical pre-splitter (v2).
  *
  * External contract (same as the frozen spec):
- * - Never touch an already-split folder: return cached info (sample is a head excerpt, not the full text).
+ * - Reuse only verified splits: manifest (count + hashes) must match, else rebuild scoped to split files.
  * - Drop incomplete work on failure/stop, return null.
  * - An empty file yields one empty part.
  * - Ingested text is verified UTF-8; only parts are written back as UTF-8 (source file is never overwritten).
@@ -18,25 +24,28 @@ import kotlinx.coroutines.CancellationException
  */
 const val PRE_SPLIT_MIN_CHARS = 500
 const val PRE_SPLIT_DEFAULT_CHARS = 7000
-/** 言語判定用サンプルの上限（先頭抜粋。新規・再開の両経路で一致させる） */
+/** 言語判定用サンプルの上限（先頭抜粋。新規は先頭8000字、再開は先頭パート全文のため、長い先頭パートでは一致しない） */
 const val PRE_SPLIT_SAMPLE_CHARS = 8000
+
+/** 分割宣言書のファイル名（小説サブフォルダ直下。part_ 系と同様に分割成果物として扱う）。 */
+const val PRE_SPLIT_MANIFEST_NAME = "manifest.json"
+private const val PRE_SPLIT_MANIFEST_VERSION = 1
+private val preSplitJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
+/** 分割宣言書。件名簿＋寸法で再開の正本とする（内容ハッシュは巨大文の毎回全読み返しになるため持たない）。 */
+@Serializable
+data class PreSplitManifest(
+    val version: Int = 1,
+    val sourceSizeBytes: Long = -1,
+    val splitSizeChars: Int = 0,
+    val parts: List<String> = emptyList()
+)
 
 /** 呼出毎コンパイルを避けるための共有正規表現 */
 private val TXT_SUFFIX_REGEX = Regex("""\.[tT][xX][tT]$""")
 
-/** Harmful-char cleansing for split lines. Keeps \n \r \t, drops ISO controls/BOM/ZWSP. */
-fun cleanseForSplit(line: String): String {
-    val sb = StringBuilder(line.length)
-    for (ch in line) {
-        when {
-            ch == '\n' || ch == '\r' || ch == '\t' -> sb.append(ch)
-            ch.isISOControl() -> Unit
-            ch.code == 0xFEFF || ch.code == 0x200B -> Unit
-            else -> sb.append(ch)
-        }
-    }
-    return sb.toString()
-}
+/** Harmful-char cleansing for split lines. Delegates to TextCleanser to eliminate duplication. */
+fun cleanseForSplit(line: String): String = TextCleanser.cleanse(line)
 
 /** Pure splitter: bundle lines per char budget, machine-split oversized lines. */
 fun splitTextToParts(text: String, splitSizeChars: Int): List<String> {
@@ -52,14 +61,11 @@ fun splitTextToParts(text: String, splitSizeChars: Int): List<String> {
     for (rawLine in text.lineSequence()) {
         val line = cleanseForSplit(rawLine)
         if (line.length > size) {
-            var start = 0
-            while (start < line.length) {
-                val end = (start + size).coerceAtMost(line.length)
-                val seg = line.substring(start, end)
+            // 技術的根拠1行：超長行の機械分割は共有実装に寄せ、サロゲート対の途中切断を防ぐ（ストリーミング側と同一）。
+            for (seg in splitSafeOversized(line, size)) {
                 if (cur.length + seg.length >= size && cur.isNotEmpty()) flush()
                 cur.append(seg).append("\n")
                 if (cur.length >= size) flush()
-                start = end
             }
         } else {
             if (cur.length + line.length + 1 > size && cur.isNotEmpty()) flush()
@@ -76,6 +82,90 @@ data class PreSplitResult(
     val sampleText: String,
     val partCount: Int
 )
+
+/** 分割宣言書を読む。欠損・破損時は null（fail-closed）。 */
+suspend fun readPreSplitManifest(store: FileStore, novelDirUri: String): PreSplitManifest? {
+    return try {
+        val doc = store.findChild(novelDirUri, PRE_SPLIT_MANIFEST_NAME)?.takeIf { !it.isDirectory }
+            ?: return null
+        val text = store.readText(doc.uri) ?: return null
+        preSplitJson.decodeFromString<PreSplitManifest>(text).takeIf {
+            it.version == PRE_SPLIT_MANIFEST_VERSION && it.parts.isNotEmpty()
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/** 分割宣言書を確定させる。失敗時は false（呼出側は従来動作に退行する）。 */
+suspend fun writePreSplitManifest(
+    store: FileStore,
+    novelDirUri: String,
+    manifest: PreSplitManifest,
+    log: (String) -> Unit = {}
+): Boolean {
+    val text = preSplitJson.encodeToString(PreSplitManifest.serializer(), manifest)
+    return saveOutputText(store, novelDirUri, PRE_SPLIT_MANIFEST_NAME, text, "application/json", log = log) != null
+}
+
+/** 分割成果物（part_*.txt＋宣言書）だけを消す。利用者のファイルには触れない。 */
+private suspend fun clearSplitFiles(store: FileStore, novelDirUri: String, log: (String) -> Unit) {
+    val children = try {
+        store.children(novelDirUri)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (t: Throwable) {
+        log("分割成果物の掃除に失敗しました (${t.message})")
+        return
+    }
+    for (child in children) {
+        if (child.isDirectory) continue
+        val isPart = child.name.startsWith("part_", ignoreCase = true) && child.name.endsWith(".txt", ignoreCase = true)
+        if (!isPart && !child.name.equals(PRE_SPLIT_MANIFEST_NAME, ignoreCase = true)) continue
+        try {
+            store.deleteFile(child.uri)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            log("分割成果物の掃除に失敗しました (${child.name}: ${t.message})")
+        }
+    }
+}
+
+/**
+ * 既存フォルダの採用判定。宣言書が有効ならそれを返し、宣言書なしの旧配置は
+ * 内容ハッシュを取り直して封印（移行受入れ）する。いずれも不可なら null。
+ */
+private suspend fun adoptPreSplitManifest(
+    store: FileStore,
+    novelDirUri: String,
+    sourceSizeBytes: Long,
+    splitSizeChars: Int,
+    log: (String) -> Unit
+): PreSplitManifest? {
+    val manifest = readPreSplitManifest(store, novelDirUri) ?: return null
+    if (manifest.splitSizeChars != splitSizeChars) return null
+    if (sourceSizeBytes >= 0 && manifest.sourceSizeBytes >= 0 &&
+        manifest.sourceSizeBytes != sourceSizeBytes
+    ) return null
+    val listed = try {
+        store.children(novelDirUri)
+            .filter {
+                !it.isDirectory && it.name.startsWith("part_", ignoreCase = true) &&
+                    it.name.endsWith(".txt", ignoreCase = true)
+            }
+            .map { it.name }
+            .sorted()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        return null
+    }
+    if (listed.sorted() != manifest.parts.sorted()) return null
+    return manifest
+}
 
 /**
  * サンプルバイト列から、マルチバイト文字の途中切断（underflow）を防ぐため
@@ -110,6 +200,8 @@ suspend fun splitSingleTextFile(
     splitSizeChars: Int = PRE_SPLIT_DEFAULT_CHARS,
     declared: V2DeclaredEncoding? = null,
     stopped: () -> Boolean = { false },
+    /** 入力ファイルのバイト数（不明時は -1。不明でも動作し、寸法照合だけ省く） */
+    sourceSizeBytes: Long = -1,
     /** 文字化け確定時の通知。呼ばれたファイルは翻訳対象外（スキップ）にする */
     onSkipped: (reason: String) -> Unit = {},
     log: (String) -> Unit = {}
@@ -123,14 +215,16 @@ suspend fun splitSingleTextFile(
 
     val existing = store.findChild(splitRootUri, novelBase)
     if (existing != null && existing.isDirectory) {
-        val parts = store.children(existing.uri)
-            .filter { !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) }
-            .sortedBy { it.name }
-        if (parts.isNotEmpty()) {
-            log("ℹ️ すでに分割完了済みです ($novelBase: ${parts.size}パート - already split)")
-            val sample = store.readText(parts.first().uri) ?: ""
-            return PreSplitResult(existing.uri, novelBase, sample, parts.size)
+        // 技術的根拠1行：宣言書（名簿＋寸法）で完成を検証する。部分残骸・設定変更は作り直す。
+        val adopted = adoptPreSplitManifest(store, existing.uri, sourceSizeBytes, size, log)
+        if (adopted != null) {
+            log("ℹ️ すでに分割完了済みです ($novelBase: ${adopted.parts.size}パート - already split)")
+            val sample = store.findChild(existing.uri, adopted.parts.first())?.takeIf { !it.isDirectory }?.let {
+                store.readText(it.uri)
+            } ?: ""
+            return PreSplitResult(existing.uri, novelBase, sample, adopted.parts.size)
         }
+        clearSplitFiles(store, existing.uri, log)
     }
 
     val isNew = (existing == null)
@@ -142,13 +236,13 @@ suspend fun splitSingleTextFile(
     }
 
     suspend fun rollback() {
+        // 技術的根拠1行：中断・失敗時の後片付けはNonCancellableで完遂させるため、ここの例外握りつぶしは意図的である。
         try {
             if (isNew) {
                 store.deleteRecursively(novelDir.uri)
             } else {
-                for (c in store.children(novelDir.uri)) {
-                    if (c.isDirectory) store.deleteRecursively(c.uri) else store.deleteFile(c.uri)
-                }
+                // 再利用フォルダでは分割成果物だけ消す（利用者のファイルには触れない）。
+                clearSplitFiles(store, novelDir.uri, log)
             }
         } catch (_: Exception) {
             // Rollback is best-effort; the original reason is already logged.
@@ -157,6 +251,7 @@ suspend fun splitSingleTextFile(
 
     try {
         if (stopped()) {
+            log("⏸ 分割を中断しました ($fileName)")
             rollback()
             return null
         }
@@ -187,6 +282,7 @@ suspend fun splitSingleTextFile(
         val charsetId = ingested.provenance.canonicalId
 
         var partNumber = 1
+        val writtenNames = mutableListOf<String>()
         suspend fun writePart(content: String): Boolean {
             val reason = com.example.novelscraper.translation.common.ingest.ChunkVerifier.verify(content, charsetId)
             if (reason != null) {
@@ -197,8 +293,13 @@ suspend fun splitSingleTextFile(
             val partName = "part_" + partNumber.toString().padStart(4, '0') + ".txt"
             val doc = findOrCreateFile(store, novelDir.uri, partName, "text/plain")
             val ok = doc != null && store.writeText(doc.uri, content)
-            if (ok) partNumber++
-            return ok
+            if (!ok) {
+                log("❌ 分割片の保存に失敗しました ($fileName: $partName)")
+                return false
+            }
+            writtenNames.add(doc.name)
+            partNumber++
+            return true
         }
 
         val inputStream = store.openInputStream(fileUri) ?: run {
@@ -229,10 +330,8 @@ suspend fun splitSingleTextFile(
                         sampleSb.append(line).append("\n")
                     }
                     if (line.length > size) {
-                        var start = 0
-                        while (start < line.length) {
-                            val end = (start + size).coerceAtMost(line.length)
-                            val seg = line.substring(start, end)
+                        // 技術的根拠1行：超長行の機械分割は共有実装に寄せ、サロゲート対の途中切断を防ぐ（純粋分割側と同一）。
+                        for (seg in splitSafeOversized(line, size)) {
                             if (cur.length + seg.length >= size && cur.isNotEmpty()) {
                                 if (!flushCur()) return@use false
                             }
@@ -240,7 +339,6 @@ suspend fun splitSingleTextFile(
                             if (cur.length >= size) {
                                 if (!flushCur()) return@use false
                             }
-                            start = end
                         }
                     } else {
                         if (cur.length + line.length + 1 > size && cur.isNotEmpty()) {
@@ -253,7 +351,8 @@ suspend fun splitSingleTextFile(
                 true
             }
         } catch (e: CancellationException) {
-            rollback()
+            // 技術的根拠1行: キャンセル状態下でもファイル残骸のロールバックを完遂させるためNonCancellableを適用する。
+            withContext(NonCancellable) { rollback() }
             throw e
         } catch (e: Exception) {
             log("❌ ストリーミング分割エラー: $fileName (${e.message})")
@@ -261,6 +360,7 @@ suspend fun splitSingleTextFile(
         }
 
         if (!streamOk) {
+            if (!stopped()) log("❌ 分割が中断されました ($fileName)")
             rollback()
             return null
         }
@@ -274,11 +374,18 @@ suspend fun splitSingleTextFile(
         }
         val total = partNumber - 1
         log("✅ 物理分割完了: $novelBase (全 $total パート)")
-        // 技術的根拠1行：sampleは言語判定専用のため全文を保持せず先頭抜粋に統一する（再開経路＝先頭partと一致）。
+        // 宣言書は全塊の書込成功後にだけ作る（存在自体が完成の証拠になる）。
+        // 技術的根拠1行：宣言書の保存失敗でも分割自体は完成しているため続行し、次回採用時に自己修復する。
+        val manifest = PreSplitManifest(PRE_SPLIT_MANIFEST_VERSION, sourceSizeBytes, size, writtenNames.toList())
+        if (!writePreSplitManifest(store, novelDir.uri, manifest, {})) {
+            log("ℹ️ 分割宣言書を保存できませんでした ($novelBase。次回再検証します)")
+        }
+        // 技術的根拠1行：sampleは言語判定専用のため全文を保持せず先頭抜粋にする（先頭パートが上限以下の場合は再開経路と一致する）。
         val sampleText = if (sampleSb.length > PRE_SPLIT_SAMPLE_CHARS) sampleSb.substring(0, PRE_SPLIT_SAMPLE_CHARS) else sampleSb.toString()
         return PreSplitResult(novelDir.uri, novelBase, sampleText, total)
     } catch (e: CancellationException) {
-        rollback()
+        // 技術的根拠1行: 停止ボタン押下時の中断でも不完全なフォルダを確実に削除するためNonCancellableを適用する。
+        withContext(NonCancellable) { rollback() }
         throw e
     } catch (e: Exception) {
         log("❌ 物理分割エラー: $fileName (${e.message})")

@@ -88,7 +88,7 @@ internal data class V2GeminiResponse(
 @Serializable
 internal data class V2GeminiFeedback(val blockReason: String? = null)
 
-/** 送信は解決済み値をそのまま送る（可否判断は能力層の責務）。本構造にない項目（topP等）は送出対象外。level/budget併存時はlevel優先 */
+/** 送信は解決済み値を送る（可否判断は能力層の責務）。本構造にない項目（topP等）は送出対象外。level/budget併存時はlevel優先 */
 internal fun buildGeminiBody(req: LlmRequest): String {
     val thinking = when {
         !req.options.thinkingLevel.isNullOrBlank() ->
@@ -175,7 +175,7 @@ internal fun parseGeminiResponse(code: Int, body: String, retryAfterSec: Long? =
         val mapped = GeminiErrorMapper.map(code, body, effectiveRetryAfter)
         return LlmResult.Failure(mapped, statusCode = code)
     }
-    val mapped = GenericErrorMapper.map(code, body)
+    val mapped = GenericErrorMapper.map(code, body, retryAfterSec)
     return LlmResult.Failure(mapped, statusCode = code)
 }
 

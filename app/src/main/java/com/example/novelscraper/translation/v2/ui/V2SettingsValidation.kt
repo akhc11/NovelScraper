@@ -218,6 +218,16 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
             issues.add(V2SettingsIssue("${label}サイズ比は最小≦最大で指定してください", true))
         }
     }
+    for (profile in settings.profiles) {
+        if (profile.maxOutputChars !in TranslationLimits.OUTPUT_CHARS_RANGE) {
+            issues.add(
+                V2SettingsIssue(
+                    "${profile.model.ifBlank { "モデル" }}: 目標文字数は${TranslationLimits.OUTPUT_CHARS_RANGE.first}〜${TranslationLimits.OUTPUT_CHARS_RANGE.last}文字に丸められます",
+                    false
+                )
+            )
+        }
+    }
     return issues
 }
 

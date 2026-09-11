@@ -32,6 +32,24 @@ internal fun epochGuard(profileCount: Int, promptCount: Int): Int =
     profileCount * (promptCount + 2) * 2 + 8
 
 /**
+ * 中断可能な待機。停止旗を見ながら1秒刻みで眠り、停止時は残りを捨てる。
+ * 技術的根拠1行：一括睡眠では停止ボタンが最大10分遅れるため、待機の合計秒数は変えずに応答性だけを上げる。
+ */
+suspend fun patientSleep(
+    totalMs: Long,
+    stopped: () -> Boolean,
+    sleeper: suspend (Long) -> Unit
+) {
+    var remaining = totalMs.coerceAtLeast(0)
+    while (remaining > 0) {
+        if (stopped()) return
+        val slice = minOf(remaining, 1000L)
+        sleeper(slice)
+        remaining -= slice
+    }
+}
+
+/**
  * 単発呼出の共有実装（送信・コスト計上のみ。巡回・待機・中止判断は呼出側の責務）。
  */
 internal suspend fun executeLlmCall(
@@ -80,14 +98,15 @@ internal suspend fun handleTransientRetry(
     transientRetryDelaySec: Int,
     sameLeft: Int,
     sleeper: suspend (Long) -> Unit,
-    log: (String) -> Unit
+    log: (String) -> Unit,
+    stopped: () -> Boolean = { false }
 ): Boolean {
     if (sameLeft <= 0) return false
     val waitSec = failure.retryAfterSec?.toLong()?.coerceIn(0L, TranslationLimits.RETRY_AFTER_MAX_SEC)
         ?: transientRetryDelaySec.toLong().coerceIn(0L, TranslationLimits.WAIT_MAX_SEC)
     if (waitSec > 0) {
         log("一時エラーのため ${waitSec}秒待機して再送します")
-        sleeper(waitSec * 1000L)
+        patientSleep(waitSec * 1000L, stopped, sleeper)
     } else {
         log("一時エラーのため即座に再送します")
     }
@@ -103,14 +122,15 @@ internal suspend fun handleQuotaRetry(
     maxCooldownSec: Long,
     sameLeft: Int,
     sleeper: suspend (Long) -> Unit,
-    log: (String) -> Unit
+    log: (String) -> Unit,
+    stopped: () -> Boolean = { false }
 ): Boolean {
     if (sameLeft <= 0) return false
     val waitSec = failure.retryAfterSec?.toLong()?.coerceIn(0L, TranslationLimits.RETRY_AFTER_MAX_SEC)
         ?: cooldownSec.toLong().coerceIn(0L, maxCooldownSec)
     if (waitSec > 0) {
         log("${failure.kind} のため ${waitSec}秒待機して再送します")
-        sleeper(waitSec * 1000L)
+        patientSleep(waitSec * 1000L, stopped, sleeper)
     } else {
         log("${failure.kind} のため即座に再送します")
     }

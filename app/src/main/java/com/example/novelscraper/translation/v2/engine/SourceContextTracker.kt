@@ -51,8 +51,16 @@ class SourceContextTracker(
     }
 
     fun putSource(index: Int, content: String) {
+        putCleanSource(index, cleanseBasic(content))
+    }
+
+    /**
+     * 洗浄済み原文の末尾を登録する（通常経路はこちら）。
+     * 技術的根拠1行：洗浄の有無を型で区別せず呼出規約にするため、未洗浄は putSource、洗浄済みは本関数を使う。
+     */
+    fun putCleanSource(index: Int, cleanContent: String) {
         if (!enabled || index < 0 || index >= files.size) return
-        val tail = content.lines().takeLast(
+        val tail = cleanContent.lines().takeLast(
             contextLines.coerceIn(
                 TranslationLimits.PREV_LINES_RANGE.first,
                 TranslationLimits.PREV_LINES_RANGE.last

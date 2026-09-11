@@ -80,13 +80,13 @@ class DictionaryBuilder(
                     try {
                         val res = buildHandler(settings, profile, settings.openRouterKey).call(dictRequest(settings.openRouterKey))
                         if (res is LlmResult.Success && dict.requestDelaySec > 0) {
-                            delay(dict.requestDelaySec * 1000L)
+                            patientSleep(dict.requestDelaySec * 1000L, stopped, { kotlinx.coroutines.delay(it) })
                         } else if (res is LlmResult.Failure && res.failure.kind.isQuotaLike()) {
                             val waitSec = res.failure.retryAfterSec?.toLong()?.coerceIn(0L, TranslationLimits.RETRY_AFTER_MAX_SEC)
                                 ?: dict.cooldown429Sec.toLong().coerceAtLeast(0L)
                             if (waitSec > 0) {
                                 log("  ⏳ 辞書生成: ${res.failure.kind}のため${waitSec}秒待機します")
-                                delay(waitSec * 1000L)
+                                patientSleep(waitSec * 1000L, stopped, { kotlinx.coroutines.delay(it) })
                             } else {
                                 log("  ⚡ 辞書生成: ${res.failure.kind}のため即座に再送します")
                             }
@@ -194,7 +194,7 @@ class DictionaryBuilder(
                             continue
                         }
                         if (result is LlmResult.Success && requestDelaySec > 0) {
-                            delay(requestDelaySec * 1000L)
+                            patientSleep(requestDelaySec * 1000L, stopped, { kotlinx.coroutines.delay(it) })
                         }
                         return result
                     } finally {
@@ -205,9 +205,10 @@ class DictionaryBuilder(
                     if (acq.waitMillis >= 1000L) {
                         val waitSec = (acq.waitMillis / 1000).coerceAtLeast(1)
                         log("  ⏳ 辞書生成: 429制限のため${waitSec}秒待機します")
-                        delay(acq.waitMillis)
-                    } else {
-                        delay(acq.waitMillis)
+                    }
+                    patientSleep(acq.waitMillis, stopped, { kotlinx.coroutines.delay(it) })
+                    if (stopped()) {
+                        return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "stopped"))
                     }
                     continue
                 }

@@ -16,9 +16,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -56,7 +59,12 @@ class BaseWebTranslationTask(
     private val json = Json { ignoreUnknownKeys = true }
     private val mainHandler = Handler(Looper.getMainLooper())
     private val fileStore = TranslationFileStore(context, strategy.outputFolderName)
-    private val webView = WebView(context.applicationContext)
+    // WebViewの生成・操作は単一スレッド（Main）に束縛される。IOスレッドでの生成は
+    // 起動時クラッシュの原因になるため、fail-fastで即時失敗させる（呼び元はMain固定）。
+    private val webView: WebView = run {
+        check(Looper.myLooper() == Looper.getMainLooper()) { "BaseWebTranslationTask must be created on the Main thread" }
+        WebView(context.applicationContext)
+    }
 
     // Activityの破棄・バックグラウンド移行と連動してキャンセルされない独立したScope
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -64,13 +72,31 @@ class BaseWebTranslationTask(
     @Volatile
     private var isRunning = false
 
+    @Volatile
+    private var pageLoadSignal: CompletableDeferred<Boolean>? = null
+
     init {
         WebViewHelper.applyStandardSettings(webView, blockImages = false, isDesktop = strategy.isDesktop)
         WebViewHelper.applyVirtualSize(webView) // ヘッドレス（0x0）判定を解除
 
-        // レンダラープロセス強制終了(OOM等)の安全ハンドラを常駐
+        // 単一WebViewClientに集約する。上書きによる安全ハンドラ喪失を根絶するため、以後差し替えない。
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(v: WebView?, url: String?) {
+                val signal = pageLoadSignal ?: return
+                if (url != null && !url.startsWith("javascript:") && !signal.isCompleted) {
+                    signal.complete(true)
+                }
+            }
+
             override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                // 初期ロード待機中ならロード失敗として通知する
+                pageLoadSignal?.let { signal ->
+                    if (!signal.isCompleted) {
+                        Log.e(TAG, "初期ロード中に onRenderProcessGone を検知")
+                        signal.complete(false)
+                        return true
+                    }
+                }
                 val didCrash = detail?.didCrash() ?: false
                 val reason = if (didCrash) "レンダラークラッシュ (C++エラー)" else "メモリ不足によるOS強制終了 (OOM)"
                 Log.e(TAG, "WebView onRenderProcessGone 検知: $reason")
@@ -105,30 +131,20 @@ class BaseWebTranslationTask(
 
                 val targetUrl = strategy.buildTargetUrl(sourceLang, targetLang)
 
-                // 独立した裏WebViewで翻訳ページを初期化
+                // 独立した裏WebViewで翻訳ページを初期化（WebViewClientはinit時の単一インスタンスを使い回す）
                 if (!strategy.isTargetPageUrl(webView.url)) {
                     val pageLoaded = CompletableDeferred<Boolean>()
-
-                    webView.webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(v: WebView?, url: String?) {
-                            if (url != null && !url.startsWith("javascript:") && !pageLoaded.isCompleted) {
-                                pageLoaded.complete(true)
-                            }
+                    pageLoadSignal = pageLoaded
+                    try {
+                        mainHandler.post {
+                            webView.loadUrl(targetUrl)
                         }
 
-                        override fun onRenderProcessGone(v: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                            Log.e(TAG, "初期ロード中に onRenderProcessGone を検知")
-                            if (!pageLoaded.isCompleted) pageLoaded.complete(false)
-                            return true
+                        withTimeout(strategy.pageLoadTimeoutMs) {
+                            pageLoaded.await()
                         }
-                    }
-
-                    mainHandler.post {
-                        webView.loadUrl(targetUrl)
-                    }
-
-                    withTimeout(strategy.pageLoadTimeoutMs) {
-                        pageLoaded.await()
+                    } finally {
+                        pageLoadSignal = null
                     }
                 }
 
@@ -183,7 +199,9 @@ class BaseWebTranslationTask(
                         continue
                     }
 
-                    val chunks = TextChunker.splitIntoChunks(originalContent, strategy.maxChunkSize)
+                    val chunks = withContext(Dispatchers.Default) {
+                        TextChunker.splitIntoChunks(originalContent, strategy.maxChunkSize)
+                    }
                     val totalChunks = chunks.size
                     val translatedChunks = mutableListOf<String>()
                     var lastChunkResultText = ""
@@ -307,6 +325,9 @@ class BaseWebTranslationTask(
                     listener.onTaskFinished(true, finishMessage)
                 }
 
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "BaseWebTranslationTask timeout", e)
+                listener.onTaskFinished(false, "${strategy.engineName}翻訳がタイムアウトしました")
             } catch (e: CancellationException) {
                 listener.onTaskFinished(false, "${strategy.engineName}翻訳を中断しました")
             } catch (e: Exception) {
@@ -430,6 +451,7 @@ class BaseWebTranslationTask(
         isRunning = false
         job?.cancel()
         job = null
+        scope.cancel() // 独立Scopeのリーク防止（タスクはワンショットのため再利用しない）
         mainHandler.post {
             try {
                 webView.stopLoading()

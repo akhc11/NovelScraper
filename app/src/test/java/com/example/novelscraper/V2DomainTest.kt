@@ -55,6 +55,8 @@ class V2DomainTest {
             Row(400, "Unsupported parameter: reasoning.effort", "CONFIG", "INVALID_PARAM"),
             Row(400, "This model's maximum context length is 8192 tokens", "FATAL", null),
             Row(400, "", "FATAL", null),
+            Row(408, "", "RETRYABLE_AFTER", null),
+            Row(425, "", "RETRYABLE_AFTER", null),
             Row(429, "too many requests", "QUOTA_MINUTE", null),
             Row(418, "", "FATAL", null)
         )

@@ -6,6 +6,24 @@ import com.example.novelscraper.translation.common.ingest.LanguageModels
 /** 呼出毎コンパイルを避けるための共有正規表現 */
 private val EN_WORD_REGEX = Regex("""\b[a-zA-Z]{2,}\b""")
 
+/**
+ * 文字種分類の単一真実（検出・残留・品質で共有）。
+ * 技術的根拠1行：範囲の三重実装は必ず乖離するため（ハングル末端・半角カナの差異実績あり）、判定はここに寄せる。
+ */
+internal object ScriptKinds {
+    fun isKana(code: Int): Boolean =
+        code in 0x3040..0x30FF || code in 0xFF61..0xFF9F
+
+    fun isHangul(code: Int): Boolean =
+        code in 0xAC00..0xD7AF || code in 0x1100..0x11FF
+
+    fun isHan(code: Int): Boolean =
+        code in 0x4E00..0x9FFF || code in 0x3400..0x4DBF
+
+    fun isLatin(code: Int): Boolean =
+        (code in 0x0041..0x005A) || (code in 0x0061..0x007A)
+}
+
 /** 検出言語。文字種数え上げによる判定 */
 enum class SourceLang {
     ZH,
@@ -33,18 +51,18 @@ fun detectLanguage(text: String): DetectedLang {
 
     for (ch in text) {
         when {
-            (ch in '\u3040'..'\u309F') || (ch in '\u30A0'..'\u30FF') -> kana++
-            (ch in '\uAC00'..'\uD7AF') || (ch in '\u1100'..'\u11FF') -> {
+            ScriptKinds.isKana(ch.code) -> kana++
+            ScriptKinds.isHangul(ch.code) -> {
                 hangul++
                 if (ch in LanguageModels.KO_TOP_SYLLABLES) koSyllables++
             }
-            (ch in '\u4E00'..'\u9FFF') || (ch in '\u3400'..'\u4DBF') -> {
+            ScriptKinds.isHan(ch.code) -> {
                 han++
                 if (ch in LanguageModels.PURE_SIMPLIFIED_CHARS) pureSimplified++
                 if (ch in LanguageModels.ZH_PARTICLES) zhParticles++
                 if (ch in LanguageModels.JA_KOKUJI) jaKokuji++
             }
-            (ch in 'a'..'z') || (ch in 'A'..'Z') -> latin++
+            ScriptKinds.isLatin(ch.code) -> latin++
         }
     }
     val total = kana + hangul + han + latin
@@ -72,7 +90,8 @@ fun detectLanguage(text: String): DetectedLang {
     if (isJaGrammar) return DetectedLang(SourceLang.JA, "kana-grammar")
     if (jaKokuji >= 2 && kana > 0) return DetectedLang(SourceLang.JA, "ja-kokuji")
 
-    // 4. 英語判定: ラテン文字過半数かつ英語ストップワード検証（ステータス画面HP/MP等の誤爆遮断）
+    // 4. 英語判定: ラテン文字過半数なら英語とする。ストップワード一致は理由表示用であり、
+    // 不一致でも後段の汎用判定が拾う（ラテン主体の文は英語扱いで確定する）。
     if (latin * 2 >= total) {
         val enWordHits = if (latin >= 10) {
             EN_WORD_REGEX.findAll(text.lowercase())

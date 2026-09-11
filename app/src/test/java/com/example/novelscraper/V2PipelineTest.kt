@@ -10,6 +10,9 @@ import com.example.novelscraper.translation.v2.infra.VDoc
 import com.example.novelscraper.translation.v2.pipeline.Attempt
 import com.example.novelscraper.translation.v2.pipeline.AttemptOptions
 import com.example.novelscraper.translation.v2.pipeline.BatchOutcome
+import com.example.novelscraper.translation.v2.pipeline.CallSettled
+import com.example.novelscraper.translation.v2.pipeline.ChunkEntry
+import com.example.novelscraper.translation.v2.pipeline.ChunkManifest
 import com.example.novelscraper.translation.v2.pipeline.COMPLETION_MARKER
 import com.example.novelscraper.translation.v2.pipeline.DictOptions
 import com.example.novelscraper.translation.v2.pipeline.DriverOutcome
@@ -49,9 +52,16 @@ import com.example.novelscraper.translation.v2.pipeline.writeFailed
 import com.example.novelscraper.translation.v2.pipeline.translateLarge
 import com.example.novelscraper.translation.v2.pipeline.translateSingle
 import com.example.novelscraper.translation.v2.pipeline.ResidualOptions
+import com.example.novelscraper.translation.v2.pipeline.RetryBudget
+import com.example.novelscraper.translation.v2.pipeline.callWithRetry
+import com.example.novelscraper.translation.v2.pipeline.saveOutputText
+import com.example.novelscraper.translation.v2.pipeline.shouldPersistFailed
+import com.example.novelscraper.translation.v2.pipeline.writeChunkManifest
+import com.example.novelscraper.translation.v2.pipeline.writeChunks
 import com.example.novelscraper.translation.v2.pipeline.verifyRejectReason
 import com.example.novelscraper.translation.v2.pipeline.verifyTranslation
 import com.example.novelscraper.translation.v2.pipeline.LargeOptions
+import com.example.novelscraper.translation.v2.pipeline.LargeOutcome
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -61,13 +71,14 @@ class V2PipelineTest {
     private fun fail(kind: FailureKind) =
         LlmResult.Failure(ClassifiedFailure(kind))
 
-    private fun looseCtx(
-        call: suspend (String, String, String) -> LlmResult,
-        drivers: List<String> = listOf("d1")
+    private fun looseCtx(        call: suspend (String, String, String) -> LlmResult,
+        drivers: List<String> = listOf("d1"),
+        dictionary: com.example.novelscraper.translation.v2.pipeline.NovelDict? = null
     ) = TranslateContext(
         basePrompts = mapOf(1 to "base"),
         promptOrder = listOf(1),
         driverNames = drivers,
+        dictionary = dictionary,
         verify = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false),
         call = call
     )
@@ -313,8 +324,49 @@ class V2PipelineTest {
     }
 
     @Test
-    fun testTranslateSingle_Flow() = kotlinx.coroutines.runBlocking {
-        val ctx = looseCtx(call = { _, _, source -> ok("訳文:$source") })
+    fun testKernel_SettlePolicy() {
+        // 失敗内容による扱い分けの単一真実。内容依存の確定的失敗だけ .failed 確定する。
+        assertTrue(shouldPersistFailed(SingleResult.Failed(FailureKind.BLOCKED_DETERMINISTIC, isDeterministic = true)))
+        assertTrue(shouldPersistFailed(SingleResult.Failed(FailureKind.FATAL, "verify-rejected", isDeterministic = false)))
+        assertTrue(shouldPersistFailed(SingleResult.Failed(FailureKind.FATAL, "size-ratio", isDeterministic = false)))
+        // 回線・制限等の一時的失敗は未完了保留（.failed を作らない）
+        assertFalse(shouldPersistFailed(SingleResult.Failed(FailureKind.QUOTA_DAILY, isDeterministic = false)))
+        assertFalse(shouldPersistFailed(SingleResult.Failed(FailureKind.QUOTA_MINUTE, isDeterministic = false)))
+        assertFalse(shouldPersistFailed(SingleResult.Failed(FailureKind.RETRYABLE_AFTER, isDeterministic = false)))
+        assertFalse(shouldPersistFailed(SingleResult.Failed(FailureKind.CONFIG, isDeterministic = false)))
+        assertFalse(shouldPersistFailed(SingleResult.Failed(FailureKind.FATAL, "boom", isDeterministic = false)))
+    }
+
+    @Test
+    fun testKernel_RetryBudgetScope() = kotlinx.coroutines.runBlocking {
+        // 予算の有効範囲だけが呼出側で決まり、回数の数え方は骨格が一元管理する。
+        // 運転者単位：同一運転者で予算共有（旧 attemptDrivers と同一回数）
+        var d1calls = 0
+        val terminal = callWithRetry(
+            { d1calls++; fail(FailureKind.QUOTA_MINUTE) },
+            RetryBudget(), maxSameRetries = 1, retryDelayMs = { 0 },
+            stopped = { false }, meter = null, log = {}
+        )
+        assertTrue(terminal is CallSettled.Terminal)
+        assertEquals(2, d1calls)
+        // 確定的失敗は即確定（再送なし）
+        var blocked = 0
+        callWithRetry(
+            { blocked++; fail(FailureKind.BLOCKED_DETERMINISTIC) },
+            RetryBudget(), maxSameRetries = 2, retryDelayMs = { 0 },
+            stopped = { false }, meter = null, log = {}
+        )
+        assertEquals(1, blocked)
+        // 停止は即停止
+        val stopped = callWithRetry(
+            { ok("t") }, RetryBudget(), maxSameRetries = 2, retryDelayMs = { 0 },
+            stopped = { true }, meter = null, log = {}
+        )
+        assertEquals(CallSettled.Stopped, stopped)
+    }
+
+    @Test
+    fun testTranslateSingle_Flow() = kotlinx.coroutines.runBlocking {        val ctx = looseCtx(call = { _, _, source -> ok("訳文:$source") })
         val r = translateSingle("原文", ctx)
         assertTrue(r is SingleResult.Translated)
         assertEquals("訳文:原文", (r as SingleResult.Translated).text)
@@ -682,12 +734,370 @@ class V2PipelineTest {
             store, work.uri, root.uri, "f.txt", content, ctx,
             com.example.novelscraper.translation.v2.pipeline.LargeOptions(chunkSizeBytes = 120)
         )
-        assertTrue(okResult)
+        assertTrue(okResult is LargeOutcome.Completed)
         val final = store.readText(store.findChild(root.uri, "f.txt")!!.uri)!!
         assertTrue(final.contains("訳1"))
         assertTrue(final.contains("訳$n"))
         // 作業所は掃除される
         assertNull(store.findChild(root.uri, ".parts_f"))
+    }
+
+    @Test
+    fun testSplitIntoChunks_PreservesNewlinesAndNoOom() {
+        val totalLines = 1000
+        val sb = java.lang.StringBuilder()
+        for (i in 1..totalLines) {
+            if (i % 5 == 0) {
+                sb.append("\n") // 空行
+            } else {
+                sb.append("第${i}行のテスト文章です。\n")
+            }
+        }
+        val text = sb.toString()
+        val chunks = com.example.novelscraper.translation.v2.pipeline.splitIntoChunks(text, 500)
+        assertTrue(chunks.size > 1)
+        val rejoined = chunks.joinToString("")
+        assertEquals(text, rejoined)
+    }
+
+    /** 宣言書v2の組み立て。実作成名と分割文の対応で内容ハッシュを付ける。 */
+    private fun chunkManifestFor(content: String, chunkSize: Int, names: List<String>): ChunkManifest {
+        val parts = splitIntoChunks(content, chunkSize)
+        assertEquals(parts.size, names.size)
+        return ChunkManifest(
+            2, sha256Hex(content), chunkSize,
+            names.zip(parts) { n, p -> ChunkEntry(n, sha256Hex(p)) }
+        )
+    }
+
+    @Test
+    fun testTranslateLarge_HaltOnFailedChunk() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val root = store.createRoot("w_fail")
+        val work = store.createDir(root.uri, ".parts_f")!!
+        val content = (1..30).joinToString("\n") { "行$it の本文です。" }
+        // 新契約の作業所を用意：入塊＋宣言書＋未解決failed
+        val inDir = store.createDir(work.uri, "in")!!
+        val outDir = store.createDir(work.uri, "out")!!
+        val names = writeChunks(store, inDir.uri, content, 120, {})
+        assertTrue(names.isNotEmpty())
+        assertTrue(writeChunkManifest(store, work.uri, chunkManifestFor(content, 120, names)))
+        val failedDoc = store.createFile(outDir.uri, names[0] + ".failed", "text/plain")!!
+        store.writeText(failedDoc.uri, "failed reason")
+
+        val ctx = looseCtx(call = { _, _, _ -> ok("訳文") })
+        val result = translateLarge(
+            store, work.uri, root.uri, "f.txt", content, ctx,
+            com.example.novelscraper.translation.v2.pipeline.LargeOptions(chunkSizeBytes = 120)
+        )
+        assertTrue(result is LargeOutcome.Held)
+        assertTrue((result as LargeOutcome.Held).reason.isNotBlank())
+        // 未解決failedがある場合は作業所が保持される
+        assertNotNull(store.findChild(root.uri, ".parts_f"))
+    }
+
+    @Test
+    fun testTranslateLarge_DeadAfterConsecutiveHalts() = kotlinx.coroutines.runBlocking {
+        // 同一記録での未解決停止が続くと終端（親失敗記録の対象）になること
+        val store = InMemoryFileStore()
+        val root = store.createRoot("w_dead")
+        val work = store.createDir(root.uri, ".parts_f")!!
+        val content = (1..30).joinToString("\n") { "行$it の本文です。" }
+        val options = com.example.novelscraper.translation.v2.pipeline.LargeOptions(chunkSizeBytes = 120)
+        val blocked = looseCtx(call = { _, _, _ ->
+            LlmResult.Failure(ClassifiedFailure(FailureKind.BLOCKED_DETERMINISTIC, note = "blocked"))
+        })
+        // 1回目：確定的失敗で記録が残り、保持で終わる
+        val r1 = translateLarge(store, work.uri, root.uri, "f.txt", content, blocked, options)
+        assertTrue(r1 is LargeOutcome.Held)
+        // 2回目：未解決停止（連続1回目）で保持のまま
+        val r2 = translateLarge(store, work.uri, root.uri, "f.txt", content, blocked, options)
+        assertTrue(r2 is LargeOutcome.Held)
+        // 3回目：連続上限で終端になる
+        val r3 = translateLarge(store, work.uri, root.uri, "f.txt", content, blocked, options)
+        assertTrue(r3 is LargeOutcome.Dead)
+        assertTrue((r3 as LargeOutcome.Dead).reason.isNotBlank())
+    }
+
+    @Test
+    fun testTranslateLarge_Resume_Flow() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val root = store.createRoot("w_resume")
+        val work = store.createDir(root.uri, ".parts_f")!!
+        val content = "パート1の原文\nパート2の原文\nパート3の原文\n"
+        // 新契約の作業所を用意：入塊＋宣言書＋先頭塊の既訳のみ
+        val inDir = store.createDir(work.uri, "in")!!
+        val outDir = store.createDir(work.uri, "out")!!
+        val names = writeChunks(store, inDir.uri, content, 25, {})
+        assertTrue(names.size >= 2)
+        assertTrue(writeChunkManifest(store, work.uri, chunkManifestFor(content, 25, names)))
+        val outDoc1 = store.createFile(outDir.uri, names[0], "text/plain")!!
+        store.writeText(outDoc1.uri, "パート1の既訳文\n")
+
+        var callCount = 0
+        val ctx = looseCtx(call = { _, _, source ->
+            callCount++
+            ok("翻訳結果:$source")
+        })
+
+        val okResult = translateLarge(
+            store, work.uri, root.uri, "f.txt", content, ctx,
+            com.example.novelscraper.translation.v2.pipeline.LargeOptions(chunkSizeBytes = 25)
+        )
+        assertTrue(okResult is LargeOutcome.Completed)
+        val finalDoc = store.findChild(root.uri, "f.txt")
+        assertNotNull(finalDoc)
+        val finalText = store.readText(finalDoc!!.uri)!!
+        // 既訳のパート1が含まれ、後続パートも結合されていること
+        assertTrue(finalText.contains("パート1の既訳文"))
+        assertTrue(finalText.contains("翻訳結果:"))
+        // 既訳分は再送しないこと
+        assertEquals(names.size - 1, callCount)
+        // 作業所が正常にクリーンアップされていること
+        assertNull(store.findChild(root.uri, ".parts_f"))
+    }
+
+    @Test
+    fun testChunkSession_PartialInWithoutManifest_ResplitsFully() = kotlinx.coroutines.runBlocking {
+        // F1回帰：宣言書なしの欠けた入塊は「完成」と誤認せず作り直し、訳文の欠落を出さないこと
+        val store = InMemoryFileStore()
+        val root = store.createRoot("w_partial")
+        val work = store.createDir(root.uri, ".parts_f")!!
+        val content = "第一部のお話です。\n".repeat(20) + "第二部のお話です。\n".repeat(20)
+        // 途中失敗の残骸：先頭塊だけが入塊に残り、宣言書はない
+        val inDir = store.createDir(work.uri, "in")!!
+        store.createDir(work.uri, "out")!!
+        val first = splitIntoChunks(content, 300).first()
+        val stale = store.createFile(inDir.uri, "chunk_0001", "text/plain")!!
+        store.writeText(stale.uri, first)
+
+        var callCount = 0
+        val ctx = looseCtx(call = { _, _, source ->
+            callCount++
+            ok("訳:$source")
+        })
+        val okResult = translateLarge(
+            store, work.uri, root.uri, "f.txt", content, ctx,
+            com.example.novelscraper.translation.v2.pipeline.LargeOptions(chunkSizeBytes = 300)
+        )
+        assertTrue(okResult is LargeOutcome.Completed)
+        val finalText = store.readText(store.findChild(root.uri, "f.txt")!!.uri)!!
+        // 全塊が翻訳されていること（欠落結合の防止）
+        val expectedChunks = splitIntoChunks(content, 300).size
+        assertEquals(expectedChunks, callCount)
+        assertTrue(finalText.contains("第二部のお話です。"))
+    }
+
+    @Test
+    fun testChunkSession_HashMismatch_Resplits() = kotlinx.coroutines.runBlocking {
+        // 設定・原文の変更後は古い作業所を使い回さないこと
+        val store = InMemoryFileStore()
+        val root = store.createRoot("w_mismatch")
+        val work = store.createDir(root.uri, ".parts_f")!!
+        val oldContent = "古いお話です。\n".repeat(40)
+        val newContent = "新しいお話です。\n".repeat(40)
+        val inDir = store.createDir(work.uri, "in")!!
+        store.createDir(work.uri, "out")!!
+        val oldNames = writeChunks(store, inDir.uri, oldContent, 300, {})
+        assertTrue(writeChunkManifest(store, work.uri, chunkManifestFor(oldContent, 300, oldNames)))
+
+        val ctx = looseCtx(call = { _, _, source -> ok("訳:$source") })
+        val okResult = translateLarge(
+            store, work.uri, root.uri, "f.txt", newContent, ctx,
+            com.example.novelscraper.translation.v2.pipeline.LargeOptions(chunkSizeBytes = 300)
+        )
+        assertTrue(okResult is LargeOutcome.Completed)
+        val finalText = store.readText(store.findChild(root.uri, "f.txt")!!.uri)!!
+        assertTrue(finalText.contains("新しいお話です。"))
+        assertFalse(finalText.contains("古いお話です。"))
+    }
+
+    @Test
+    fun testChunkSession_LegacyManifest_TransitionalReuse() = kotlinx.coroutines.runBlocking {
+        // 旧形式（名簿のみ）は移行受入れし、作り直さず再利用できること
+        val store = InMemoryFileStore()
+        val root = store.createRoot("w_legacy")
+        val work = store.createDir(root.uri, ".parts_f")!!
+        val content = "昔のお話です。\n".repeat(40)
+        val inDir = store.createDir(work.uri, "in")!!
+        store.createDir(work.uri, "out")!!
+        val names = writeChunks(store, inDir.uri, content, 300, {})
+        val legacyJson = "{\"version\":1,\"sourceHash\":\"${sha256Hex(content)}\",\"chunkSizeBytes\":300," +
+            "\"chunks\":[${names.joinToString(",") { "\"$it\"" }}]}"
+        val legacyDoc = store.createFile(work.uri, "manifest.json", "application/json")!!
+        store.writeText(legacyDoc.uri, legacyJson)
+
+        var calls = 0
+        val ctx = looseCtx(call = { _, _, source -> calls++; ok("訳:$source") })
+        val okResult = translateLarge(
+            store, work.uri, root.uri, "f.txt", content, ctx,
+            com.example.novelscraper.translation.v2.pipeline.LargeOptions(chunkSizeBytes = 300)
+        )
+        assertTrue(okResult is LargeOutcome.Completed)
+        assertEquals(names.size, calls)
+        assertTrue(store.readText(store.findChild(root.uri, "f.txt")!!.uri)!!.contains("昔のお話です。"))
+    }
+
+    @Test
+    fun testSaveOutputText_FallbackWithoutRename() = kotlinx.coroutines.runBlocking {
+        // 置換非対応でも直接確定＋照合で保存できること
+        val inner = InMemoryFileStore()
+        val store = object : FileStore by inner {
+            override suspend fun renameFile(dirUri: String, fileUri: String, newName: String): VDoc? = null
+        }
+        val root = inner.createRoot("w_fallback")
+        val saved = saveOutputText(store, root.uri, "a.txt", "本文です。", log = {})
+        assertNotNull(saved)
+        assertEquals("本文です。", inner.readText(inner.findChild(root.uri, "a.txt")!!.uri))
+        // 別名残骸が残らないこと
+        assertTrue(inner.children(root.uri).none { it.name.startsWith(".tmp_") })
+    }
+
+    /**
+     * 実機再現：一覧未反映・表示名改変で別名が名寄せ不可でも、確定済みURI照合で保存できること。
+     */
+    private class TmpBlindStore(val inner: InMemoryFileStore = InMemoryFileStore()) : FileStore by inner {
+        override suspend fun findChild(dirUri: String, name: String): VDoc? {
+            if (name.startsWith(".tmp_")) return null
+            return inner.findChild(dirUri, name)
+        }
+    }
+
+    @Test
+    fun testSaveOutputText_TmpBlindListing_Succeeds() = kotlinx.coroutines.runBlocking {
+        val blind = TmpBlindStore()
+        val root = blind.inner.createRoot("w_blind")
+        val saved = saveOutputText(blind, root.uri, "a.txt", "本文です。", log = {})
+        assertNotNull(saved)
+        assertEquals("本文です。", blind.inner.readText(blind.inner.findChild(root.uri, "a.txt")!!.uri))
+        assertTrue(blind.inner.children(root.uri).none { it.name.startsWith(".tmp_") })
+    }
+
+    @Test
+    fun testChunkManifest_TmpBlindListing_Succeeds() = kotlinx.coroutines.runBlocking {
+        val blind = TmpBlindStore()
+        val root = blind.inner.createRoot("w_blind_manifest")
+        val work = blind.inner.createDir(root.uri, ".parts_f")!!
+        val content = "お話です。\n".repeat(20)
+        val names = writeChunks(blind, blind.inner.createDir(work.uri, "in")!!.uri, content, 300, {})
+        assertTrue(names.isNotEmpty())
+        assertTrue(writeChunkManifest(blind, work.uri, chunkManifestFor(content, 300, names)))
+        assertNotNull(blind.inner.findChild(work.uri, "manifest.json"))
+    }
+
+    @Test
+    fun testTranslateLarge_TmpBlindListing_Succeeds() = kotlinx.coroutines.runBlocking {
+        val blind = TmpBlindStore()
+        val root = blind.inner.createRoot("w_blind_large")
+        val work = blind.inner.createDir(root.uri, ".parts_f")!!
+        val content = (1..30).joinToString("\n") { "行$it の本文です。" }
+        val ctx = looseCtx(call = { _, _, source -> ok("訳:$source") })
+        val okResult = translateLarge(
+            blind, work.uri, root.uri, "f.txt", content, ctx,
+            com.example.novelscraper.translation.v2.pipeline.LargeOptions(chunkSizeBytes = 300)
+        )
+        assertTrue(okResult is LargeOutcome.Completed)
+        val finalText = blind.inner.readText(blind.inner.findChild(root.uri, "f.txt")!!.uri)!!
+        assertTrue(finalText.contains("行30 の本文です。"))
+        assertNull(blind.inner.findChild(root.uri, ".parts_f"))
+    }
+
+    @Test
+    fun testSplitIntoChunks_SmartAbsorbAndOversized() {
+        // 超長行（改行なしの長文）＋サロゲートペア（𠮷野家、絵文字🎉）
+        val surrogate = "𠮷野家の牛丼🎉"
+        val oversizedLine = surrogate.repeat(50) // 約450バイト
+        val chunks = com.example.novelscraper.translation.v2.pipeline.splitIntoChunks(oversizedLine, 150)
+        assertTrue(chunks.size > 1)
+        // 再結合時にサロゲートペアが壊れていないこと
+        val rejoined = chunks.joinToString("")
+        assertEquals(oversizedLine, rejoined)
+    }
+
+    @Test
+    fun testJoinOutputsStreaming_BoundaryNormalizations() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val root = store.createRoot("w_join")
+        val outDir = store.createDir(root.uri, "out")!!
+
+        // ケース1: 末尾改行落ち（癒着防止で \n が補完されること）
+        val doc1 = store.createFile(outDir.uri, "chunk_0001", "text/plain")!!
+        store.writeText(doc1.uri, "第1段落本文")
+        val doc2 = store.createFile(outDir.uri, "chunk_0002", "text/plain")!!
+        store.writeText(doc2.uri, "第2段落本文")
+
+        val finalDoc = store.createFile(root.uri, "final.txt", "text/plain")!!
+        assertTrue(joinOutputsStreaming(store, outDir.uri, listOf("chunk_0001", "chunk_0002"), finalDoc.uri))
+        assertEquals("第1段落本文\n第2段落本文", store.readText(finalDoc.uri))
+
+        // ケース2: 段落区切り（\n\n が正しく維持されること）
+        store.writeText(doc1.uri, "第1段落本文\n\n")
+        store.writeText(doc2.uri, "\n\n第2段落本文") // 前後両方に空行があっても増殖せず \n\n に正規化
+        assertTrue(joinOutputsStreaming(store, outDir.uri, listOf("chunk_0001", "chunk_0002"), finalDoc.uri))
+        assertEquals("第1段落本文\n\n第2段落本文", store.readText(finalDoc.uri))
+    }
+
+    @Test
+    fun testTranslateLarge_WithDictionaryAndContextInjection() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val root = store.createRoot("w_dict")
+        val work = store.createDir(root.uri, ".parts_dict")!!
+
+        val dict = com.example.novelscraper.translation.v2.pipeline.NovelDict(
+            characters = mapOf("山田" to "ヤマダ", "佐藤" to "サトウ"),
+            genders = mapOf("山田" to "男", "佐藤" to "女")
+        )
+
+        val capturedPrompts = mutableListOf<String>()
+        val ctx = looseCtx(
+            dictionary = dict,
+            call = { _, prompt, source ->
+                capturedPrompts.add(prompt)
+                ok("訳文\n$source")
+            }
+        )
+
+        // チャンク1には山田のみ(1120バイト)、チャンク2には佐藤のみ(1120バイト)が出現するテキスト
+        // 1行=28バイト × 40行 = 1120バイト。chunkSizeBytes=1120 で綺麗に2チャンクに分かれ、吸収閾値(1000バイト)も超える
+        val content = "山田が歩いていた。\n".repeat(40) + "佐藤が走ってきた。\n".repeat(40)
+        val okResult = translateLarge(
+            store, work.uri, root.uri, "dict_test.txt", content, ctx,
+            com.example.novelscraper.translation.v2.pipeline.LargeOptions(chunkSizeBytes = 1120),
+            prevSourceTail = "前話の最後の行です。"
+        )
+        assertTrue(okResult is LargeOutcome.Completed)
+        assertEquals(2, capturedPrompts.size)
+
+        // チャンク1の検証:
+        val prompt1 = capturedPrompts[0]
+        // 1. 本文に出現する山田のみ抽出され、佐藤は含まれないこと（ピンポイントマッチング）
+        assertTrue(prompt1.contains("[登場人物対応表]"))
+        val dictSection1 = prompt1.substringAfter("[登場人物対応表]").substringBefore("NOTE:")
+        assertTrue(dictSection1.contains("山田 → ヤマダ (性別: 男)"))
+        assertFalse(dictSection1.contains("佐藤"))
+        // 2. 先頭チャンクのため前話の原文末尾が注入されること
+        assertTrue(prompt1.contains("=== PREVIOUS TEXT"))
+        assertTrue(prompt1.contains("前話の最後の行です。"))
+        assertFalse(prompt1.contains("=== PREVIOUS CONTEXT"))
+
+        // チャンク2の検証:
+        val prompt2 = capturedPrompts[1]
+        // 1. 本文に出現する佐藤のみ抽出され、山田は含まれないこと（ピンポイントマッチング）
+        assertTrue(prompt2.contains("[登場人物対応表]"))
+        val dictSection2 = prompt2.substringAfter("[登場人物対応表]").substringBefore("NOTE:")
+        assertTrue(dictSection2.contains("佐藤 → サトウ (性別: 女)"))
+        assertFalse(dictSection2.contains("山田"))
+        // 2. 2番目チャンクのため直前チャンクの確定訳文末尾が注入され、原文末尾は重ならないこと（不変条件4）
+        assertTrue(prompt2.contains("=== PREVIOUS CONTEXT"))
+        assertTrue(prompt2.contains("山田")) // チャンク1の確定訳文に含まれていること
+        assertFalse(prompt2.contains("=== PREVIOUS TEXT"))
+        assertFalse(prompt2.contains("前話の最後の行です。"))
+
+        // 最終成果物の確認
+        val finalDoc = store.findChild(root.uri, "dict_test.txt")
+        assertNotNull(finalDoc)
+        val finalText = store.readText(finalDoc!!.uri)!!
+        assertTrue(finalText.contains("訳文"))
     }
 
     @Test
@@ -881,6 +1291,55 @@ class V2PipelineTest {
     }
 
     @Test
+    fun testDictStage_GarbageChainHolds() = kotlinx.coroutines.runBlocking {
+        // 解析不能な応答だけの場合は空辞書を確定せず保留し、親失敗記録も作らないこと
+        val store = InMemoryFileStore()
+        val root = store.createRoot("d-garbage")
+        val files = listOf("a.txt" to "山田の物語")
+        val byName = files.toMap()
+        val dict = generateDictionary(
+            store, root.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = { _, _, _ -> ok("this is not json at all") },
+            DictOptions(maxRetriesPerBatch = 1, parallelism = 1)
+        )
+        assertNull(dict)
+        assertNull(store.findChild(root.uri, "dictionary.json"))
+    }
+
+    @Test
+    fun testDictStage_ModelChangeRefetches() = kotlinx.coroutines.runBlocking {
+        // モデル変更時は本文一致でも取り直すこと（抽出呼出しのみ数える）
+        val store = InMemoryFileStore()
+        val root = store.createRoot("d-model")
+        val goodJson = """{"style":"カタカナ","characters":{"山田":"ヤマダ"},"genders":{}}"""
+        val files = listOf("a.txt" to "山田の物語")
+        val byName = files.toMap()
+        val batchPrompt = DictOptions().prompts.batch
+        var batchCalls = 0
+        val countingCall: suspend (String, String, String) -> LlmResult = { _, prompt, _ ->
+            if (prompt == batchPrompt) batchCalls++
+            ok(goodJson)
+        }
+        val first = generateDictionary(
+            store, root.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = countingCall,
+            DictOptions(model = "m1", maxRetriesPerBatch = 0, parallelism = 1)
+        )
+        assertNotNull(first)
+        assertEquals(1, batchCalls)
+        val second = generateDictionary(
+            store, root.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = countingCall,
+            DictOptions(model = "m2", maxRetriesPerBatch = 0, parallelism = 1)
+        )
+        assertNotNull(second)
+        assertEquals(2, batchCalls)
+    }
+
+    @Test
     fun testDictStage_ImmediateRetry() = kotlinx.coroutines.runBlocking {
         val store = InMemoryFileStore()
         val goodJson = """{"style":"カタカナ","characters":{"山田":"ヤマダ"}}"""
@@ -1055,7 +1514,7 @@ class V2PipelineTest {
             store, work.uri, out.uri, "big.txt", content, ctx,
             LargeOptions(chunkSizeBytes = 500), prevSourceTail = "前話の原文末尾です。"
         )
-        assertTrue(done)
+        assertTrue(done is LargeOutcome.Completed)
         assertTrue(prompts.size > 1)
         assertTrue(prompts.first().contains("PREVIOUS TEXT"))
         assertTrue(prompts.drop(1).none { it.contains("PREVIOUS TEXT") })
@@ -1159,6 +1618,25 @@ class V2PipelineTest {
         assertTrue("バッチに分割されていること", batchesReceived.size > 1)
         for (batch in batchesReceived) {
             assertTrue("各バッチがmaxBatchBytes近傍で上限遵守していること", com.example.novelscraper.translation.v2.pipeline.utf8Bytes(batch) <= options.maxBatchBytes + 100)
+        }
+    }
+
+    @Test
+    fun testUtf8Bytes_ParityWithStandardByteArray() {
+        val testStrings = listOf(
+            "",
+            "hello world",
+            "こんにちは世界",
+            "中文测试",
+            "한국어 테스트",
+            "Emoji: 🚀 📖 ✅ ❌ ⚠️ 🔄",
+            "Special symbols: \u0000 \t \n \r \uFEFF \u200B",
+            "Mixed: Hello 日本語 🇨🇳 🇰🇷 🔥 (test) [123]"
+        )
+        for (str in testStrings) {
+            val expected = str.toByteArray(Charsets.UTF_8).size
+            val actual = com.example.novelscraper.translation.v2.pipeline.utf8Bytes(str)
+            assertEquals("Length mismatch for: $str", expected, actual)
         }
     }
 }

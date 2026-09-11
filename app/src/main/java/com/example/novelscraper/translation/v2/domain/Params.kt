@@ -2,8 +2,8 @@ package com.example.novelscraper.translation.v2.domain
 
 /**
  * 値解決の単一則：「プリセット既定＜ユーザー上書き」、空＝未指定（未送信）。
- * 範囲外は能力範囲に丸めて警告対象にする。pure・副作用なし。
- * なおRotation経路ではプリセット層を使わずプロファイル値のみで解決する。
+ * 範囲外は能力範囲に丸める（警告の出力は呼出側の責務）。pure・副作用なし。
+ * なおRotation経路の呼出側は preset に null を渡す（プリセット層を使わない）。
  */
 data class Resolved<T>(val value: T, val coerced: Boolean)
 

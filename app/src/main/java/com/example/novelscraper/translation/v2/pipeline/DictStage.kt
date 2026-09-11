@@ -27,53 +27,65 @@ data class NovelDict(
 )
 
 @Serializable
-data class DictBuildManifest(val version: Int = 1, val batches: Map<String, String> = emptyMap())
+data class ExtractedNames(
+    val names: List<String> = emptyList()
+)
+
+@Serializable
+data class DictBuildManifest(val version: Int = 1, val batches: Map<String, String> = emptyMap(), val model: String = "")
 
 data class DictPrompts(
-    val batch: String = "Extract person names from the novel text below and output JSON only matching this schema: " +
-        "{\"style\":\"カタカナ|漢字|ハイブリッド\",\"characters\":{\"original\":\"Japanese\"}}.\n\n" +
-        "【厳格な抽出・判定ルール】\n" +
-        "1. 表記スタイルの自動判定 (ハイブリッド対応):\n" +
-        "   作品の世界観および人名のルーツから最適なスタイル (\"カタカナ\", \"漢字\", または \"ハイブリッド\") を判定してください。\n" +
-        "   - 【カタカナ】: 西洋ファンタジー、現代SF、ゲーム転生、サイバーパンク、韓国現代ドラマ、学園、現代ハンター物\n" +
-        "     (※中国語作品であっても、人名が西洋名の音訳「克莱恩 → クライン」「爱丽丝 → アリス」等の場合)\n" +
-        "   - 【漢字】: 東洋武侠 (中国武侠・韓国ムヒョプ)、仙侠、修仙、歴史時代劇、三国志系、中華伝統の姓名 (「李云 → 李雲」)\n" +
-        "     (※韓国語作品であっても、人名が東洋伝統の漢字名「청명 → 青明」「진무원 → 陳武遠」等の場合)\n" +
-        "   - 【ハイブリッド】: 西洋人・東洋人・現代ハンターが混在する作品では、各人名のルーツに合わせて個別に最適な表記 (西洋名はカタカナ、東洋名は漢字/自然な読み) を割り当ててください。\n" +
-        "2. 抽出対象 (純粋な人名・固有名詞のみ):\n" +
-        "   - 〇 抽出する: 姓名、フルネーム、愛称、ファーストネーム\n" +
-        "   - ✕ 抽出しない (厳禁): 役職・肩書 (隊長、師兄、長老、宗主、社長、S級ハンター)、代名詞 (彼、彼女、黒衣人、老者、少年)、一般名詞 (システム、精霊、魔獣)、地名・組織名\n" +
+    val batch: String = "Extract person names (pure character names) from the novel text below.\n" +
+        "Output ONLY valid JSON matching this exact schema: {\"names\":[\"Name1\",\"Name2\"]}.\n\n" +
+        "【厳格な抽出ルール】\n" +
+        "1. 抽出対象 (純粋な人名・固有名詞のみ):\n" +
+        "   - 〇 抽出する: 登場人物のフルネーム、姓、名、愛称、ファーストネーム (原文表記のまま)\n" +
+        "   - ✕ 抽出禁止 (厳禁): 役職・肩書 (隊長、長老、宗主、社長、師兄、ハンター等)、代名詞 (彼、彼女、黒衣人、老人、少年等)、一般名詞 (システム、精霊、魔獣、スキル名、アイテム等)、地名・組織名・ギルド名・門派名\n" +
+        "2. 日本語訳は絶対に含めないこと:\n" +
+        "   - 原文テキストに登場する表記そのままで配列に格納してください (訳語・読み仮名の付与は厳禁)。\n" +
         "3. 類似名・同姓同名の厳格な分離:\n" +
-        "   - 「李云」「李云龙」「李云天」「李云海」のように字面が似ていても、それぞれ別人であるため、絶対に1つに統合せず別々のキーとして正確に抽出してください。\n" +
+        "   - 「李云」「李云龙」「李云天」のように似ていても、それぞれ別人であるため、絶対に1つに統合せず別々の名前として漏れなく抽出してください。\n" +
         "4. 出力フォーマット:\n" +
-        "   - \"characters\": 原文表記 -> 日本語訳\n" +
-        "   - 出力は必ず指定JSON形式のみとすること (前後の解説・挨拶・マークダウン記号は一切不要)。\n\n" +
-        "Example: {\"style\":\"ハイブリッド\",\"characters\":{\"김민준\":\"金\",\"하늘\":\"ハヌル\",\"Arthur\":\"アーサー\"}}",
-    val merge: String = "Merge the dictionary fragments below into one complete JSON dictionary matching this schema: " +
-        "{\"style\":\"カタカナ|漢字|ハイブリッド\",\"characters\":{\"original\":\"Japanese\"}}.\n\n" +
-        "【厳格な統合ルール】\n" +
-        "1. 世界観の総合判定 & スタイル統一:\n" +
-        "   小説全体の舞台設定（西洋ファンタジー・現代・東洋武侠・仙侠等）を深く推論し、作品全体で最も支配的かつ最適な表記スタイル (\"カタカナ\", \"漢字\", または \"ハイブリッド\") を1つ決定してください。\n" +
-        "2. 重複排除 & フルネーム優先:\n" +
-        "   - 同一人物の表記ゆれ（中黒の有無、長音の違い）は最も自然な1つに統一する。\n" +
-        "   - 略称（名前のみ）とフルネーム（姓名）がある場合は【フルネーム】を最優先する。\n" +
-        "3. ノイズ削除:\n" +
-        "   - 誤って混入した一般名詞・肩書・役職（隊長、師兄、長老、システム等）があれば完全に削除する。\n" +
-        "4. 日本語見出し語の維持:\n" +
-        "   - 値は必ず自然な日本語（漢字またはカタカナ）を維持し、日本語でないエントリは除外する。\n" +
-        "5. 出力フォーマット:\n" +
-        "   - 出力は必ず指定JSON形式のみとすること (前後の解説・挨拶・マークダウン記号は一切不要)。",
-    val review: String = "Review the merged dictionary below. " +
+        "   - 解説・挨拶・マークダウン記号は一切不要。純粋なJSONのみを出力してください。\n\n" +
+        "Example: {\"names\":[\"克莱恩\",\"周明瑞\",\"李云龙\",\"Arthur\"]}",
+
+    val merge: String = "Merge the dictionary fragments and deduplicate character name lists below into one clean JSON list.\n" +
+        "Output ONLY valid JSON matching this exact schema: {\"names\":[\"Name1\",\"Name2\"]}.\n\n" +
+        "【厳格な名寄せ・重複排除ルール】\n" +
+        "1. 重複排除 & フルネーム優先:\n" +
+        "   - 同一人物であることが明確な略称（名前のみ）とフルネーム（姓名）がある場合は【フルネーム】に統一する。\n" +
+        "   - 字面が似ていても別人である名前（例: 「李云」と「李云龙」）は絶対に統合せず、両方とも維持する。\n" +
+        "2. ノイズの徹底削除:\n" +
+        "   - 誤って混入した一般名詞・肩書・役職（隊長、長老、宗主、社長、システム等）、地名・組織名があれば完全に削除する。\n" +
+        "3. 日本語訳は絶対に含めないこと:\n" +
+        "   - 必ず原文表記の配列として出力してください。\n" +
+        "4. 出力フォーマット:\n" +
+        "   - 出力は指定のJSON形式のみ (前後の解説・マークダウン記号は一切不要)。\n\n" +
+        "Example: {\"names\":[\"克莱恩\",\"周明瑞\",\"李云龙\",\"Arthur\"]}",
+
+    val translate: String = "Review the merged character names below and create a complete Japanese translation dictionary.\n" +
         "Output ONLY valid JSON matching this exact schema (no markdown, no explanations): " +
-        "{\"style\":\"カタカナ|漢字|ハイブリッド\",\"characters\":{\"original\":\"Japanese\"}}.\n\n" +
-        "【最終チェック基準】\n" +
-        "1. 地名・組織名（門派名、ギルド名、都市名、国名）が混ざっていないか？ ➔ あれば完全に削除\n" +
-        "2. 役職・肩書（隊長、師兄、長老、宗主、社長、S級ハンター）が混ざっていないか？ ➔ あれば完全に削除\n" +
-        "3. 一般名詞・システム（システムメッセージ、精霊、魔獣、アイテム名）が混ざっていないか？ ➔ あれば完全に削除\n" +
-        "4. 表記ゆれの統一・補正:\n" +
-        "   - 作品全体で家族名や共通の表記規則が合致しているか確認し、不自然な日本語表記や長音のブレを修正する。\n" +
-        "5. すべての値が正しい日本語見出し語（カタカナまたは漢字）になっていることを確認する。\n" +
-        "6. 出力は純粋なJSONのみ (前後の説明・コードブロック記号は一切不要)。"
+        "{\"style\":\"カタカナ|漢字|ハイブリッド\",\"characters\":{\"OriginalName\":\"JapaneseName\"}}.\n\n" +
+        "【厳格な命名・翻訳ルール】\n" +
+        "1. 表記スタイルの自動判定 & 作品全体での統一:\n" +
+        "   作品の世界観および人名のルーツから最適なスタイル (\"カタカナ\", \"漢字\", または \"ハイブリッド\") を1つ決定してください。\n" +
+        "   - 【カタカナ】: 西洋ファンタジー、英語・西洋名・架空ファンタジー名の当て字（音訳）\n" +
+        "     (※メアリー、アリス、クライン等の西洋名・外国人名は、漢字の当て字のまま残さず必ず自然なカタカナに音訳すること。「玛丽 → メアリー」「克莱恩 → クライン」「爱丽丝 → アリス」等)\n" +
+        "   - 【漢字】: 中華伝統の姓名、東洋武侠、仙侠、歴史時代劇\n" +
+        "     (※張偉、李雲、蕭炎等の中華・東洋伝統の姓名は、カタカナ音訳に崩さず日本の常用漢字・新字体に復元すること。「张伟 → 張偉」「李云 → 李雲」等)\n" +
+        "   - 【ハイブリッド】: 西洋名と東洋名が混在する作品では、各人名のルーツに合わせて個別に最適な表記 (西洋名はカタカナ、東洋名は漢字) を漏れなく割り当ててください。\n" +
+        "2. 1対1の正確な対応（名前の取り違え・混同は厳禁）:\n" +
+        "   - 入力されたすべての原文名をキーとし、それぞれに正確に対応する自然な日本語訳を値として設定してください。\n" +
+        "   - 似た名前同士（例: 「李云」と「李云龙」）で訳語が入れ替わったり混ざったりしないよう、厳密に対応させてください。\n" +
+        "3. 最終ノイズ除去:\n" +
+        "   - 地名、組織名、役職、一般名詞が残っている場合は除外（キーに含めない）してください。\n" +
+        "4. すべての値は自然な日本語（カタカナまたは漢字）であること。\n" +
+        "5. 出力フォーマット:\n" +
+        "   - 純粋なJSONのみを出力すること (解説・挨拶・コードブロック記号は一切不要)。\n\n" +
+        "Example: {\"style\":\"ハイブリッド\",\"characters\":{\"克莱恩\":\"クライン\",\"李云龙\":\"李雲龍\",\"김민준\":\"金敏俊\"}}",
+
+    // 後方互換用エイリアス
+    val review: String = translate
 )
 
 data class DictOptions(
@@ -122,6 +134,15 @@ private fun decodeNovelDictStrict(text: String): NovelDict? {
 }
 
 /**
+ * 辞書デコードの単一実装。厳格→変形の順で試し、空の扱いだけ切替える。
+ * 技術的根拠1行：二関数の分岐差は空許容の1条件のみのため、分岐自体を一本化して乖離をなくす。
+ */
+private fun decodeNovelDict(text: String, allowEmpty: Boolean): NovelDict? {
+    decodeNovelDictStrict(text)?.takeIf { allowEmpty || it.characters.isNotEmpty() }?.let { return it }
+    return decodeNovelDictFlexible(text, allowEmpty)
+}
+
+/**
  * 変形JSONの救済（旧版の柔軟パーサー復活）。
  * {"名前": {"name"|"trans"|"japanese": "読み", "gender"|"sex": "男"}} 形式も拾う。
  */
@@ -132,31 +153,26 @@ private fun decodeNovelDictFlexible(text: String, allowEmpty: Boolean): NovelDic
         val style = (element["style"] as? JsonPrimitive)?.contentOrNull ?: "カタカナ"
         val charMap = mutableMapOf<String, String>()
         val genderMap = mutableMapOf<String, String>()
-        val charsObj = element["characters"]
-        if (charsObj is JsonObject) {
-            for ((k, v) in charsObj) {
-                when (v) {
-                    is JsonPrimitive -> v.contentOrNull?.let { charMap[k] = it }
-                    is JsonObject -> {
-                        val nameVal = v["name"] ?: v["trans"] ?: v["japanese"]
-                        if (nameVal is JsonPrimitive) nameVal.contentOrNull?.let { charMap[k] = it }
-                        val gVal = v["gender"] ?: v["sex"]
-                        if (gVal is JsonPrimitive) gVal.contentOrNull?.let { genderMap[k] = it }
-                    }
-                    else -> {}
-                }
-            }
-        } else {
-            for ((k, v) in element) {
-                if (k == "style" || k == "genders" || k == "characters") continue
-                if (v is JsonPrimitive) {
-                    v.contentOrNull?.let { charMap[k] = it }
-                } else if (v is JsonObject) {
+        // 技術的根拠1行: charactersオブジェクト内外での同一パース処理のコピペ重複を排除し保守性を向上させる。
+        val extractEntry = { k: String, v: kotlinx.serialization.json.JsonElement ->
+            when (v) {
+                is JsonPrimitive -> v.contentOrNull?.let { charMap[k] = it }
+                is JsonObject -> {
                     val nameVal = v["name"] ?: v["trans"] ?: v["japanese"]
                     if (nameVal is JsonPrimitive) nameVal.contentOrNull?.let { charMap[k] = it }
                     val gVal = v["gender"] ?: v["sex"]
                     if (gVal is JsonPrimitive) gVal.contentOrNull?.let { genderMap[k] = it }
                 }
+                else -> {}
+            }
+        }
+        val charsObj = element["characters"]
+        if (charsObj is JsonObject) {
+            for ((k, v) in charsObj) extractEntry(k, v)
+        } else {
+            for ((k, v) in element) {
+                if (k == "style" || k == "genders" || k == "characters") continue
+                extractEntry(k, v)
             }
         }
         val gendersObj = element["genders"]
@@ -172,11 +188,64 @@ private fun decodeNovelDictFlexible(text: String, allowEmpty: Boolean): NovelDic
     }
 }
 
-fun parseNovelDict(rawJson: String): NovelDict? {
+/**
+ * 原文名リスト（{"names": ["..."]}）のパース。
+ * 素の配列（["..."]）や旧形式（{"characters": {...}}）も救済して原文名リストを復元する。
+ */
+fun parseExtractedNames(rawJson: String): ExtractedNames? {
     return try {
         val text = extractJsonObject(rawJson)
-        decodeNovelDictStrict(text)?.takeIf { it.characters.isNotEmpty() }
-            ?: decodeNovelDictFlexible(text, allowEmpty = false)
+        try {
+            val direct = dictJson.decodeFromString(ExtractedNames.serializer(), text)
+            if (direct.names.isNotEmpty()) return direct
+        } catch (_: Exception) {}
+
+        val element = dictJson.parseToJsonElement(text)
+        if (element is JsonObject) {
+            val namesArr = element["names"] as? kotlinx.serialization.json.JsonArray
+            if (namesArr != null) {
+                val list = namesArr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }
+                return ExtractedNames(names = list.distinct())
+            }
+            val chars = element["characters"]
+            if (chars is JsonObject) {
+                val list = chars.keys.map { it.trim() }.filter { it.isNotBlank() }
+                return ExtractedNames(names = list.distinct())
+            } else if (chars is kotlinx.serialization.json.JsonArray) {
+                val list = chars.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }
+                return ExtractedNames(names = list.distinct())
+            }
+            // 技術的根拠1行：名簿の構造がない応答は無効とし、空辞書としての誤採用（永久キャッシュ化）を防ぐ。
+            return null
+        }
+        val topArray = element as? kotlinx.serialization.json.JsonArray
+        if (topArray != null) {
+            val list = topArray.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }
+            return ExtractedNames(names = list.distinct())
+        }
+        return null
+    } catch (_: Exception) {
+        try {
+            val trimmed = rawJson.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+            val first = trimmed.indexOf('[')
+            val last = trimmed.lastIndexOf(']')
+            if (first != -1 && last > first) {
+                val arr = dictJson.parseToJsonElement(trimmed.substring(first, last + 1)) as? kotlinx.serialization.json.JsonArray
+                if (arr != null) {
+                    val list = arr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }
+                    return ExtractedNames(names = list.distinct())
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
+
+fun parseNovelDict(rawJson: String): NovelDict? {
+    return try {
+        decodeNovelDict(extractJsonObject(rawJson), allowEmpty = false)
     } catch (_: Exception) {
         null
     }
@@ -185,8 +254,7 @@ fun parseNovelDict(rawJson: String): NovelDict? {
 /** 構文妥当性の判定用。人名ゼロでも有効とみなす（空辞書の完成判定に使う）。 */
 fun parseNovelDictLenient(rawJson: String): NovelDict? {
     return try {
-        val text = extractJsonObject(rawJson)
-        decodeNovelDictStrict(text) ?: decodeNovelDictFlexible(text, allowEmpty = true)
+        decodeNovelDict(extractJsonObject(rawJson), allowEmpty = true)
     } catch (_: Exception) {
         null
     }
@@ -235,7 +303,7 @@ fun selectSampleFiles(fileNames: List<String>, maxFiles: Int, uniform: Boolean):
 
 /**
  * 辞書生成stage。`call` は巡回・待機を適用済みの呼出側 binding を受け取る。
- * 失敗種別：BLOCKED/CONFIG＝確定的、QUOTA/RETRYABLE/FATAL＝一時的。
+ * 失敗種別：BLOCKED/CONFIG＝確定的、QUOTA/RETRYABLE＝一時的。FATALは上限内で再送し、尽きたら確定側へ倒す。
  * 技術的根拠1行：本文はファイル名のサンプリング後に1件ずつ遅延読込し、全文リストをメモリに抱えない。
  */
 suspend fun generateDictionary(
@@ -303,16 +371,32 @@ suspend fun generateDictionary(
     val effectiveParallelism = options.parallelism.coerceIn(1, 30)
     log("📖 辞書生成 開始（対象:${sampledNames.size}ファイル / 全${totalBatches}バッチ[上限:${options.maxBatchBytes}B] / 並列${effectiveParallelism} / モデル:${options.model}）")
 
-    // manifest読込
+    // manifest読込（項目検証つき自己修復。不正エントリは落として作り直す）
     val manifestName = "manifest.json"
     val manifestCache = mutableMapOf<String, String>()
+    var manifestModel = ""
     runCatching {
         val doc = store.findChild(workDirUri, manifestName)
         val raw = doc?.let { store.readText(it.uri) }
         if (!raw.isNullOrBlank()) {
             val parsed = dictJson.decodeFromString(DictBuildManifest.serializer(), raw)
+            manifestModel = parsed.model
             manifestCache.putAll(parsed.batches)
         }
+    }.onFailure {
+        log("📖 辞書生成: 宣言書が壊れているため作り直します")
+    }
+    // 技術的根拠1行：宣言書は原文のハッシュを持つため、実ファイルの有無だけを照合する（内容照合はcacheFresh側の責務）。
+    var manifestHealed = false
+    runCatching {
+        val dropped = manifestCache.keys.filter { name ->
+            store.findChild(workDirUri, name)?.takeIf { !it.isDirectory } == null
+        }
+        for (name in dropped) {
+            manifestCache.remove(name)
+            log("📖 辞書生成: 保存分のない宣言を落として作り直します ($name)")
+        }
+        if (dropped.isNotEmpty()) manifestHealed = true
     }
     val manifestMutex = Mutex()
     suspend fun persistManifest() {
@@ -321,18 +405,24 @@ suspend fun generateDictionary(
             if (doc != null) {
                 store.writeText(
                     doc.uri,
-                    dictJson.encodeToString(DictBuildManifest.serializer(), DictBuildManifest(batches = manifestCache.toMap()))
+                    dictJson.encodeToString(
+                        DictBuildManifest.serializer(),
+                        DictBuildManifest(batches = manifestCache.toMap(), model = options.model)
+                    )
                 )
             }
         } catch (e: Exception) {
             log("📖 辞書生成: 進捗保存に失敗しました（${e.message}）")
         }
     }
+    // 技術的根拠1行: manifest欠損時やエントリ不在時に古い誤キャッシュを採用しないようFail-Closed（false返却）とする。
+    // 技術的根拠1行：モデル変更時は本文一致でも取り直す（別モデルの抽出結果の混用を防ぐ）。
     fun cacheFresh(batchFileName: String, batchText: String): Boolean {
-        if (manifestCache.isEmpty()) return true
-        val expected = manifestCache[batchFileName] ?: return true
+        if (manifestModel != options.model) return false
+        val expected = manifestCache[batchFileName] ?: return false
         return expected == sha256Hex(batchText)
     }
+    if (manifestHealed) persistManifest()
 
     val deterministicFailed = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
     val transientFailed = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
@@ -347,8 +437,9 @@ suspend fun generateDictionary(
                     val existing = store.findChild(workDirUri, batchFileName)
                     val cached = existing?.let { store.readText(it.uri) }
                     if (!cached.isNullOrBlank()) {
-                        val parsed = parseNovelDict(cached)
-                        if (parsed != null && parsed.characters.isNotEmpty()) {
+                        // 技術的根拠1行: 人名0件の正常な空バッチの誤破棄（毎回の再取得ループ）を防ぐためExtractedNamesパースで検証する。
+                        val parsed = parseExtractedNames(cached)
+                        if (parsed != null) {
                             if (cacheFresh(batchFileName, batchText)) {
                                 log("  📖 辞書生成: バッチ$batchNum/$totalBatches（完了済み/スキップ）")
                                 return@withPermit cached
@@ -368,18 +459,26 @@ suspend fun generateDictionary(
                     var sawTransient = false
                     for (retry in 0..maxRetries) {
                         if (retry == 0) {
-                            log("  📖 辞書生成: バッチ$batchNum/$totalBatches 抽出中...")
+                            log("  📖 辞書生成: バッチ$batchNum/$totalBatches 原文人名抽出中...")
                         }
                         when (val result = call(options.model, options.prompts.batch, batchText)) {
                             is LlmResult.Success -> {
+                                val parsed = parseExtractedNames(result.text)
+                                if (parsed == null) {
+                                    // 技術的根拠1行：解析不能な成功は確定させず、上限内で取り直す（ゴミの完成計上と空確定の連鎖を断つ）。
+                                    if (retry >= maxRetries) break
+                                    log("  🔄 辞書生成: バッチ$batchNum/$totalBatches 解析失敗のため再試行[${retry + 1}/$maxRetries]")
+                                    continue
+                                }
+                                val jsonToSave = dictJson.encodeToString(ExtractedNames.serializer(), parsed)
                                 val doc = findOrCreateFile(store, workDirUri, batchFileName, "application/json")
-                                if (doc != null) store.writeText(doc.uri, result.text.trim())
+                                if (doc != null) store.writeText(doc.uri, jsonToSave)
                                 manifestMutex.withLock {
                                     manifestCache[batchFileName] = sha256Hex(batchText)
                                     persistManifest()
                                 }
-                                log("  📖 辞書生成: バッチ$batchNum/$totalBatches 完了")
-                                return@withPermit result.text
+                                log("  📖 辞書生成: バッチ$batchNum/$totalBatches 抽出完了（${parsed.names.size}名）")
+                                return@withPermit jsonToSave
                             }
                             is LlmResult.Failure -> {
                                 if (result.failure.kind.isDeterministic()) {
@@ -420,100 +519,111 @@ suspend fun generateDictionary(
         log("📖 辞書生成: 一部確定（${completed.size}/$totalBatches）。確定失敗バッチ[$skipped]を除いて統合します")
     }
 
-    // 【辞書生成の2段階設計（マージ ＆ レビューの意図的分離）】:
-    // マージ（各バッチ断片の統合・粗抽出）とレビュー（地名・組織名・肩書・一般名詞の除去および表記揺れの統一）は
-    // 目的と評価軸が全く異なるため、あえて2回に分けてLLMを呼び出すことで人名抽出精度を最大限に高めている。
-    // （1工程にまとめると一般名詞の誤混入や表記ブレが劇的に増大するため、2工程で精度を担保する）。
-    val reviewModel = options.mergeModel.ifBlank { options.model }
-    val effectiveMergeRetries = options.mergeRetries.coerceIn(1, 5)
-    val mergedOrNullInitial: NovelDict? = if (completed.size == 1) {
-        parseNovelDict(completed.first())
-    } else {
-        val mergeInput = completed.mapIndexed { i, json -> "[part${i + 1}]\n$json" }.joinToString("\n\n")
-        var parsed: NovelDict? = null
-        for (retry in 0 until effectiveMergeRetries) {
-            if (retry > 0) {
-                log("  🔄 辞書統合: 再試行[$retry/$effectiveMergeRetries]")
-            } else {
-                log("🔄 辞書統合: 実行中（${completed.size}断片）...")
-            }
-            when (val r = call(reviewModel, options.prompts.merge, mergeInput)) {
-                is LlmResult.Success -> {
-                    parsed = parseNovelDict(r.text)
-                    if (parsed != null) break
-                }
-                is LlmResult.Failure -> {
-                    // 技術的根拠1行：巡回・待機は呼出側callの責務のため、ステージ側での二重待機は行わない。
-                }
-            }
-        }
-        parsed
-    }
-    var mergedOrNull = mergedOrNullInitial
-    if (mergedOrNull == null) {
-        // 空辞書の確定：全断片が構文上有効かつ人名ゼロなら空のまま完成扱いにする。
-        // 技術的根拠1行：人名なし書籍では空が正解であり、保留にするとフォルダ全体が永久停止するため。
-        val lenient = completed.mapNotNull { parseNovelDictLenient(it) }
-        if (lenient.size == completed.size && lenient.isNotEmpty() && lenient.all { it.characters.isEmpty() }) {
+    // 全バッチからの抽出人名リスト（重複排除）
+    val allExtractedNames = completed.mapNotNull { parseExtractedNames(it)?.names }.flatten().distinct()
+    if (allExtractedNames.isEmpty()) {
+        // 技術的根拠1行：検証済みの空（全件正常・人名なし）のみ空確定し、未確定分がある場合は持ち越す（空の誤確定・永久化を防ぐ）。
+        if (deterministicFailed.isEmpty() && transientFailed.isEmpty()) {
             log("✅ 辞書確定: 人名なし（空で確定）")
-            mergedOrNull = NovelDict(style = lenient.first().style)
+            val emptyDict = NovelDict()
+            val dictDoc = findOrCreateFile(store, workDirUri, "dictionary.json", "application/json")
+            if (dictDoc != null && store.writeText(dictDoc.uri, dictJson.encodeToString(NovelDict.serializer(), emptyDict))) {
+                return@supervisorScope emptyDict
+            }
+            return@supervisorScope null
         }
-    }
-    val merged = mergedOrNull
-    if (merged == null) {
-        log("⚠️ 辞書生成: 統合に失敗したため保留します（次回再挑戦）")
+        log("⚠️ 辞書生成: 未確定バッチがあるため空確定せず次回に持ち越します")
         return@supervisorScope null
     }
 
-    // 技術的根拠1行：原文表記のままの値（韓国語のまま等）を黙って採用しない。落とした分は大声で記録する。
-    // 空確定分（人名ゼロ）は検査対象外でそのまま通す。
-    var reviewed: NovelDict = merged
-    if (merged.characters.isNotEmpty()) {
-        val sanitized = sanitizeNovelDict(merged)
-        val dropped = merged.characters.size - sanitized.characters.size
-        if (dropped > 0) {
-            val sample = (merged.characters.keys - sanitized.characters.keys).take(3).joinToString(",")
-            log("⚠️ 辞書生成: 日本語でない${dropped}件を除外 (例: ${sample})")
-        }
-        if (sanitized.characters.isEmpty()) {
-            log("⚠️ 辞書生成: 使える項目ゼロのため保留します（次回再挑戦）")
-            return@supervisorScope null
-        }
-        reviewed = sanitized
-    }
-    if (reviewed.characters.isNotEmpty()) {
-        val effectiveReviewRetries = options.reviewRetries.coerceIn(1, 3)
-        val reviewInput = dictJson.encodeToString(NovelDict.serializer(), reviewed)
-        for (retry in 0 until effectiveReviewRetries) {
+    // 【Step 2: 名寄せ・重複排除（マージ）】
+    // 原文表記のままで重複や略称を統合し、純粋な原文名リストを確定する（訳語がないため混ざる余地がない）。
+    val reviewModel = options.mergeModel.ifBlank { options.model }
+    val effectiveMergeRetries = options.mergeRetries.coerceIn(1, 5)
+    val mergedNames: List<String> = if (completed.size == 1) {
+        allExtractedNames
+    } else {
+        val mergeInput = completed.mapIndexed { i, json -> "[part${i + 1}]\n$json" }.joinToString("\n\n")
+        var namesFromLlm: List<String>? = null
+        for (retry in 0 until effectiveMergeRetries) {
             if (retry > 0) {
-                log("  🔄 辞書レビュー: 再試行[$retry/$effectiveReviewRetries]")
+                log("  🔄 辞書名寄せ: 再試行[$retry/$effectiveMergeRetries]")
             } else {
-                log("🔍 辞書生成: 最終レビュー中（${reviewed.characters.size}件）...")
+                log("🔄 辞書名寄せ: 実行中（${completed.size}断片 / 延べ${allExtractedNames.size}名）...")
             }
-            when (val r = call(reviewModel, options.prompts.review, reviewInput)) {
+            when (val r = call(reviewModel, options.prompts.merge, mergeInput)) {
                 is LlmResult.Success -> {
-                    val parsed = parseNovelDict(r.text)?.let { sanitizeNovelDict(it) }
-                    if (parsed != null && parsed.characters.isNotEmpty()) {
-                        reviewed = parsed
+                    val parsed = parseExtractedNames(r.text)
+                    if (parsed != null && parsed.names.isNotEmpty()) {
+                        namesFromLlm = parsed.names
                         break
                     }
-                    log("  ⚠️ 辞書レビュー: 結果が空のため採用しません")
                 }
                 is LlmResult.Failure -> {
                     // 技術的根拠1行：巡回・待機は呼出側callの責務のため、ステージ側での二重待機は行わない。
                 }
             }
         }
+        // LLM名寄せに失敗した場合は、ローカルの単純distinctリストを安全にフォールバック利用
+        namesFromLlm ?: allExtractedNames
     }
 
-    // 確定保存＋作業所掃除
+    log("📖 辞書名寄せ完了: ${mergedNames.size}名 確定")
+
+    // 【Step 3: 命名・翻訳・レビュー（一括日本語付与）】
+    // 確定した原文名一覧を受け取り、世界観判定とスタイル統一を行って正確な日本語訳を付与する。
+    val effectiveTranslateRetries = options.reviewRetries.coerceIn(1, 5)
+    val translateInput = dictJson.encodeToString(ExtractedNames.serializer(), ExtractedNames(names = mergedNames))
+    var translatedDict: NovelDict? = null
+    var sawNonJapanese = false
+
+    for (retry in 0 until effectiveTranslateRetries) {
+        if (retry > 0) {
+            log("  🔄 辞書命名・翻訳: 再試行[$retry/$effectiveTranslateRetries]")
+        } else {
+            log("🔍 辞書命名・翻訳: 実行中（${mergedNames.size}名）...")
+        }
+        when (val r = call(reviewModel, options.prompts.translate, translateInput)) {
+            is LlmResult.Success -> {
+                val rawParsed = parseNovelDict(r.text)
+                if (rawParsed != null) {
+                    val sanitized = sanitizeNovelDict(rawParsed)
+                    val dropped = rawParsed.characters.size - sanitized.characters.size
+                    if (dropped > 0) {
+                        val sample = (rawParsed.characters.keys - sanitized.characters.keys).take(3).joinToString(",")
+                        log("⚠️ 辞書生成: 日本語でない${dropped}件を除外 (例: ${sample})")
+                        sawNonJapanese = true
+                    }
+                    if (sanitized.characters.isNotEmpty()) {
+                        translatedDict = sanitized
+                        break
+                    }
+                }
+                log("  ⚠️ 辞書命名・翻訳: 結果が空のため再試行します")
+            }
+            is LlmResult.Failure -> {
+                // 技術的根拠1行：巡回・待機は呼出側callの責務のため、ステージ側での二重待機は行わない。
+            }
+        }
+    }
+
+    if (translatedDict == null) {
+        if (sawNonJapanese) {
+            log("⚠️ 辞書生成: 使える項目ゼロのため保留します（次回再挑戦）")
+        } else {
+            log("⚠️ 辞書生成: 命名・翻訳に失敗したため保留します（次回再挑戦）")
+        }
+        return@supervisorScope null
+    }
+
+    val reviewed = translatedDict
     val dictDoc = findOrCreateFile(store, workDirUri, "dictionary.json", "application/json")
     if (dictDoc != null && store.writeText(
             dictDoc.uri,
             dictJson.encodeToString(NovelDict.serializer(), reviewed)
         )
     ) {
-        log("✅ 辞書確定: ${reviewed.characters.size}名")
+        log("✅ 辞書確定: ${reviewed.characters.size}名（スタイル: ${reviewed.style}）")
         return@supervisorScope reviewed
     }
     log("⚠️ 辞書生成: 保存に失敗したため保留します")

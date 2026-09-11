@@ -1,4 +1,4 @@
-﻿package com.example.novelscraper.translation.v2.engine
+package com.example.novelscraper.translation.v2.engine
 
 import com.example.novelscraper.translation.common.ingest.IngestResult
 import com.example.novelscraper.translation.common.ingest.TextIngest
@@ -6,13 +6,13 @@ import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.VDoc
 import com.example.novelscraper.translation.v2.pipeline.SourceLang
 import com.example.novelscraper.translation.v2.pipeline.detectLanguage
-import com.example.novelscraper.translation.v2.pipeline.findOrCreateFile
 
 /**
- * 言語判定ステージ。
- * 親フォルダまたは小説フォルダから安全にテキストをサンプリングし、
- * 言語キャッシュ（.lang_cache）の取得または新規判定・永続化を行う。
- * 技術的根拠1行：巨大ファイルの全量読み込みによるOOMを防ぐため先頭8KBサンプリング＋TextIngestで言語を確定する。
+ * 言語判定ステージ（読み取り専用の検出のみ）。
+ * 永続化の単一所有者は [LangCacheStore]。このファイルにキャッシュファイル名リテラルを持たない。
+ *
+ * 構造的根拠：検出（読み取り専用）と永続化（outputDir への書き込み）を分離し、
+ * 入力フォルダへの書き込みを物理的に不可能にすることで二重生成を構造的に排除する。
  */
 object LanguageDetectStage {
 
@@ -46,45 +46,37 @@ object LanguageDetectStage {
     }
 
     /**
-     * 言語判定または既存キャッシュ (.lang_cache) の取得。
-     * 技術的根拠1行：言語は小説全体の属性のため親フォルダ直下に保存し、OSの拡張子付与を防ぐため application/octet-stream で作成する。
+     * 言語判定（読み取り専用）。キャッシュへの書き込みは一切行わない。
+     * 優先順: outputDir のキャッシュ → 入力フォルダのキャッシュ（後方互換）→ inherited → テキスト検出。
+     *
+     * 技術的根拠1行：書き込みを [LangCacheStore] に完全分離することで、
+     * processFolder 時点（outputDir 未作成）に入力フォルダへ書いてしまう問題を構造的に排除する。
      */
-    suspend fun detectOrLoadLanguage(
+    suspend fun detectLanguage(
         store: FileStore,
-        folderUri: String,
+        inputFolderUri: String,
         files: List<VDoc>,
+        outputDirUri: String? = null,
         inherited: SourceLang? = null,
         onLog: (String) -> Unit = {}
     ): SourceLang {
-        val cache = store.findChild(folderUri, ".lang_cache")
-            ?: store.findChild(folderUri, ".lang_cache.txt")
-        val cachedCode = cache?.let { store.readText(it.uri) }?.trim() ?: ""
-        val cached = when (cachedCode) {
-            "ZH" -> SourceLang.ZH
-            "KO" -> SourceLang.KO
-            "EN" -> SourceLang.EN
-            "JA" -> SourceLang.JA
-            else -> null
-        }
-        if (cached != null) return cached
-
-        val lang = if (inherited != null) {
-            inherited
-        } else {
-            val sample = sampleTextForLanguage(store, files)
-            val detected = detectLanguage(sample)
-            onLog("detected language: ${detected.language} (${detected.reason})")
-            detected.language
+        // 1. outputDir のキャッシュを優先（再実行時の高速パス）
+        if (outputDirUri != null) {
+            val cached = LangCacheStore.load(store, outputDirUri, onLog)
+            if (cached != null) return cached
         }
 
-        val doc = cache ?: findOrCreateFile(store, folderUri, ".lang_cache", "application/octet-stream")
-        if (doc != null) {
-            if (!store.writeText(doc.uri, lang.name)) {
-                onLog("⚠️ 言語キャッシュの書き込みに失敗しました: $folderUri")
-            }
-        } else {
-            onLog("⚠️ 言語キャッシュの作成に失敗しました: $folderUri")
-        }
-        return lang
+        // 2. 入力フォルダのキャッシュ（後方互換：旧バージョンからのマイグレーション）
+        val inputCached = LangCacheStore.load(store, inputFolderUri, onLog)
+        if (inputCached != null) return inputCached
+
+        // 3. 親から継承
+        if (inherited != null) return inherited
+
+        // 4. テキストサンプリングで検出
+        val sample = sampleTextForLanguage(store, files)
+        val detected = detectLanguage(sample)
+        onLog("detected language: ${detected.language} (${detected.reason})")
+        return detected.language
     }
 }

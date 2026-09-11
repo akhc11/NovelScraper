@@ -1,6 +1,7 @@
 package com.example.novelscraper.translation.v2.engine
 
 import com.example.novelscraper.translation.v2.domain.AcquireResult
+import com.example.novelscraper.translation.v2.domain.COST_CAP_NOTE
 import com.example.novelscraper.translation.v2.domain.ClassifiedFailure
 import com.example.novelscraper.translation.v2.domain.CostMeter
 import com.example.novelscraper.translation.v2.domain.FailureKind
@@ -174,7 +175,13 @@ class Rotation(
                                 when (result.failure.kind) {
                                     FailureKind.BLOCKED_DETERMINISTIC,
                                     FailureKind.CONFIG,
-                                    FailureKind.FATAL -> break
+                                    FailureKind.FATAL -> {
+                                        // 技術的根拠1行：コスト上限はこれ以上送っても全棄却のため、指示文巡回を続けず即時確定する。
+                                        if (result.failure.kind == FailureKind.FATAL && result.failure.note == COST_CAP_NOTE) {
+                                            return result
+                                        }
+                                        break
+                                    }
                                     FailureKind.QUOTA_DAILY -> {
                                         quotaSeenThisEpoch = true
                                         if (managed(profile)) {
@@ -192,7 +199,7 @@ class Rotation(
                                             val scope = scopesFor(profile).firstOrNull() ?: profile.model
                                             failedScopes.add(keyIndex to scope)
                                         }
-                                        if (handleQuotaRetry(result.failure, geminiCooldownSec, TranslationLimits.COOLDOWN_MAX_SEC.toLong(), sameLeft, sleeper, log)) {
+                                        if (handleQuotaRetry(result.failure, geminiCooldownSec, TranslationLimits.COOLDOWN_MAX_SEC.toLong(), sameLeft, sleeper, log, stopped)) {
                                             sameLeft--
                                             continue
                                         }
@@ -200,7 +207,7 @@ class Rotation(
                                     }
                                     FailureKind.RETRYABLE_AFTER -> {
                                         // 技術的根拠1行：5xxや通信一時エラーはクォータ枯渇ではないためプール報告せず、一時エラー待機設定で再試行する。
-                                        if (handleTransientRetry(result.failure, transientRetryDelaySec, sameLeft, sleeper, log)) {
+                                        if (handleTransientRetry(result.failure, transientRetryDelaySec, sameLeft, sleeper, log, stopped)) {
                                             sameLeft--
                                             continue
                                         }
@@ -245,7 +252,7 @@ class Rotation(
                 }
                 is AcquireResult.Wait -> {
                     log("⏳ レート制限のため ${claimed.waitMillis / 1000}秒待機中...")
-                    sleeper(claimed.waitMillis)
+                    patientSleep(claimed.waitMillis, stopped, sleeper)
                     continue@keyEpoch
                 }
                 is AcquireResult.Exhausted -> {

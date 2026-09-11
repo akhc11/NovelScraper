@@ -1,6 +1,7 @@
 package com.example.novelscraper.translation.v2.engine
 
 import com.example.novelscraper.translation.v2.domain.ClassifiedFailure
+import com.example.novelscraper.translation.v2.domain.COST_CAP_NOTE
 import com.example.novelscraper.translation.v2.domain.CostMeter
 import com.example.novelscraper.translation.v2.domain.FailureKind
 import com.example.novelscraper.translation.v2.domain.LlmResult
@@ -43,7 +44,7 @@ class UnmanagedRotation(
         forBatch: Boolean
     ): LlmResult {
         if (profiles.isEmpty() || stopped()) {
-            return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "stopped"))
+            return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "no-profiles-or-stopped"))
         }
         var lastFailure: LlmResult.Failure? = null
         var totalGuard = epochGuard(profiles.size, prompts.size)
@@ -83,17 +84,23 @@ class UnmanagedRotation(
                                 when (result.failure.kind) {
                                     FailureKind.BLOCKED_DETERMINISTIC,
                                     FailureKind.CONFIG,
-                                    FailureKind.FATAL -> break
+                                    FailureKind.FATAL -> {
+                                        // 技術的根拠1行：コスト上限はこれ以上送っても全棄却のため、指示文巡回を続けず即時確定する。
+                                        if (result.failure.kind == FailureKind.FATAL && result.failure.note == COST_CAP_NOTE) {
+                                            return result
+                                        }
+                                        break
+                                    }
                                     FailureKind.QUOTA_DAILY, FailureKind.QUOTA_MINUTE -> {
                                         quotaSeenThisEpoch = true
-                                        if (handleQuotaRetry(result.failure, cooldownSec, TranslationLimits.UNMANAGED_COOLDOWN_MAX_SEC.toLong(), sameLeft, sleeper, log)) {
+                                        if (handleQuotaRetry(result.failure, cooldownSec, TranslationLimits.UNMANAGED_COOLDOWN_MAX_SEC.toLong(), sameLeft, sleeper, log, stopped)) {
                                             sameLeft--
                                             continue
                                         }
                                         break
                                     }
                                     FailureKind.RETRYABLE_AFTER -> {
-                                        if (handleTransientRetry(result.failure, transientRetryDelaySec, sameLeft, sleeper, log)) {
+                                        if (handleTransientRetry(result.failure, transientRetryDelaySec, sameLeft, sleeper, log, stopped)) {
                                             sameLeft--
                                             continue
                                         }
@@ -111,7 +118,7 @@ class UnmanagedRotation(
             val cooldown = cooldownSec.coerceIn(0, TranslationLimits.UNMANAGED_COOLDOWN_MAX_SEC)
             if (cooldown > 0) {
                 log("制限のため ${cooldown}秒冷却して次周します")
-                sleeper(cooldown * 1000L)
+                patientSleep(cooldown * 1000L, stopped, sleeper)
             }
         }
         return lastFailure ?: LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "stopped"))

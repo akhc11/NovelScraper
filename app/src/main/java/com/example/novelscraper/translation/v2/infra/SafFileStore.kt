@@ -3,6 +3,7 @@ package com.example.novelscraper.translation.v2.infra
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -263,6 +264,41 @@ class SafFileStore(private val context: Context) : FileStore {
                     name
                 )
                 resolveCreated(dirUri, name, createdUri, isDirectory = false)
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    /**
+     * 同一フォルダ内での置換（確定操作用）。非対応プロバイダでは例外またはnullになる。
+     * 技術的根拠1行：置換後の実名が要求と一致しない場合（衝突時の自動改名等）は残骸を消してnullを返し、呼出側の退行経路に委ねる。
+     */
+    override suspend fun renameFile(dirUri: String, fileUri: String, newName: String): VDoc? =
+        withContext(Dispatchers.IO) {
+            try {
+                val parsed = safeParseUri(fileUri) ?: return@withContext null
+                val renamedUri = DocumentsContract.renameDocument(
+                    context.contentResolver,
+                    parsed,
+                    newName
+                ) ?: return@withContext null
+                val actual = actualName(renamedUri)
+                if (actual != null && !actual.equals(newName, ignoreCase = true)) {
+                    try {
+                        DocumentsContract.deleteDocument(context.contentResolver, renamedUri)
+                    } catch (_: Exception) {
+                    }
+                    return@withContext null
+                }
+                // 技術的根拠1行：寸法は呼出側が読み返し照合で確かめるため、ここでは問い合わせず0で返す。
+                VDoc(
+                    uri = renamedUri.toString(),
+                    name = actual ?: newName,
+                    isDirectory = false,
+                    length = 0L
+                )
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 null
             }

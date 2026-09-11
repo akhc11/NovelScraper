@@ -32,6 +32,12 @@ interface FileStore {
     suspend fun findChild(dirUri: String, name: String): VDoc?
     suspend fun createDir(parentUri: String, name: String): VDoc?
     suspend fun createFile(dirUri: String, name: String, mime: String): VDoc?
+    /**
+     * 同一フォルダ内での置換（確定操作用）。別名で完全に書いた文書を正名に置き換える。
+     * 既定は非対応（null）。対応実装は正名と一致する実名の文書を返すこと。
+     * 技術的根拠1行：置換対応は保存プロバイダ任意のため既定を非対応とし、呼出側の退行経路で完全性を保つ。
+     */
+    suspend fun renameFile(dirUri: String, fileUri: String, newName: String): VDoc? = null
     suspend fun deleteRecursively(dirUri: String): Boolean
     suspend fun deleteFile(fileUri: String): Boolean
 }

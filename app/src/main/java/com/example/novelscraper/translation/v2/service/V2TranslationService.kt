@@ -15,8 +15,8 @@ import com.example.novelscraper.MainActivity
 
 /**
  * LLM翻訳用フォアグラウンドサービス。
- * 画面スリープ時や別アプリ起動中も OS によるタスクキルや通信切断を防止し、
- * 通知バーに進捗表示および停止操作を提供する。
+ * 画面スリープ時や別アプリ起動中の OS によるタスクキルや通信切断を低減し、
+ * 通知バーに進捗表示および停止操作を提供する（30分枠・kill後非復帰のため防止ではない）。
  */
 class V2TranslationService : Service() {
 
@@ -114,7 +114,9 @@ class V2TranslationService : Service() {
         if (intent != null) {
             when (intent.action) {
                 ACTION_STOP_TRANSLATION -> {
+                    // 技術的根拠1行：陳腐コールバックの残存を防ぐため通知は使い捨てにする。
                     onStopRequested?.invoke()
+                    onStopRequested = null
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
@@ -126,11 +128,14 @@ class V2TranslationService : Service() {
                     stopSelf()
                 }
                 else -> {
-                    val title = intent.getStringExtra(EXTRA_TITLE) ?: "LLM小説翻訳"
-                    val msg = intent.getStringExtra(EXTRA_MSG) ?: "翻訳を実行中..."
-                    val current = intent.getIntExtra(EXTRA_PROGRESS_CURRENT, 0)
-                    val total = intent.getIntExtra(EXTRA_PROGRESS_TOTAL, 0)
-                    updateForegroundNotification(title, msg, current, total)
+                    // 技術的根拠1行：未知操作を状態更新に流用すると将来の操作追加時に誤処理するため、更新操作だけを受け付ける。
+                    if (intent.action == ACTION_UPDATE_STATUS) {
+                        val title = intent.getStringExtra(EXTRA_TITLE) ?: "LLM小説翻訳"
+                        val msg = intent.getStringExtra(EXTRA_MSG) ?: "翻訳を実行中..."
+                        val current = intent.getIntExtra(EXTRA_PROGRESS_CURRENT, 0)
+                        val total = intent.getIntExtra(EXTRA_PROGRESS_TOTAL, 0)
+                        updateForegroundNotification(title, msg, current, total)
+                    }
                 }
             }
         }
@@ -143,6 +148,7 @@ class V2TranslationService : Service() {
                 wakeLock?.release()
             } catch (_: Exception) {}
         }
+        onStopRequested = null
         super.onDestroy()
     }
 

@@ -208,7 +208,8 @@ fun buildSystemPrompt(
     }
 
     if (dictionaryEntries.isNotEmpty()) {
-        sb.append("\n\n[人名の表記統一ルール]\n人名の表記は【${dictionaryStyle ?: "カタカナ"}】で統一してください。\n\n[登場人物対応表]\n")
+        // 技術的根拠1行：ユーザー定義プロンプトの表記指定を破壊しないよう、システム側での勝手な表記スタイル（カタカナ等）の決め打ち固定を廃止し、対応表の指定のみを厳守させる
+        sb.append("\n\n[登場人物対応表]\n※以下の登場人物名は、対応表に指定された表記をそのまま厳守して翻訳してください。\n")
         for (entry in dictionaryEntries) {
             sb.append(entry).append("\n")
         }
@@ -302,6 +303,7 @@ fun matchDictionaryEntries(
     genders: Map<String, String>? = null,
     limit: Int = 200
 ): List<String> {
+    if (characters.isEmpty() || sourceText.isEmpty()) return emptyList()
     val entries = mutableListOf<String>()
     for ((key, value) in characters) {
         if (entries.size >= limit) break

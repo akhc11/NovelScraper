@@ -132,6 +132,19 @@ class InMemoryFileStore : FileStore {
             docOf("$dirUri/$name", node)
         }
 
+    override suspend fun renameFile(dirUri: String, fileUri: String, newName: String): VDoc? =
+        mutex.withLock {
+            val parent = nodeOf(dirUri)?.takeIf { it.isDirectory } ?: return@withLock null
+            val slot = parentSlot(fileUri) ?: return@withLock null
+            if (slot.first !== parent.children) return@withLock null
+            val node = slot.first[slot.second] ?: return@withLock null
+            if (node.isDirectory || parent.children.containsKey(newName)) return@withLock null
+            slot.first.remove(slot.second)
+            node.name = newName
+            parent.children[newName] = node
+            docOf("$dirUri/$newName", node)
+        }
+
     override suspend fun deleteRecursively(dirUri: String): Boolean = mutex.withLock {
         val slot = parentSlot(dirUri) ?: return@withLock false
         slot.first.remove(slot.second) != null

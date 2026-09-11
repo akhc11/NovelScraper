@@ -243,4 +243,48 @@ class ScrapingScriptBuilderTest {
         val script = ScrapingScriptBuilder.buildSearchTextScript("a\rb")
         assertFalse("CRが除去されていること", script.contains("\rb"))
     }
+
+    @Test
+    fun testBuildScrapingScript_excludesDirectlyOnClonedDomWithoutRealDomPollution() {
+        val config = ScraperConfig(
+            body = ".chapter_content_box",
+            exclude = "span[class*=\"count_\"], .ad-banner"
+        )
+        val script = ScrapingScriptBuilder.buildScrapingScript(config, useImages = false)
+
+        // 実DOMを汚染する .__novel_exclude 操作が存在しないこと
+        assertFalse("実DOMへの__novel_exclude付与が存在しないこと", script.contains(".classList.add('__novel_exclude')"))
+        assertFalse("実DOMからの__novel_exclude除去が存在しないこと", script.contains(".classList.remove('__novel_exclude')"))
+
+        // クローン要素に対する直接削除が含まれていること
+        assertTrue("クローンに対する直接removeが含まれていること", script.contains("clone.querySelectorAll(sel).forEach(function(el) { el.remove(); });"))
+    }
+
+    @Test
+    fun testBuildCandidateProbeScript_containsTraversalAndDynamicNumberingGeneralization() {
+        val probeScript = ScrapingScriptBuilder.buildCandidateProbeScript("span.count_0")
+
+        // 共通トラバーサルスニペットが含まれていること
+        assertTrue("traverseCandidates定義が含まれていること", probeScript.contains("function traverseCandidates(targetEl, onCandidate, includeLink)"))
+        assertTrue("traverseCandidates呼び出しが含まれていること", probeScript.contains("traverseCandidates(baseEl, function(node, label, s)"))
+
+        // 要素自身の短縮・汎化セレクタが優先登録されていること（デッドフォールバック解消）
+        assertTrue("短縮セレクタの汎用ラベル登録が含まれていること", probeScript.contains("onCandidate(targetEl, '要素自身 (汎用)', selfShort)"))
+
+        // 連番クラス（count_0 等）を汎化するロジックが含まれていること（英字2文字以上 + グリッドガード）
+        assertTrue("連番検出の正規表現が含まれていること", probeScript.contains("^([a-zA-Z]{2,}[-_])\\d+$"))
+        assertTrue("グリッド/レイアウト除外ガードが含まれていること", probeScript.contains("(col|row|gap|span|grid)[-_]"))
+        assertTrue("属性部分一致セレクタ生成が含まれていること", probeScript.contains("tag + '[class*=\"' + safeEscape(numMatch[1]) + '\"]'"))
+    }
+
+    @Test
+    fun testBuildInspectorScript_usesTraverseCandidatesWithoutDuplication() {
+        val config = ScraperConfig()
+        val inspectorScript = ScrapingScriptBuilder.buildInspectorScript(config)
+
+        // getCandidates が traverseCandidates を利用して重複排除されていること
+        assertTrue("getCandidates内でtraverseCandidatesが呼ばれていること", inspectorScript.contains("traverseCandidates(el, function(node, label, s)"))
+        // コピペ探索ループ（seen[s]やID祖先手動ループ）がgetCandidatesに直書きされていないこと
+        assertFalse("getCandidatesにID祖先手動ループが直書きされていないこと", inspectorScript.contains("p.id && !String(p.id).match(/^[0-9]/))) p = p.parentElement;\n                    if (p && p.tagName !== 'BODY') push(p, 'ID祖先');"))
+    }
 }

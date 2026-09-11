@@ -6,11 +6,11 @@ import com.example.novelscraper.translation.v2.domain.OPENROUTER_DESCRIPTOR
 import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.capabilitiesFor
-import com.example.novelscraper.translation.v2.domain.isDeterministicFailure
 import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.VDoc
 import com.example.novelscraper.translation.v2.pipeline.LargeOptions
+import com.example.novelscraper.translation.v2.pipeline.LargeOutcome
 import com.example.novelscraper.translation.v2.pipeline.NovelDict
 import com.example.novelscraper.translation.v2.pipeline.ResidualOptions
 import com.example.novelscraper.translation.v2.pipeline.SingleResult
@@ -19,7 +19,8 @@ import com.example.novelscraper.translation.v2.pipeline.TranslateContext
 import com.example.novelscraper.translation.v2.pipeline.VerifyOptions
 import com.example.novelscraper.translation.v2.pipeline.buildProfilePrompt
 import com.example.novelscraper.translation.v2.pipeline.cleanseBasic
-import com.example.novelscraper.translation.v2.pipeline.findOrCreateFile
+import com.example.novelscraper.translation.v2.pipeline.saveOutputText
+import com.example.novelscraper.translation.v2.pipeline.shouldPersistFailed
 import com.example.novelscraper.translation.v2.pipeline.translateBatch
 import com.example.novelscraper.translation.v2.pipeline.translateLarge
 import com.example.novelscraper.translation.v2.pipeline.translateSingle
@@ -145,10 +146,9 @@ class WorkerRunner(
                     continue
                 }
                 val content = cleanseBasic(raw)
-                contextTracker.putSource(fileIdx, content)
+                contextTracker.putCleanSource(fileIdx, content)
                 if (content.isBlank()) {
-                    val out = findOrCreateFile(store, outputDirUri, fileName, "text/plain")
-                    if (out != null && store.writeText(out.uri, "")) existing.add(fileName)
+                    if (saveOutputText(store, outputDirUri, fileName, "", log = { log(it) }) != null) existing.add(fileName)
                     bump(fileName)
                     continue
                 }
@@ -173,7 +173,7 @@ class WorkerRunner(
                         bump(fileName)
                     } else {
                         log("📦 [W#$workerId] 大ファイル分割翻訳開始: $fileName (${contentBytes}B)")
-                        val ok = try {
+                        val outcome: LargeOutcome? = try {
                             translateLarge(
                                 store, workDir.uri, outputDirUri, fileName, content, ctx,
                                 LargeOptions(
@@ -192,18 +192,36 @@ class WorkerRunner(
                         } catch (ce: CancellationException) {
                             throw ce
                         } catch (t: Throwable) {
-                            // 技術的根拠: 分割処理中の例外でワーカーを死なせず、.failedを記録して他ワーカーの連鎖死を防ぎ次へ進む
+                            // 技術的根拠1行：不変条件3（塊の途中失敗では親に.failedを作らない）を順守し、ワーカー例外をログ記録して同一セッション内の連鎖死を防ぐ
                             log("❌ [W#$workerId] 大ファイル分割翻訳で予期せぬ例外: $fileName (${t.javaClass.simpleName}: ${t.message})")
-                            writeFailed(store, outputDirUri, fileName, content) { log(it) }
-                            existing.add("$fileName.failed")
-                            bump(fileName)
-                            false
+                            retainPrimaryClaim = true
+                            null
                         }
                         onChunkProgress(0, 0)
-                        if (ok) {
-                            existing.add(fileName)
-                            log("✅ [W#$workerId] 大ファイル翻訳完了: $fileName")
-                            bump(fileName)
+                        when (outcome) {
+                            is LargeOutcome.Completed -> {
+                                existing.add(fileName)
+                                log("✅ [W#$workerId] 大ファイル翻訳完了: $fileName")
+                                bump(fileName)
+                            }
+                            is LargeOutcome.Held -> {
+                                // 技術的根拠1行：大ファイル未完了時は同一セッション内で後続ワーカーが重複処理・競合ループしないようclaimを保持する
+                                retainPrimaryClaim = true
+                                log("⏸ [W#$workerId] 未完了のため保持します: $fileName (${outcome.completedChunks}/${outcome.totalChunks} chunks完了。理由: ${outcome.reason}。同一セッション内では再処理しません。次回実行で再開します）")
+                            }
+                            is LargeOutcome.Dead -> {
+                                // 技術的根拠1行：再開成功があり得ない終端は単体経路の確定失敗と同一に扱い、親失敗記録に回して可視化する。
+                                log("❌ [W#$workerId] 大ファイル翻訳を確定失敗とします: $fileName (理由: ${outcome.reason})")
+                                if (writeFailed(store, outputDirUri, fileName, "large-file dead: ${outcome.reason}") { log(it) }) {
+                                    existing.add("$fileName.failed")
+                                    bump(fileName)
+                                    store.deleteRecursively(workDir.uri)
+                                }
+                            }
+                            else -> {
+                                // 中断・予期せぬ例外時は保持のまま次へ（占有は解除しない）
+                                retainPrimaryClaim = true
+                            }
                         }
                     }
                     continue
@@ -227,10 +245,9 @@ class WorkerRunner(
                         continue
                     }
                     val nextClean = cleanseBasic(nextRaw)
-                    contextTracker.putSource(nextIdx, nextClean)
+                    contextTracker.putCleanSource(nextIdx, nextClean)
                     if (nextClean.isBlank()) {
-                        val out = findOrCreateFile(store, outputDirUri, nextName, "text/plain")
-                        if (out != null && store.writeText(out.uri, "")) existing.add(nextName)
+                        if (saveOutputText(store, outputDirUri, nextName, "", log = { log(it) }) != null) existing.add(nextName)
                         bump(nextName)
                         unclaim(nextName)
                         continue
@@ -271,15 +288,14 @@ class WorkerRunner(
                         log("📝 [W#$workerId] 翻訳中: $fileName")
                         when (val r = translateSingle(content, ctx, prevSourceTail = contextTracker.getPrevSourceTail(fileIdx))) {
                             is SingleResult.Translated -> {
-                                val out = findOrCreateFile(store, outputDirUri, fileName, "text/plain")
-                                if (out != null && store.writeText(out.uri, r.text)) {
+                                if (saveOutputText(store, outputDirUri, fileName, r.text, log = { log(it) }) != null) {
                                     existing.add(fileName)
                                     log("✅ [W#$workerId] 翻訳完了・保存: $fileName")
                                     bump(fileName)
                                 }
                             }
                             is SingleResult.Failed -> {
-                                if (r.isDeterministic || isDeterministicFailure(r.terminal, r.note)) {
+                                if (shouldPersistFailed(r)) {
                                     log("❌ [W#$workerId] 翻訳失敗: $fileName (${r.terminal} ${r.note})".trim())
                                     // 技術的根拠1行：確定的エラーのみ.failedを作成し、後続ワーカーの拾い直しを防ぐ。
                                     if (writeFailed(store, outputDirUri, fileName, content) { log(it) }) {

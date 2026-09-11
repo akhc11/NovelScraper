@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -193,8 +194,9 @@ class TranslationQueueManager(
             }
         }
 
-        // 物理分割およびキュー実行を IO スレッドで非同期実行（UIスレッド完全解放・ANR防止）
-        scope.launch(Dispatchers.IO) {
+        // Mainでオーケストレーションし、阻塞SAF処理のみwithContext(IO)に分離する。
+        // BaseWebTranslationTask（WebView生成）はMainスレッド必須のため、launch先をIOにしてはならない。
+        scope.launch {
             val foldersToProcess = engineState.selectedFolders.ifEmpty {
                 engineState.folderUri?.let { listOf(FolderItem(path = it.path ?: "", name = engineState.folderName, uri = it)) } ?: emptyList()
             }
@@ -207,9 +209,10 @@ class TranslationQueueManager(
                 for (f in foldersToProcess) {
                     if (currentSessionId != getActiveSessionId(engine)) return@launch
                     val fUri = f.uri ?: continue
-                    val doc = resolveDocument(fUri) ?: continue
+                    val doc = withContext(Dispatchers.IO) { resolveDocument(fUri) } ?: continue
                     if (doc.isDirectory) {
-                        val rawFiles = doc.listFiles().filter {
+                        val children = withContext(Dispatchers.IO) { doc.listFiles().toList() }
+                        val rawFiles = children.filter {
                             it.isFile && it.name?.endsWith(".txt", ignoreCase = true) == true &&
                                     it.name?.startsWith("part_", ignoreCase = true) != true
                         }.sortedBy { it.name }
@@ -272,7 +275,9 @@ class TranslationQueueManager(
     }
 
     private fun startNextFolderInQueue(engine: TranslationEngine, folderIndex: Int, sessionId: Long) {
-        scope.launch(Dispatchers.IO) {
+        // Mainで実行する。WebView生成（BaseWebTranslationTask）はMainスレッド必須。
+        // 阻塞SAF解決のみ内部でwithContext(IO)に分離する。
+        scope.launch {
             if (sessionId != getActiveSessionId(engine)) return@launch
 
             val engineState = stateFor(engine)
@@ -298,15 +303,20 @@ class TranslationQueueManager(
             val folderProgressPrefix = if (folders.size > 1) "[フォルダ ${folderIndex + 1}/${folders.size}] " else ""
 
             // オンデマンド物理分割: 対象が生テキストファイルの場合、翻訳直前にこの1ファイルのみを都度分割
-            val currentDoc = currentItem.uri?.let { resolveDocument(it) }
+            // SAF解決（阻塞IPC）はIOに分離する。分割本体（splitSingleTextFile）は内部でIO化済みのmain-safe関数のためMainから呼ぶ。
+            val currentDoc = currentItem.uri?.let { withContext(Dispatchers.IO) { resolveDocument(it) } }
             if (isWebSplitEnabled.value && currentDoc != null && currentDoc.isFile &&
                 currentDoc.name?.endsWith(".txt", ignoreCase = true) == true &&
                 currentDoc.name?.startsWith("part_", ignoreCase = true) != true
             ) {
                 val parentUri = runCatching { Uri.parse(currentItem.path) }.getOrNull()
-                val parentDoc = parentUri?.let { resolveDocument(it) } ?: currentDoc.parentFile
-                val splitRootDir = parentDoc?.let { p ->
-                    p.findFile("分割済み") ?: p.createDirectory("分割済み")
+                val parentDoc = withContext(Dispatchers.IO) {
+                    parentUri?.let { resolveDocument(it) } ?: currentDoc.parentFile
+                }
+                val splitRootDir = withContext(Dispatchers.IO) {
+                    parentDoc?.let { p ->
+                        p.findFile("分割済み") ?: p.createDirectory("分割済み")
+                    }
                 }
 
                 if (splitRootDir != null) {
@@ -411,6 +421,7 @@ class TranslationQueueManager(
             TranslationEngine.LLM_API -> GoogleTranslationStrategy() // WebTask用フォールバック
         }
 
+        // WebView生成はMainスレッド必須のため、ここはMain文脈のまま構築する。
         val task = BaseWebTranslationTask(
             context = appContext,
             folderUri = targetUri,

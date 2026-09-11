@@ -189,11 +189,13 @@ internal fun V2CommonTab(
     ) {
         Text("Google AI Studio (Gemini) APIキープール (1行1キー / 複数可):", color = AppColors.textSecondary, fontSize = 10.sp)
         Text(
-            text = "同梱値にリセット",
+            text = "クリア",
             color = AppColors.accentTealLight,
             fontSize = 10.sp,
             modifier = Modifier.clickable {
-                state.geminiKeysText.value = com.example.novelscraper.translation.v2.settings.V2Settings.DEFAULT_GEMINI_API_KEYS.joinToString("\n")
+                // 技術的根拠1行：同梱既定キー廃止(BYOK化)のため、リセット復元ではなく空消去にする。
+                // 動作例：押すと鍵欄が空になり、自分の鍵を貼り直して開始する。
+                state.geminiKeysText.value = ""
             }
         )
     }

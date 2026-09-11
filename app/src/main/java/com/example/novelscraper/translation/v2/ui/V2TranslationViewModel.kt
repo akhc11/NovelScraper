@@ -166,8 +166,10 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
             var summary: RunSummary? = null
             try {
                 summary = engine.runWithNames(items, current)
-            } catch (_: Throwable) {
+            } catch (t: Throwable) {
                 // エンジン内部でログ・状態更新済みのため、ここでは通知の後片付けのみ行う
+                // 技術的根拠1行：無言吸収を避けるためLogcatに残すが通知後片付けの流れは変えない（外部振る舞い不変）。
+                android.util.Log.w("V2ViewModel", "engine run failed", t)
             } finally {
                 notifyJob?.cancel()
                 notifyJob = null

@@ -72,8 +72,10 @@ fun V2TranslationPanel(viewModel: V2TranslationViewModel) {
                     treeUri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // 権限確保に失敗しても中断せず、フォルダ読込失敗としてエンジンログに残る
+                // 技術的根拠1行：無言化せずLogcatに残すがフォルダ追加の流れは変えない（外部振る舞い不変）。
+                android.util.Log.w("V2TranslationPanel", "takePersistable failed", e)
             }
             val doc = DocumentFile.fromTreeUri(context, treeUri)
             val folderName = doc?.name ?: treeUri.lastPathSegment ?: "選択フォルダ"

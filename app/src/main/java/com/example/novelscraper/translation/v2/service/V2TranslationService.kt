@@ -109,7 +109,10 @@ class V2TranslationService : Service() {
                 wakeLock?.release()
             }
             wakeLock?.acquire(30 * 60 * 1000L)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            // 技術的根拠1行：Wakelock失敗を無言化せず記録するが起動処理は継続する（外部振る舞い不変）。
+            android.util.Log.w("V2TranslationService", "wakelock acquire failed", e)
+        }
 
         if (intent != null) {
             when (intent.action) {
@@ -146,7 +149,9 @@ class V2TranslationService : Service() {
         if (wakeLock?.isHeld == true) {
             try {
                 wakeLock?.release()
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                android.util.Log.w("V2TranslationService", "wakelock release failed", e)
+            }
         }
         onStopRequested = null
         super.onDestroy()

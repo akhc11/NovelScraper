@@ -14,11 +14,8 @@ import com.example.novelscraper.translation.v2.domain.V2DeclaredEncoding
 import com.example.novelscraper.translation.v2.domain.V2SendGate
 import com.example.novelscraper.translation.v2.domain.NovelTarget
 import com.example.novelscraper.translation.v2.domain.DictResolveResult
-import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
 import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.VDoc
-import com.example.novelscraper.translation.v2.infra.GeminiHandler
-import com.example.novelscraper.translation.v2.infra.OpenRouterHandler
 import com.example.novelscraper.translation.v2.pipeline.NovelDict
 import com.example.novelscraper.translation.v2.pipeline.SourceLang
 import com.example.novelscraper.translation.v2.pipeline.V2_PROMPT_1_ZH
@@ -157,20 +154,8 @@ class RunEngine(
     }
 
     private fun handlerFor(profile: V2ModelProfile, key: String, settings: V2Settings): com.example.novelscraper.translation.v2.domain.ProviderHandler {
-        return when (profile.providerId.toProviderId()) {
-            ProviderId.GEMINI -> GeminiHandler(apiKey = key)
-            else -> {
-                val resolved = resolveOpenRouterParams(profile)
-                OpenRouterHandler(
-                    apiKey = key,
-                    endpoint = settings.openRouterEndpoint,
-                    reasoningEffort = resolved.reasoningEffort,
-                    reasoningEnabled = resolved.reasoningEnabled,
-                    providerOrder = resolved.providerOrder,
-                    providerAllowFallbacks = resolved.providerAllowFallbacks
-                )
-            }
-        }
+        // 技術的根拠1行：生成分岐をDefaultHandlerFactoryに一本化し、判定仕様は変えない（外部振る舞い不変）。
+        return defaultHandlerFor(profile, key, settings)
     }
 
     companion object {

@@ -9,13 +9,11 @@ import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.RequestOptions
-import com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams
 import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.engine.EngineState
 import com.example.novelscraper.translation.v2.engine.RunEngine
 import com.example.novelscraper.translation.v2.engine.RunSummary
-import com.example.novelscraper.translation.v2.infra.GeminiHandler
-import com.example.novelscraper.translation.v2.infra.OpenRouterHandler
+import com.example.novelscraper.translation.v2.engine.defaultHandlerFor
 import com.example.novelscraper.translation.v2.infra.SafFileStore
 import com.example.novelscraper.translation.v2.service.V2TranslationService
 import com.example.novelscraper.translation.v2.service.V2TranslationServiceController
@@ -214,20 +212,8 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
                 ProviderId.OPENROUTER -> current.openRouterKey.ifBlank { return@withContext "NG: OpenRouterキー未設定" }
                 null -> return@withContext "NG: 未対応プロバイダー"
             }
-            val handler = when (profile.providerId.toProviderId()) {
-                ProviderId.GEMINI -> GeminiHandler(apiKey = key)
-                else -> {
-                    val resolved = resolveOpenRouterParams(profile)
-                    OpenRouterHandler(
-                        apiKey = key,
-                        endpoint = current.openRouterEndpoint,
-                        reasoningEffort = resolved.reasoningEffort,
-                        reasoningEnabled = resolved.reasoningEnabled,
-                        providerOrder = resolved.providerOrder,
-                        providerAllowFallbacks = resolved.providerAllowFallbacks
-                    )
-                }
-            }
+            // 技術的根拠1行：生成分岐をDefaultHandlerFactoryに一本化し、判定仕様は変えない（外部振る舞い不変）。
+            val handler = defaultHandlerFor(profile, key, current)
             val result = handler.call(
                 LlmRequest(
                     providerId = profile.providerId,

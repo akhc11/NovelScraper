@@ -143,7 +143,9 @@ class SafFileStore(private val context: Context) : FileStore {
                 }
             }
             result
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // 技術的根拠1行：I/O障害を空フォルダと区別するため戻り値は維持しつつLogcatに残す（外部振る舞い不変）。
+            android.util.Log.w("SafFileStore", "children failed: $dirUri", e)
             emptyList()
         }
     }
@@ -152,7 +154,8 @@ class SafFileStore(private val context: Context) : FileStore {
         try {
             val parsed = safeParseUri(fileUri) ?: return@withContext null
             context.contentResolver.openInputStream(parsed)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.w("SafFileStore", "openInputStream failed", e)
             null
         }
     }
@@ -309,15 +312,20 @@ class SafFileStore(private val context: Context) : FileStore {
             try {
                 val parsed = safeParseUri(dirUri) ?: return@withContext false
                 for (child in children(dirUri)) {
-                    if (child.isDirectory) {
+                    // 技術的根拠1行：部分削除残骸の原因追跡のため子失敗を記録するが戻り値契約は維持する（外部振る舞い不変）。
+                    val childOk = if (child.isDirectory) {
                         deleteRecursively(child.uri)
                     } else {
                         deleteFile(child.uri)
                     }
+                    if (!childOk) {
+                        android.util.Log.w("SafFileStore", "deleteRecursively child failed: ${child.uri}")
+                    }
                 }
                 val targetDocUri = toDocumentUri(parsed)
                 DocumentsContract.deleteDocument(context.contentResolver, targetDocUri)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.w("SafFileStore", "deleteRecursively failed: $dirUri", e)
                 false
             }
         }

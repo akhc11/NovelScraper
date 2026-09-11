@@ -324,8 +324,13 @@ class WorkerRunner(
                 throw ce
             } catch (t: Throwable) {
                 // 技術的根拠: ファイル走査・処理中の予期せぬ例外でワーカーを死なせず、.failedを記録して他ワーカーの連鎖死を防ぎ次へ進む
+                // 技術的根拠1行：判定ロジックは変えずLogcatにも残して原因追跡可能にする（外部振る舞い不変）。
                 log("❌ [W#$workerId] ファイル処理中に予期せぬ例外: $fileName (${t.javaClass.simpleName}: ${t.message})")
-                val fallbackContent = try { store.readText(file.uri) ?: "" } catch (_: Throwable) { "" }
+                android.util.Log.w("WorkerRunner", "unexpected file error: $fileName", t)
+                val fallbackContent = try { store.readText(file.uri) ?: "" } catch (e: Throwable) {
+                    android.util.Log.w("WorkerRunner", "fallback read failed: $fileName", e)
+                    ""
+                }
                 writeFailed(store, outputDirUri, fileName, fallbackContent) { log(it) }
                 existing.add("$fileName.failed")
                 bump(fileName)

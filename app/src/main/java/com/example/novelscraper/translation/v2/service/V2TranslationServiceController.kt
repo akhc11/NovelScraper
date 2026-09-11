@@ -35,8 +35,9 @@ class V2TranslationServiceController(private val context: Context) {
                 context.startService(intent)
             }
             true
-        } catch (_: Exception) {
-            // バックグラウンド制限等による例外を安全に吸収
+        } catch (e: Exception) {
+            // 技術的根拠1行：バックグラウンド制限等は戻り値falseで吸収しつつ原因をLogcatに残す（外部振る舞い不変）。
+            android.util.Log.w("V2ServiceController", "updateNotification failed", e)
             false
         }
     }
@@ -50,7 +51,8 @@ class V2TranslationServiceController(private val context: Context) {
         return try {
             V2TranslationService.showCompletionNotification(context, title, message)
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.w("V2ServiceController", "showComplete failed", e)
             false
         }
     }
@@ -63,7 +65,8 @@ class V2TranslationServiceController(private val context: Context) {
             val stopIntent = Intent(context, V2TranslationService::class.java)
             context.stopService(stopIntent)
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.w("V2ServiceController", "stopService failed", e)
             false
         }
     }

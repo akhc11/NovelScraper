@@ -59,12 +59,6 @@ private val GEMINI_SAMPLING = mapOf("temperature" to SamplingParam(0.0, 2.0))
  */
 private val GEMINI_2_5_FLASH_BUDGET = ThinkingSupport.Budget(-1..24576)
 
-/**
- * Gemini 2.5 Proの思考予算範囲（128..32768・無効化不可）。
- * 技術的根拠1行：公式の2.5 Pro行（128〜32768・思考OFF不可）に一致させる。-1動的は送信側で素通しする。
- */
-private val GEMINI_2_5_PRO_BUDGET = ThinkingSupport.Budget(128..32768)
-
 /** Gemini 3.7/3.8系の共通能力（LOW/MEDIUM/HIGH・上限64000）。 */
 private val GEMINI_3_7_3_8_FLASH = ModelCapabilities(
     thinking = ThinkingSupport.Levels(setOf("low", "medium", "high"), default = "medium"),
@@ -97,14 +91,6 @@ private val GEMINI_2_5_FLASH_FAMILY = ModelCapabilities(
     maxOutputTokens = 65536
 )
 
-/** Gemini 2.5 Proの能力（思考予算式128..32768・無効化不可・上限65536）。 */
-private val GEMINI_2_5_PRO_FAMILY = ModelCapabilities(
-    thinking = GEMINI_2_5_PRO_BUDGET,
-    sampling = GEMINI_SAMPLING,
-    structuredOutput = true,
-    maxOutputTokens = 65536
-)
-
 /** Gemini旧型・Gemma系の共通能力（思考なし・上限8192）。 */
 private val GEMINI_LEGACY_FAMILY = ModelCapabilities(
     thinking = ThinkingSupport.None,
@@ -132,7 +118,6 @@ val GEMINI_DESCRIPTOR = ProviderDescriptor(
             maxOutputTokens = 65536
         ),
         "gemini-2.5-flash" to GEMINI_2_5_FLASH_FAMILY,
-        "gemini-2.5-pro" to GEMINI_2_5_PRO_FAMILY,
         "gemini-2.0-flash" to GEMINI_LEGACY_FAMILY,
         "gemini-1.5-flash" to GEMINI_LEGACY_FAMILY,
         "gemini-1.5-pro" to GEMINI_LEGACY_FAMILY,

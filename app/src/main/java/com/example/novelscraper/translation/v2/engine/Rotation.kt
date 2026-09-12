@@ -40,7 +40,10 @@ fun resolveProfileOptions(
         else -> null
     }
     val thinkingBudget = when (val t = caps?.thinking) {
-        is ThinkingSupport.Budget -> resolveInt(t.range, null, profile.thinkingBudget).value
+        // 技術的根拠1行：-1動的思考はPro/Flash共通の公式指定値のため範囲丸めせず素通しする（Proは0無効→下限128に丸まる）。
+        is ThinkingSupport.Budget ->
+            if (profile.thinkingBudget == -1) -1
+            else resolveInt(t.range, null, profile.thinkingBudget).value
         else -> null
     }
     fun gateSampling(key: String, value: Double?): Double? {

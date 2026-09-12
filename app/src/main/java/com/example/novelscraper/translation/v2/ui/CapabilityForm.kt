@@ -40,11 +40,13 @@ fun ThinkingLevelEditor(
     onSelect: (String?) -> Unit
 ) {
     val levels = (supported as? ThinkingSupport.Levels)?.supported ?: return
+    // 技術的根拠1行：ABC順（high low medium minimal）ではなく推論の深さ順（high→medium→low→minimal）に並べる。
+    val ordered = listOf("high", "medium", "low", "minimal").filter { it in levels }
     Text("Thinking Level (推論レベル):", color = AppColors.textSecondary, fontSize = 10.sp)
     Spacer(modifier = Modifier.height(2.dp))
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         SelectBox(label = "未指定", selected = selected == null, onClick = { onSelect(null) }, modifier = Modifier.weight(1f))
-        levels.sorted().forEach { lvl ->
+        ordered.forEach { lvl ->
             SelectBox(label = lvl, selected = selected == lvl, onClick = { onSelect(lvl) }, modifier = Modifier.weight(1f))
         }
     }
@@ -158,8 +160,20 @@ fun ProfileCapabilityEditors(
 
         if (profile.providerId == "openrouter") {
             Text("Reasoning Effort (思考モード):", color = AppColors.textSecondary, fontSize = 10.sp)
+            // 技術的根拠1行：公式の7値（none/minimal/low/medium/high/xhigh/max）を全て選べるにする。従来は5値のみで残り3値は検証素通しなのにUIから選べなかった。
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf(null to "未指定", "none" to "none", "low" to "low", "medium" to "medium", "high" to "high").forEach { (v, label) ->
+                listOf(null to "未指定", "none" to "none", "minimal" to "minimal", "low" to "low").forEach { (v, label) ->
+                    SelectBox(
+                        label = label,
+                        selected = profile.reasoningEffort == v,
+                        onClick = { onUpdate(profile.copy(reasoningEffort = v)) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf("medium" to "medium", "high" to "high", "xhigh" to "xhigh", "max" to "max").forEach { (v, label) ->
                     SelectBox(
                         label = label,
                         selected = profile.reasoningEffort == v,

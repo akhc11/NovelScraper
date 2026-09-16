@@ -123,6 +123,18 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
             issues.add(V2SettingsIssue("辞書: providerOrder空のため allow_fallbacks は送られません", false))
         }
     }
+    for ((key, value) in listOf(
+        "抽出" to settings.dict.dictPrompts.batch,
+        "名寄せ" to settings.dict.dictPrompts.merge,
+        "翻訳" to settings.dict.dictPrompts.translate
+    )) {
+        if (value.length > TranslationLimits.MAX_DICT_PROMPT_CHARS) {
+            issues.add(V2SettingsIssue("辞書プロンプト「$key」は上限${TranslationLimits.MAX_DICT_PROMPT_CHARS}字を超えた分を切り落として送信します", false))
+        }
+    }
+    if (settings.refine.prompt.length > TranslationLimits.MAX_DICT_PROMPT_CHARS) {
+        issues.add(V2SettingsIssue("推敲プロンプトは上限${TranslationLimits.MAX_DICT_PROMPT_CHARS}字を超えた分を切り落として送信します", false))
+    }
 
     val needsGemini = settings.profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI }
     if (needsGemini && settings.geminiKeys.none { it.isNotBlank() }) {

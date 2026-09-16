@@ -1,6 +1,16 @@
 package com.example.novelscraper.translation.v2.pipeline
 
-/** 完走マーカー。訳文末尾の構造区切りであり翻訳対象外 */
+import com.example.novelscraper.translation.v2.domain.FailureNotes
+
+/**
+ * 完走マーカー。原文末尾に付けて送り、訳文末尾への複写で完走を確認する。
+ *
+ * 【完成時の動作】
+ * - 送る：原文の最後に "[SRC_END]" を付ける（例：「勇者は剣を抜いた。[SRC_END]」）
+ * - 返る：訳文の最後に同じ栞があれば完成。栞を剥がして本文だけ保存する
+ * - 長い挨拶付きでも可：栞の後の文章（後口上）は切り落として本文を救出する
+ * - 栞なし：途切れ疑いとして null を返す（呼出側は予備の指示で再送する）
+ */
 const val COMPLETION_MARKER = "[SRC_END]"
 
 fun appendMarker(content: String, enabled: Boolean): String {
@@ -8,9 +18,6 @@ fun appendMarker(content: String, enabled: Boolean): String {
     if (content.trimEnd().endsWith(COMPLETION_MARKER)) return content
     return content.trimEnd() + "\n" + COMPLETION_MARKER
 }
-
-/** 完走マーカーの探索ウィンドウサイズ（末尾からの文字数） */
-const val MARKER_SEARCH_WINDOW_CHARS = 300
 
 /**
  * 完走マーカー判定用正規表現。
@@ -24,24 +31,21 @@ private val MARKER_REGEX = Regex(
 )
 
 /**
- * 完走検証＋剥離（アイデアA：段階的寛容フォールバック）。
- * 末尾300文字ウィンドウ内からマーカー（装飾・表記揺れ・全角括弧対応）を探索し、
- * マーカー以降（後口上含む）を安全に切り落として本文を救出する。
- * マーカーが存在しない場合は生成途絶とみなして null。
+ * 完走検証＋剥離。
+ * 全文から栞（装飾・表記揺れ・全角括弧対応）の最後の出現を探す。
+ *
+ * 【完成時の動作】
+ * - 栞あり → 栞より後ろ（後口上）を切り落とし、本文だけ返して完成
+ * - 栞なし → null を返して未完（呼出側は再送し、全滅時のみ確定失敗にする）
  */
 fun checkAndStripMarker(text: String, enabled: Boolean): String? {
     if (!enabled) return text
     val trimmed = text.trim()
     if (trimmed.isEmpty()) return null
 
-    // 末尾300文字の探索ウィンドウ（短文なら全文）
-    val searchStart = (trimmed.length - MARKER_SEARCH_WINDOW_CHARS).coerceAtLeast(0)
-    val window = trimmed.substring(searchStart)
-
-    // ウィンドウ内で最後に出現するマーカーを特定
-    val match = MARKER_REGEX.findAll(window).lastOrNull() ?: return null
-    val absStart = searchStart + match.range.first
-    return trimmed.substring(0, absStart).trimEnd()
+    // 全文から最後に出現するマーカーを特定
+    val match = MARKER_REGEX.findAll(trimmed).lastOrNull() ?: return null
+    return trimmed.substring(0, match.range.first).trimEnd()
 }
 
 /** ```剥離のみ（前口上の除去はしない）。後口上は呼び元で扱う */
@@ -127,22 +131,75 @@ fun kanaRate(text: String): Double {
 fun meetsKanaFloor(text: String, minRate: Double = 0.2): Boolean = kanaRate(text) >= minRate
 
 /**
- * 不合格理由の特定（ログ用）。合格時は null を返す。
- * 判定順序は verifyTranslation と同一にすること（順序がずれると表示と実判定が食い違う）。
+ * 完了証明。合格か否かと、不合格の理由（[FailureNotes] の値）を一体で持つ。
+ * 技術的根拠1行：合否と理由の二重実装は必ず乖離するため、検証の単一正本とする。
  */
-fun verifyRejectReason(sourceText: String, translatedText: String, options: VerifyOptions): String? {
-    val stripped = stripFences(translatedText)
-    val withoutMarker = checkAndStripMarker(stripped, options.markerEnabled) ?: return "marker-missing"
+data class CompletionReceipt(
+    val complete: Boolean,
+    /** 空＝合格。不合格時は理由 */
+    val note: String = "",
+    /** 合格時の確定訳文 */
+    val cleaned: String = ""
+)
+
+/**
+ * 必須語の欠落許容数。1件までは合格にする（8/9通過）。
+ * 技術的根拠1行：単発言及の落とし・表記揺れの1件で章ごと捨てるより、ほぼ合った訳の採用を優先する。
+ */
+const val DICT_ALLOWED_MISSING = 1
+
+/**
+ * 唯一の検証実装。順序固定：栞→空白→確定訳→残留→行数→量比→かな率。
+ * 技術的根拠1行：順序がずれると表示と実判定が食い違うため、順序もここに封印する。
+ */
+fun assessCompletion(sourceText: String, translatedText: String, options: VerifyOptions): CompletionReceipt {
+    // 技術的根拠1行：注釈残骸は本文ではないため、栞・量・かな率の判定前に確定訳へ畳む。
+    val fenced = stripFences(translatedText)
+    val check = options.dictCheck
+    val stripped = check?.strip?.let { stripTermAnnotations(fenced, it.terms, it.annotation) } ?: fenced
+    val withoutMarker = checkAndStripMarker(stripped, options.markerEnabled)
+        ?: return CompletionReceipt(complete = false, note = FailureNotes.MARKER_MISSING)
     val cleaned = withoutMarker.trim()
-    if (cleaned.isBlank()) return "blank"
+    if (cleaned.isBlank()) return CompletionReceipt(false, FailureNotes.BLANK)
+    // 技術的根拠1行：辞書不遵守は内容の正誤ではなく約束違反のため、品質判定より先に件数付きで落とす（単一正本に寄せる）。
+    // 必須語の選び方は言語方針の責務（中国語＝全件、韓国語＝長い名のみ）。
+    check?.let {
+        if (it.required.isNotEmpty()) {
+            val missing = it.required.entries
+                .filter { (key, value) ->
+                    value.isNotBlank() && !cleaned.contains(value) &&
+                        it.alternates[key].orEmpty().none { alt -> alt.isNotBlank() && cleaned.contains(alt) }
+                }
+                .map { it.key }
+            if (missing.size > DICT_ALLOWED_MISSING) {
+                val survived = it.required.size - missing.size
+                return CompletionReceipt(
+                    false,
+                    "${FailureNotes.DICT_MISMATCH}: ${missing.take(3).joinToString(",")} (残存$survived/${it.required.size}件)"
+                )
+            }
+        }
+    }
     if (options.residual != null) {
         val residual = residualFailure(cleaned, options.residual)
-        if (residual != null) return residual
+        if (residual != null) return CompletionReceipt(false, residual)
     }
-    if (!lineCountOk(sourceText, cleaned)) return "line-count"
-    if (!sizeRatioOk(sourceText, cleaned, options.sizeMinPct, options.sizeMaxPct)) return "size-ratio"
-    if (!meetsKanaFloor(cleaned, options.kanaFloor)) return "kana-floor"
-    return null
+    if (!lineCountOk(sourceText, cleaned)) return CompletionReceipt(false, FailureNotes.LINE_COUNT)
+    if (!sizeRatioOk(sourceText, cleaned, options.sizeMinPct, options.sizeMaxPct)) {
+        return CompletionReceipt(false, FailureNotes.SIZE_RATIO)
+    }
+    if (!meetsKanaFloor(cleaned, options.kanaFloor)) {
+        return CompletionReceipt(false, FailureNotes.KANA_FLOOR)
+    }
+    return CompletionReceipt(complete = true, cleaned = cleaned)
+}
+
+/**
+ * 不合格理由の特定（ログ用）。合格時は null を返す。
+ */
+fun verifyRejectReason(sourceText: String, translatedText: String, options: VerifyOptions): String? {
+    val receipt = assessCompletion(sourceText, translatedText, options)
+    return if (receipt.complete) null else receipt.note
 }
 
 /**

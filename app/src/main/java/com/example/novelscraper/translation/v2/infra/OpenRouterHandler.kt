@@ -2,7 +2,9 @@ package com.example.novelscraper.translation.v2.infra
 
 import com.example.novelscraper.translation.v2.domain.ClassifiedFailure
 import com.example.novelscraper.translation.v2.domain.FailureKind
+import com.example.novelscraper.translation.v2.domain.FailureNotes
 import com.example.novelscraper.translation.v2.domain.GenericErrorMapper
+import com.example.novelscraper.translation.v2.domain.isOutputTruncated
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
@@ -51,7 +53,11 @@ internal data class V2OrRequest(
 internal data class V2OrChoiceMessage(val content: String? = null, val reasoning: String? = null)
 
 @Serializable
-internal data class V2OrChoice(val message: V2OrChoiceMessage? = null, val finish_reason: String? = null)
+internal data class V2OrChoice(
+    val message: V2OrChoiceMessage? = null,
+    val finish_reason: String? = null,
+    val native_finish_reason: String? = null
+)
 
 @Serializable
 internal data class V2OrUsage(val prompt_tokens: Int? = null, val completion_tokens: Int? = null)
@@ -115,11 +121,13 @@ internal fun parseOpenRouterResponse(code: Int, body: String, retryAfterSec: Lon
             return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "decode-error"))
         }
         val choice = resp.choices?.firstOrNull()
+        // 技術的根拠1行：上限打切りは本文の有無に関わらず未完として扱い、切れ端の完成誤認を防ぐ（生値も見る）。
+        if (isOutputTruncated(choice?.finish_reason, choice?.native_finish_reason)) {
+            return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = FailureNotes.CUTOFF_LENGTH))
+        }
         val text = choice?.message?.content
         if (text.isNullOrBlank()) {
             return when {
-                choice?.finish_reason == "length" ->
-                    LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "cutoff:length"))
                 !choice?.message?.reasoning.isNullOrBlank() ->
                     LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "reasoning-only"))
                 else ->

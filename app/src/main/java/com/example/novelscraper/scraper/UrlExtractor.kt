@@ -31,4 +31,17 @@ object UrlExtractor {
 
         return null
     }
+
+    /**
+     * 共有intent等の複数ソースから優先順位順にURLを抽出する。
+     * 各候補を順に [extractUrl] で評価し、最初に見つかったURLを返す。
+     * 抽出責務は [extractUrl] に集約し、呼び元での正規表現コピーを作らない。
+     */
+    fun extractUrlFromCandidates(vararg candidates: String?): String? {
+        for (candidate in candidates) {
+            val url = extractUrl(candidate)
+            if (url != null) return url
+        }
+        return null
+    }
 }

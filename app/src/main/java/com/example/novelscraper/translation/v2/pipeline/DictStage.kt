@@ -1,9 +1,11 @@
 package com.example.novelscraper.translation.v2.pipeline
 
 import com.example.novelscraper.translation.v2.domain.LlmResult
+import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.isDeterministic
 import com.example.novelscraper.translation.v2.domain.isQuotaLike
 import com.example.novelscraper.translation.v2.infra.FileStore
+import com.example.novelscraper.translation.v2.settings.V2DictPrompts
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -23,38 +25,47 @@ import kotlinx.serialization.json.contentOrNull
 data class NovelDict(
     val style: String = "カタカナ",
     val characters: Map<String, String> = emptyMap(),
-    val genders: Map<String, String> = emptyMap()
+    val genders: Map<String, String> = emptyMap(),
+    /** 生成時文面のハッシュ。空＝旧形式（照合時は不一致扱いで作り直す） */
+    val promptsHash: String = ""
 )
 
 @Serializable
 data class ExtractedNames(
-    val names: List<String> = emptyList()
+    val names: List<String> = emptyList(),
+    /** 作者署名・注記・宣伝文由来の名前。名寄せ・命名には使わず機械除外する。欠落時は空扱い。 */
+    val authors: List<String> = emptyList()
 )
 
 @Serializable
-data class DictBuildManifest(val version: Int = 1, val batches: Map<String, String> = emptyMap(), val model: String = "")
+data class DictBuildManifest(val version: Int = 1, val batches: Map<String, String> = emptyMap(), val model: String = "", val promptsHash: String = "")
 
 data class DictPrompts(
     val batch: String = "Extract person names (pure character names) from the novel text below.\n" +
-        "Output ONLY valid JSON matching this exact schema: {\"names\":[\"Name1\",\"Name2\"]}.\n\n" +
+        "Output ONLY valid JSON matching this exact schema: {\"names\":[\"Name1\",\"Name2\"],\"authors\":[\"Author1\"]}.\n\n" +
         "【厳格な抽出ルール】\n" +
         "1. 抽出対象 (純粋な人名・固有名詞のみ):\n" +
         "   - 〇 抽出する: 登場人物のフルネーム、姓、名、愛称、ファーストネーム (原文表記のまま)\n" +
         "   - ✕ 抽出禁止 (厳禁): 役職・肩書 (隊長、長老、宗主、社長、師兄、ハンター等)、代名詞 (彼、彼女、黒衣人、老人、少年等)、一般名詞 (システム、精霊、魔獣、スキル名、アイテム等)、地名・組織名・ギルド名・門派名\n" +
+        "   - 作者署名・作者注記・宣伝文の中の名前はnamesに入れずauthorsに入れること (例: 作者：○○→authors。物語本文中の登場人物は通常通りnamesへ。両方に出る名前はnamesを優先する)。\n" +
+        "   - 1字だけの名前は抽出しないこと (2文字以上のみ。1字は一般語と区別できないため)。\n" +
+        "   - 韓国語は助詞・語尾を剥がして素形で抽出すること (例: 「사재혁이」→「사재혁」。文法部品は人名にしない。例: 「물이나」の「이나」は文法なので抽出しない)。\n" +
         "2. 日本語訳は絶対に含めないこと:\n" +
         "   - 原文テキストに登場する表記そのままで配列に格納してください (訳語・読み仮名の付与は厳禁)。\n" +
         "3. 類似名・同姓同名の厳格な分離:\n" +
         "   - 「李云」「李云龙」「李云天」のように似ていても、それぞれ別人であるため、絶対に1つに統合せず別々の名前として漏れなく抽出してください。\n" +
         "4. 出力フォーマット:\n" +
         "   - 解説・挨拶・マークダウン記号は一切不要。純粋なJSONのみを出力してください。\n\n" +
-        "Example: {\"names\":[\"克莱恩\",\"周明瑞\",\"李云龙\",\"Arthur\"]}",
+        "Example: {\"names\":[\"克莱恩\",\"周明瑞\",\"李云龙\",\"Arthur\",\"사재혁\",\"목진우\"],\"authors\":[]}",
 
-    val merge: String = "Merge the dictionary fragments and deduplicate character name lists below into one clean JSON list.\n" +
+    val merge: String = "Merge the dictionary names below into one clean JSON list. The input is already deduplicated by exact match.\n" +
         "Output ONLY valid JSON matching this exact schema: {\"names\":[\"Name1\",\"Name2\"]}.\n\n" +
         "【厳格な名寄せ・重複排除ルール】\n" +
-        "1. 重複排除 & フルネーム優先:\n" +
-        "   - 同一人物であることが明確な略称（名前のみ）とフルネーム（姓名）がある場合は【フルネーム】に統一する。\n" +
-        "   - 字面が似ていても別人である名前（例: 「李云」と「李云龙」）は絶対に統合せず、両方とも維持する。\n" +
+        "1. 重複排除 & 短形の保持:\n" +
+        "   - 完全一致の重複は1つにまとめる。\n" +
+        "   - 「·」区切りのフルネームとその構成要素の短形（例: 「李维·史奈克」と「李维」）は【フルネーム】に統一する（短形の訳は適用時に部品から復元するため、ここでは落としてよい）。\n" +
+        "   - 「·」区切りのないペア（例: 「太郎」と「田中太郎」、「李云」と「李云龙」）は別人である可能性があるため、絶対に統合せず両方とも維持する。\n" +
+        "   - 1字の名前は登録しないこと（2文字以上のみ）。\n" +
         "2. ノイズの徹底削除:\n" +
         "   - 誤って混入した一般名詞・肩書・役職（隊長、長老、宗主、社長、システム等）、地名・組織名があれば完全に削除する。\n" +
         "3. 日本語訳は絶対に含めないこと:\n" +
@@ -66,14 +77,10 @@ data class DictPrompts(
     val translate: String = "Review the merged character names below and create a complete Japanese translation dictionary.\n" +
         "Output ONLY valid JSON matching this exact schema (no markdown, no explanations): " +
         "{\"style\":\"カタカナ|漢字|ハイブリッド\",\"characters\":{\"OriginalName\":\"JapaneseName\"}}.\n\n" +
-        "【厳格な命名・翻訳ルール】\n" +
+        "【厳格な命名・翻訳ルール】（言語別基準：中国語＝漢字優先、韓国語＝カタカナ既定）\n" +
         "1. 表記スタイルの自動判定 & 作品全体での統一:\n" +
-        "   作品の世界観および人名のルーツから最適なスタイル (\"カタカナ\", \"漢字\", または \"ハイブリッド\") を1つ決定してください。\n" +
-        "   - 【カタカナ】: 西洋ファンタジー、英語・西洋名・架空ファンタジー名の当て字（音訳）\n" +
-        "     (※メアリー、アリス、クライン等の西洋名・外国人名は、漢字の当て字のまま残さず必ず自然なカタカナに音訳すること。「玛丽 → メアリー」「克莱恩 → クライン」「爱丽丝 → アリス」等)\n" +
-        "   - 【漢字】: 中華伝統の姓名、東洋武侠、仙侠、歴史時代劇\n" +
-        "     (※張偉、李雲、蕭炎等の中華・東洋伝統の姓名は、カタカナ音訳に崩さず日本の常用漢字・新字体に復元すること。「张伟 → 張偉」「李云 → 李雲」等)\n" +
-        "   - 【ハイブリッド】: 西洋名と東洋名が混在する作品では、各人名のルーツに合わせて個別に最適な表記 (西洋名はカタカナ、東洋名は漢字) を漏れなく割り当ててください。\n" +
+        "   中国語名は語源で判定し、迷う場合は漢字表記を優先すること。明らかな西洋音訳名のみカタカナに音訳し（克莱恩→クライン等）、中華名・意味の取れる複合名（黑山→黒山等）は日本の常用漢字・新字体に復元すること（李云→李雲等）。西洋と断定できない中国語名は漢字にすること。\n" +
+        "   韓国語名はカタカナを既定とし（사재혁→サ・ジェヒョク等）、漢字ルーツが明確で日本語として自然な場合のみ漢字可。迷う場合はカタカナにすること。\n" +
         "2. 1対1の正確な対応（名前の取り違え・混同は厳禁）:\n" +
         "   - 入力されたすべての原文名をキーとし、それぞれに正確に対応する自然な日本語訳を値として設定してください。\n" +
         "   - 似た名前同士（例: 「李云」と「李云龙」）で訳語が入れ替わったり混ざったりしないよう、厳密に対応させてください。\n" +
@@ -82,16 +89,36 @@ data class DictPrompts(
         "4. すべての値は自然な日本語（カタカナまたは漢字）であること。\n" +
         "5. 出力フォーマット:\n" +
         "   - 純粋なJSONのみを出力すること (解説・挨拶・コードブロック記号は一切不要)。\n\n" +
-        "Example: {\"style\":\"ハイブリッド\",\"characters\":{\"克莱恩\":\"クライン\",\"李云龙\":\"李雲龍\",\"김민준\":\"金敏俊\"}}",
+        "Example: {\"style\":\"ハイブリッド\",\"characters\":{\"克莱恩\":\"クライン\",\"奥黛丽\":\"オードリー\",\"李云\":\"李雲\",\"李云龙\":\"李雲龍\",\"黑山\":\"黒山\",\"김민준\":\"キム・ミンジュン\",\"사재혁\":\"サ・ジェヒョク\"}}",
 
     // 後方互換用エイリアス
     val review: String = translate
 )
 
+/**
+ * 辞書用プロンプトの解決（唯一の入口）。空・空白は既定文に落とす。3文独立。
+ * 技術的根拠1行：解決則の二重実装は必ず乖離するため、設定→実行文の変換はここだけに置く。
+ */
+fun resolveDictPrompts(custom: V2DictPrompts, defaults: DictPrompts = DictPrompts()): DictPrompts {
+    fun pick(raw: String, fallback: String): String {
+        val cap = TranslationLimits.MAX_DICT_PROMPT_CHARS
+        val t = if (raw.length > cap) raw.substring(0, cap) else raw
+        return t.ifBlank { fallback }
+    }
+    return DictPrompts(
+        batch = pick(custom.batch, defaults.batch),
+        merge = pick(custom.merge, defaults.merge),
+        translate = pick(custom.translate, defaults.translate)
+    )
+}
+
+/** 文面ハッシュ（台帳照合用）。先頭16桁で辞書の作り直し判定に使う。 */
+fun dictPromptsHash(prompts: DictPrompts): String =
+    sha256Hex(prompts.batch + "\n" + prompts.merge + "\n" + prompts.translate).take(16)
+
 data class DictOptions(
     val model: String = "",
     val mergeModel: String = "",
-    val thinkingLevel: String? = null,
     val maxFiles: Int = 100,
     val uniformSample: Boolean = true,
     val maxBatchBytes: Int = 100000,
@@ -101,7 +128,9 @@ data class DictOptions(
     val maxRetriesPerBatch: Int = 4,
     val mergeRetries: Int = 3,
     val reviewRetries: Int = 2,
-    val prompts: DictPrompts = DictPrompts()
+    val prompts: DictPrompts = DictPrompts(),
+    /** 文面ハッシュ。台帳照合用（呼出側が解決済み文面から算出して渡す） */
+    val promptsHash: String = ""
 )
 
 fun sha256Hex(text: String): String {
@@ -151,6 +180,7 @@ private fun decodeNovelDictFlexible(text: String, allowEmpty: Boolean): NovelDic
         val element = dictJson.parseToJsonElement(text)
         if (element !is JsonObject) return null
         val style = (element["style"] as? JsonPrimitive)?.contentOrNull ?: "カタカナ"
+        val promptsHash = (element["promptsHash"] as? JsonPrimitive)?.contentOrNull ?: ""
         val charMap = mutableMapOf<String, String>()
         val genderMap = mutableMapOf<String, String>()
         // 技術的根拠1行: charactersオブジェクト内外での同一パース処理のコピペ重複を排除し保守性を向上させる。
@@ -182,7 +212,7 @@ private fun decodeNovelDictFlexible(text: String, allowEmpty: Boolean): NovelDic
             }
         }
         if (!allowEmpty && charMap.isEmpty()) return null
-        NovelDict(style = style, characters = charMap, genders = genderMap)
+        NovelDict(style = style, characters = charMap, genders = genderMap, promptsHash = promptsHash)
     } catch (_: Exception) {
         null
     }
@@ -191,7 +221,13 @@ private fun decodeNovelDictFlexible(text: String, allowEmpty: Boolean): NovelDic
 /**
  * 原文名リスト（{"names": ["..."]}）のパース。
  * 素の配列（["..."]）や旧形式（{"characters": {...}}）も救済して原文名リストを復元する。
+ * authors欠落時（旧形式）は空扱いとする。
  */
+private fun stringListOf(element: kotlinx.serialization.json.JsonObject, key: String): List<String> {
+    val arr = element[key] as? kotlinx.serialization.json.JsonArray ?: return emptyList()
+    return arr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }.distinct()
+}
+
 fun parseExtractedNames(rawJson: String): ExtractedNames? {
     return try {
         val text = extractJsonObject(rawJson)
@@ -205,15 +241,15 @@ fun parseExtractedNames(rawJson: String): ExtractedNames? {
             val namesArr = element["names"] as? kotlinx.serialization.json.JsonArray
             if (namesArr != null) {
                 val list = namesArr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }
-                return ExtractedNames(names = list.distinct())
+                return ExtractedNames(names = list.distinct(), authors = stringListOf(element, "authors"))
             }
             val chars = element["characters"]
             if (chars is JsonObject) {
                 val list = chars.keys.map { it.trim() }.filter { it.isNotBlank() }
-                return ExtractedNames(names = list.distinct())
+                return ExtractedNames(names = list.distinct(), authors = stringListOf(element, "authors"))
             } else if (chars is kotlinx.serialization.json.JsonArray) {
                 val list = chars.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }
-                return ExtractedNames(names = list.distinct())
+                return ExtractedNames(names = list.distinct(), authors = stringListOf(element, "authors"))
             }
             // 技術的根拠1行：名簿の構造がない応答は無効とし、空辞書としての誤採用（永久キャッシュ化）を防ぐ。
             return null
@@ -250,6 +286,10 @@ fun parseNovelDict(rawJson: String): NovelDict? {
         null
     }
 }
+
+/** 確定辞書の書出し（唯一の口）。読込側（lenient含む）と形式を合わせる。 */
+fun encodeNovelDict(dict: NovelDict): String =
+    dictJson.encodeToString(NovelDict.serializer(), dict)
 
 /** 構文妥当性の判定用。人名ゼロでも有効とみなす（空辞書の完成判定に使う）。 */
 fun parseNovelDictLenient(rawJson: String): NovelDict? {
@@ -375,12 +415,14 @@ suspend fun generateDictionary(
     val manifestName = "manifest.json"
     val manifestCache = mutableMapOf<String, String>()
     var manifestModel = ""
+    var manifestPromptsHash = ""
     runCatching {
         val doc = store.findChild(workDirUri, manifestName)
         val raw = doc?.let { store.readText(it.uri) }
         if (!raw.isNullOrBlank()) {
             val parsed = dictJson.decodeFromString(DictBuildManifest.serializer(), raw)
             manifestModel = parsed.model
+            manifestPromptsHash = parsed.promptsHash
             manifestCache.putAll(parsed.batches)
         }
     }.onFailure {
@@ -407,7 +449,7 @@ suspend fun generateDictionary(
                     doc.uri,
                     dictJson.encodeToString(
                         DictBuildManifest.serializer(),
-                        DictBuildManifest(batches = manifestCache.toMap(), model = options.model)
+                        DictBuildManifest(batches = manifestCache.toMap(), model = options.model, promptsHash = options.promptsHash)
                     )
                 )
             }
@@ -417,8 +459,10 @@ suspend fun generateDictionary(
     }
     // 技術的根拠1行: manifest欠損時やエントリ不在時に古い誤キャッシュを採用しないようFail-Closed（false返却）とする。
     // 技術的根拠1行：モデル変更時は本文一致でも取り直す（別モデルの抽出結果の混用を防ぐ）。
+    // 技術的根拠1行：文面変更時も取り直す（古い文面の抽出結果の混用を防ぐ）。
     fun cacheFresh(batchFileName: String, batchText: String): Boolean {
         if (manifestModel != options.model) return false
+        if (manifestPromptsHash != options.promptsHash) return false
         val expected = manifestCache[batchFileName] ?: return false
         return expected == sha256Hex(batchText)
     }
@@ -520,7 +564,13 @@ suspend fun generateDictionary(
     }
 
     // 全バッチからの抽出人名リスト（重複排除）
-    val allExtractedNames = completed.mapNotNull { parseExtractedNames(it)?.names }.flatten().distinct()
+    val parsedBatches = completed.mapNotNull { parseExtractedNames(it) }
+    val allExtractedNames = parsedBatches.flatMap { it.names }.distinct()
+    // 技術的根拠1行：作者由来名の除外は名寄せの判断に委ねず、抽出時の区分で機械的に落とす（names優先で誤除外を防ぐ）。
+    val excludedAuthors = (parsedBatches.flatMap { it.authors }.distinct() - allExtractedNames.toSet())
+    if (excludedAuthors.isNotEmpty()) {
+        log("📖 辞書生成: 作者として除外 (${excludedAuthors.size}名: ${excludedAuthors.take(3).joinToString(",")})")
+    }
     if (allExtractedNames.isEmpty()) {
         // 技術的根拠1行：検証済みの空（全件正常・人名なし）のみ空確定し、未確定分がある場合は持ち越す（空の誤確定・永久化を防ぐ）。
         if (deterministicFailed.isEmpty() && transientFailed.isEmpty()) {
@@ -537,13 +587,15 @@ suspend fun generateDictionary(
     }
 
     // 【Step 2: 名寄せ・重複排除（マージ）】
-    // 原文表記のままで重複や略称を統合し、純粋な原文名リストを確定する（訳語がないため混ざる余地がない）。
+    // 原文表記のままで重複や·式略称を統合し、純粋な原文名リストを確定する（訳語がないため混ざる余地がない）。
+    // ·無しペアは統合せず残し、·式短形は適用時の部品展開で復元する。
     val reviewModel = options.mergeModel.ifBlank { options.model }
     val effectiveMergeRetries = options.mergeRetries.coerceIn(1, 5)
     val mergedNames: List<String> = if (completed.size == 1) {
         allExtractedNames
     } else {
-        val mergeInput = completed.mapIndexed { i, json -> "[part${i + 1}]\n$json" }.joinToString("\n\n")
+        // 技術的根拠1行：完全一致の重複は送る前に落とし、AIには曖昧な名寄せ・ノイズ除去だけさせる（送信量削減・混同防止）。
+        val mergeInput = dictJson.encodeToString(ExtractedNames.serializer(), ExtractedNames(names = allExtractedNames))
         var namesFromLlm: List<String>? = null
         for (retry in 0 until effectiveMergeRetries) {
             if (retry > 0) {
@@ -572,8 +624,13 @@ suspend fun generateDictionary(
 
     // 【Step 3: 命名・翻訳・レビュー（一括日本語付与）】
     // 確定した原文名一覧を受け取り、世界観判定とスタイル統一を行って正確な日本語訳を付与する。
+    // 技術的根拠1行：1字名は一般語に誤爆するため登録しない（文面迂回の単一バッチ経路もここで閉じる）。
+    val registrableNames = mergedNames.filter { it.length >= 2 }
+    if (registrableNames.size < mergedNames.size) {
+        log("📖 辞書名寄せ: 1字の名前を${mergedNames.size - registrableNames.size}件除外します")
+    }
     val effectiveTranslateRetries = options.reviewRetries.coerceIn(1, 5)
-    val translateInput = dictJson.encodeToString(ExtractedNames.serializer(), ExtractedNames(names = mergedNames))
+    val translateInput = dictJson.encodeToString(ExtractedNames.serializer(), ExtractedNames(names = registrableNames))
     var translatedDict: NovelDict? = null
     var sawNonJapanese = false
 
@@ -581,7 +638,7 @@ suspend fun generateDictionary(
         if (retry > 0) {
             log("  🔄 辞書命名・翻訳: 再試行[$retry/$effectiveTranslateRetries]")
         } else {
-            log("🔍 辞書命名・翻訳: 実行中（${mergedNames.size}名）...")
+            log("🔍 辞書命名・翻訳: 実行中（${registrableNames.size}名）...")
         }
         when (val r = call(reviewModel, options.prompts.translate, translateInput)) {
             is LlmResult.Success -> {

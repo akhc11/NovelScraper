@@ -99,7 +99,8 @@ fun RunningTasksList(tasks: List<ScrapingTask>, onStopTaskClick: (ScrapingTask) 
     ) {
         items(
             items = tasks,
-            key = { it.currentUrl.ifEmpty { it.folderName } },
+            // currentUrlは巡回で変化するため、不変のstartUrlをキーにする（行の再生成防止）。
+            key = { it.startUrl.ifEmpty { it.folderName } },
             contentType = { "running_task" }
         ) { task ->
             RunningTaskRow(task = task, onStopClick = { onStopTaskClick(task) })

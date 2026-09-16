@@ -17,8 +17,11 @@ import com.example.novelscraper.translation.v2.infra.VDoc
 import com.example.novelscraper.translation.v2.pipeline.DictOptions
 import com.example.novelscraper.translation.v2.pipeline.NovelDict
 import com.example.novelscraper.translation.v2.pipeline.cleanseBasic
+import com.example.novelscraper.translation.v2.pipeline.dictPromptsHash
+import com.example.novelscraper.translation.v2.pipeline.encodeNovelDict
 import com.example.novelscraper.translation.v2.pipeline.generateDictionary
 import com.example.novelscraper.translation.v2.pipeline.parseNovelDictLenient
+import com.example.novelscraper.translation.v2.pipeline.resolveDictPrompts
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import kotlinx.coroutines.CancellationException
@@ -42,6 +45,11 @@ class DictionaryBuilder(
     ): NovelDict? {
         return try {
             val dict = settings.dict
+            // 技術的根拠1行：辞書は利用者指定モデルのみ使用し、未指定時は中断する（詳細設定外モデルの勝手な使用を防ぐ）。
+            if (dict.model.isBlank()) {
+                log("❌ 辞書モデル未設定のため中断しました（辞書有効時は辞書モデル必須）")
+                return null
+            }
             val workDir = store.findChild(folderUri, ".dict_building")
                 ?: store.createDir(folderUri, ".dict_building")
                 ?: run {
@@ -51,12 +59,13 @@ class DictionaryBuilder(
             // 技術的根拠: 1,000ファイル超の長編小説フォルダでメモリ枯渇（OOM）を起こさないよう、
             // ファイル名だけ先に渡し、本文はサンプリング後に1件ずつ遅延読込する
             val docByName = files.associateBy { it.name }
-            // 技術的根拠1行：辞書モデル未指定時にプロファイルのモデルへ安全にフォールバックし、空文字送信による400/404エラー即死を防ぐ。
-            val effectiveModel = dict.model.ifBlank {
-                settings.profiles.firstOrNull()?.model?.ifBlank { null } ?: "gemini-3.5-flash"
-            }
+            // 技術的根拠1行：マージ空欄は辞書モデルと同一扱い（UI表記通り）。辞書モデル自体のフォールバックはしない。
+            val effectiveModel = dict.model
             val effectiveMergeModel = dict.mergeModel.ifBlank { effectiveModel }
-            val scopes = listOf(effectiveModel)
+            // 技術的根拠1行：辞書文面の所有権は設定に、解決は純粋関数に寄せ、生成部は解決済み文面だけ使う。
+            val resolvedPrompts = resolveDictPrompts(dict.dictPrompts)
+            val resolvedPromptsHash = dictPromptsHash(resolvedPrompts)
+            // 技術的根拠1行：抽出・マージで送信用モデルが違う場合があるため、待機・枯渇の照合は送ったモデル毎に行う（固定スコープでの誤報告を防ぐ）。
             // 技術的根拠1行：OpenRouterは単一キー共有でGeminiプールを使わない（空プールでの誤枯渇を防ぐ。送って作って統合するだけ）。
             val dictCall: suspend (String, String, String) -> LlmResult = { model, prompt, text ->
                 // 技術的根拠1行：辞書設定のproviderOrder/allowFallbacksが無視されるとOpenRouterの振分け指定が死に設定になるため引継ぐ（解決はhandlerFor側）。
@@ -96,7 +105,7 @@ class DictionaryBuilder(
                         LlmResult.Failure(ClassifiedFailure(FailureKind.RETRYABLE_AFTER, note = "io:${e.message}"))
                     }
                 } else {
-                    pooledCall(pool, scopes, settings.dict.cooldown429Sec, settings.dict.requestDelaySec) { key ->
+                    pooledCall(pool, listOf(model), settings.dict.cooldown429Sec, settings.dict.requestDelaySec) { key ->
                         buildHandler(settings, profile, key).call(dictRequest(key))
                     }
                 }
@@ -113,7 +122,6 @@ class DictionaryBuilder(
                 DictOptions(
                     model = effectiveModel,
                     mergeModel = effectiveMergeModel,
-                    thinkingLevel = dict.thinkingLevel,
                     maxFiles = dict.totalParts,
                     maxBatchBytes = dict.batchMaxBytes,
                     maxTotalScanBytes = dict.maxTotalScanBytes,
@@ -121,12 +129,14 @@ class DictionaryBuilder(
                         TranslationLimits.DICT_PARALLELISM_RANGE.first,
                         TranslationLimits.DICT_PARALLELISM_RANGE.last
                     ),
-                    maxRetriesPerBatch = 4
+                    maxRetriesPerBatch = 4,
+                    prompts = resolvedPrompts,
+                    promptsHash = resolvedPromptsHash
                 ),
                 log = log
             )
             if (result != null) {
-                publish(folderUri, workDir.uri)
+                publish(folderUri, workDir.uri, resolvedPromptsHash)
             }
             result
         } catch (e: CancellationException) {
@@ -138,20 +148,22 @@ class DictionaryBuilder(
     }
 
     /**
-     * 確定物の公開：作業所の dictionary.json をフォルダ直下へ写し、作業所を掃除する。
-     * 技術的根拠1行：読込点（folder/dictionary.json）と保存点（.dict_building下）の不一致では
-     * 次回も再生成になるため、確定時のみ公開＋掃除する（凍結仕様§8。保留時は再開用に残す）。
+     * 確定物の公開：作業所の dictionary.json に文面ハッシュを刻んでフォルダ直下へ写し、作業所を掃除する。
+     * 技術的根拠1行：文面変更時の使い回しを防ぐため、確定物自体に生成文面の版を持たせる。
      */
-    suspend fun publish(folderUri: String, workDirUri: String) {
+    suspend fun publish(folderUri: String, workDirUri: String, promptsHash: String = "") {
         try {
             val finalized = store.findChild(workDirUri, "dictionary.json")?.let { store.readText(it.uri) }
             if (finalized.isNullOrBlank()) {
                 log("📖 辞書公開: 確定物がないため作業所を残します")
                 return
             }
+            val stamped = parseDictJson(finalized)?.copy(promptsHash = promptsHash)?.let {
+                encodeNovelDict(it)
+            } ?: finalized
             val dest = store.findChild(folderUri, "dictionary.json")
                 ?: store.createFile(folderUri, "dictionary.json", "application/json")
-            if (dest == null || !store.writeText(dest.uri, finalized)) {
+            if (dest == null || !store.writeText(dest.uri, stamped)) {
                 log("📖 辞書公開: 書込失敗のため作業所を残します")
                 return
             }

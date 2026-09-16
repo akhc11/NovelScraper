@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.novelscraper.translation.v2.domain.ProviderRegistry
 import com.example.novelscraper.translation.v2.domain.V2_ENCODING_OPTIONS
+import com.example.novelscraper.translation.v2.pipeline.DEFAULT_REFINE_PROMPT
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import com.example.novelscraper.translation.v2.settings.V2SizeRatios
 import com.example.novelscraper.ui.theme.AppColors
@@ -36,6 +37,8 @@ class V2CommonTabState(
     val splitEncoding: MutableState<String>,
     val prevEnabled: MutableState<Boolean>,
     val prevLines: MutableState<String>,
+    val refineEnabled: MutableState<Boolean>,
+    val refinePrompt: MutableState<String>,
     val sizeRatioZhMinText: MutableState<String>,
     val sizeRatioZhMaxText: MutableState<String>,
     val sizeRatioKoMinText: MutableState<String>,
@@ -100,6 +103,10 @@ class V2CommonTabState(
                 enabled = prevEnabled.value,
                 lines = prevLines.value.toIntOrNull() ?: base.prevContext.lines
             ),
+            refine = base.refine.copy(
+                enabled = refineEnabled.value,
+                prompt = refinePrompt.value
+            ),
             sizeRatios = V2SizeRatios(
                 zhMin = sizeRatioZhMinText.value.toIntOrNull() ?: base.sizeRatios.zhMin,
                 zhMax = sizeRatioZhMaxText.value.toIntOrNull() ?: base.sizeRatios.zhMax,
@@ -134,6 +141,8 @@ class V2CommonTabState(
                 splitEncoding = mutableStateOf(initial.split.inputEncoding),
                 prevEnabled = mutableStateOf(initial.prevContext.enabled),
                 prevLines = mutableStateOf(initial.prevContext.lines.toString()),
+                refineEnabled = mutableStateOf(initial.refine.enabled),
+                refinePrompt = mutableStateOf(initial.refine.prompt),
                 sizeRatioZhMinText = mutableStateOf(initial.sizeRatios.zhMin.toString()),
                 sizeRatioZhMaxText = mutableStateOf(initial.sizeRatios.zhMax.toString()),
                 sizeRatioKoMinText = mutableStateOf(initial.sizeRatios.koMin.toString()),
@@ -355,6 +364,29 @@ internal fun V2CommonTab(
             }
             Text("行", color = AppColors.textSecondary, fontSize = 9.sp)
         }
+    }
+
+    Spacer(modifier = Modifier.height(2.dp))
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Checkbox(checked = state.refineEnabled.value, onCheckedChange = { state.refineEnabled.value = it })
+        Text("最終推敲（訳文の磨き直し・1回のみ）", color = AppColors.textPrimary, fontSize = 10.sp)
+    }
+    if (state.refineEnabled.value) {
+        Spacer(modifier = Modifier.height(2.dp))
+        Text("※ 空欄で既定文を使用。不合格時は初回訳文を採用します", color = AppColors.textTertiary, fontSize = 9.sp)
+        Spacer(modifier = Modifier.height(4.dp))
+        V2InputArea(
+            value = state.refinePrompt.value,
+            onValueChange = { state.refinePrompt.value = it },
+            minLines = 6,
+            maxLines = 10
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text("▼ 既定文（参考・このままでは送信されません）", color = AppColors.textTertiary, fontSize = 9.sp)
+        Text(DEFAULT_REFINE_PROMPT, color = AppColors.textSecondary, fontSize = 9.sp)
     }
 
     Spacer(modifier = Modifier.height(8.dp))

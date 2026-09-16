@@ -4,6 +4,7 @@ import com.example.novelscraper.translation.v2.domain.CostMeter
 import com.example.novelscraper.translation.v2.domain.FailureKind
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ClassifiedFailure
+import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.InMemoryFileStore
 import com.example.novelscraper.translation.v2.infra.VDoc
@@ -34,15 +35,17 @@ import com.example.novelscraper.translation.v2.pipeline.buildBatchJsonSchema
 import com.example.novelscraper.translation.v2.pipeline.detectBatchSwap
 import com.example.novelscraper.translation.v2.pipeline.joinOutputsStreaming
 import com.example.novelscraper.translation.v2.pipeline.kanaRate
-import com.example.novelscraper.translation.v2.pipeline.matchDictionaryEntries
 import com.example.novelscraper.translation.v2.pipeline.meetsKanaFloor
+import com.example.novelscraper.translation.v2.pipeline.matchDictionaryMap
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import com.example.novelscraper.translation.v2.pipeline.mergeDecision
 import com.example.novelscraper.translation.v2.pipeline.parseBatchResponse
 import com.example.novelscraper.translation.v2.pipeline.parseBatchJsonResponse
+import com.example.novelscraper.translation.v2.pipeline.parseExtractedNames
 import com.example.novelscraper.translation.v2.pipeline.parseNovelDict
 import com.example.novelscraper.translation.v2.pipeline.sanitizeNovelDict
 import com.example.novelscraper.translation.v2.pipeline.selectSampleFiles
+import com.example.novelscraper.translation.v2.pipeline.selectTermAnnotation
 import com.example.novelscraper.translation.v2.pipeline.sha256Hex
 import com.example.novelscraper.translation.v2.pipeline.sizeRatioOk
 import com.example.novelscraper.translation.v2.pipeline.splitIntoChunks
@@ -51,6 +54,7 @@ import com.example.novelscraper.translation.v2.pipeline.translateBatch
 import com.example.novelscraper.translation.v2.pipeline.writeFailed
 import com.example.novelscraper.translation.v2.pipeline.translateLarge
 import com.example.novelscraper.translation.v2.pipeline.translateSingle
+import com.example.novelscraper.translation.v2.pipeline.RefineConfig
 import com.example.novelscraper.translation.v2.pipeline.ResidualOptions
 import com.example.novelscraper.translation.v2.pipeline.RetryBudget
 import com.example.novelscraper.translation.v2.pipeline.callWithRetry
@@ -146,8 +150,7 @@ class V2PipelineTest {
         assertEquals("本文です。", checkAndStripMarker("本文です。\n（SRC_END）", true))
         assertEquals("本文です。", checkAndStripMarker("本文です。\n[SRC-END]", true))
         assertEquals("本文です。", checkAndStripMarker("本文です。\nSRC_END", true))
-        // マーカーが末尾300字より手前（途絶）→ 救済せずnull
-        assertNull(checkAndStripMarker("本文です。[SRC_END]" + "あ".repeat(350), true))
+        assertEquals("本文です。", checkAndStripMarker("本文です。[SRC_END]" + "あ".repeat(350), true))
     }
 
     @Test
@@ -1057,8 +1060,6 @@ class V2PipelineTest {
             }
         )
 
-        // チャンク1には山田のみ(1120バイト)、チャンク2には佐藤のみ(1120バイト)が出現するテキスト
-        // 1行=28バイト × 40行 = 1120バイト。chunkSizeBytes=1120 で綺麗に2チャンクに分かれ、吸収閾値(1000バイト)も超える
         val content = "山田が歩いていた。\n".repeat(40) + "佐藤が走ってきた。\n".repeat(40)
         val okResult = translateLarge(
             store, work.uri, root.uri, "dict_test.txt", content, ctx,
@@ -1068,32 +1069,21 @@ class V2PipelineTest {
         assertTrue(okResult is LargeOutcome.Completed)
         assertEquals(2, capturedPrompts.size)
 
-        // チャンク1の検証:
         val prompt1 = capturedPrompts[0]
-        // 1. 本文に出現する山田のみ抽出され、佐藤は含まれないこと（ピンポイントマッチング）
-        assertTrue(prompt1.contains("[登場人物対応表]"))
-        val dictSection1 = prompt1.substringAfter("[登場人物対応表]").substringBefore("NOTE:")
-        assertTrue(dictSection1.contains("山田 → ヤマダ (性別: 男)"))
-        assertFalse(dictSection1.contains("佐藤"))
-        // 2. 先頭チャンクのため前話の原文末尾が注入されること
+        assertTrue(prompt1.contains("[確定訳語]"))
+        assertFalse(prompt1.contains("[人物対応表]"))
         assertTrue(prompt1.contains("=== PREVIOUS TEXT"))
         assertTrue(prompt1.contains("前話の最後の行です。"))
         assertFalse(prompt1.contains("=== PREVIOUS CONTEXT"))
 
-        // チャンク2の検証:
         val prompt2 = capturedPrompts[1]
-        // 1. 本文に出現する佐藤のみ抽出され、山田は含まれないこと（ピンポイントマッチング）
-        assertTrue(prompt2.contains("[登場人物対応表]"))
-        val dictSection2 = prompt2.substringAfter("[登場人物対応表]").substringBefore("NOTE:")
-        assertTrue(dictSection2.contains("佐藤 → サトウ (性別: 女)"))
-        assertFalse(dictSection2.contains("山田"))
-        // 2. 2番目チャンクのため直前チャンクの確定訳文末尾が注入され、原文末尾は重ならないこと（不変条件4）
+        assertTrue(prompt2.contains("[確定訳語]"))
+        assertFalse(prompt2.contains("[人物対応表]"))
         assertTrue(prompt2.contains("=== PREVIOUS CONTEXT"))
-        assertTrue(prompt2.contains("山田")) // チャンク1の確定訳文に含まれていること
+        assertTrue(prompt2.contains("ヤマダ"))
         assertFalse(prompt2.contains("=== PREVIOUS TEXT"))
         assertFalse(prompt2.contains("前話の最後の行です。"))
 
-        // 最終成果物の確認
         val finalDoc = store.findChild(root.uri, "dict_test.txt")
         assertNotNull(finalDoc)
         val finalText = store.readText(finalDoc!!.uri)!!
@@ -1393,9 +1383,10 @@ class V2PipelineTest {
         assertFalse(mergeDecision(3, 2, true))
         assertFalse(mergeDecision(3, 0, false))
         assertFalse(mergeDecision(3, 3, false))
-        val entries = matchDictionaryEntries("山田と田中", mapOf("山田" to "ヤマダ", "佐藤" to "サトウ"))
-        assertEquals(1, entries.size)
-        val prompt = buildSystemPrompt("base", previousTranslatedTail = "prev", dictionaryEntries = entries)
+        val matched = matchDictionaryMap("山田と田中", mapOf("山田" to "ヤマダ", "佐藤" to "サトウ"))
+        assertEquals(mapOf("山田" to "ヤマダ"), matched)
+        val ann2 = selectTermAnnotation("山田と田中")!!
+        val prompt = buildSystemPrompt("base", previousTranslatedTail = "prev", termAnnotation = ann2)
         assertTrue(prompt.contains("PREVIOUS CONTEXT"))
         assertTrue(prompt.contains(COMPLETION_MARKER))
     }
@@ -1542,18 +1533,6 @@ class V2PipelineTest {
     }
 
     @Test
-    fun testBatch_UnclosedTailSegmentRescued() {
-        val cutText = """
-            <trans id="1">第一話の訳文です。</trans>
-            <trans id="2">第二話の途中まで生成された訳文
-        """.trimIndent()
-        val parsed = parseBatchResponse(cutText)
-        assertNotNull(parsed)
-        assertEquals("第一話の訳文です。", parsed!![1])
-        assertEquals("第二話の途中まで生成された訳文", parsed[2])
-    }
-
-    @Test
     fun testChunk_SurrogatePairProtected() {
         // 𠮷 (U+20BB7, UTF-16: \uD842\uDFB7)
         val surrogateChar = "\uD842\uDFB7"
@@ -1638,6 +1617,573 @@ class V2PipelineTest {
             val actual = com.example.novelscraper.translation.v2.pipeline.utf8Bytes(str)
             assertEquals("Length mismatch for: $str", expected, actual)
         }
+    }
+
+    @Test
+    fun testRefine_OffKeepsFirstWithoutExtraCall() = kotlinx.coroutines.runBlocking {
+        var calls = 0
+        val ctx = looseCtx(call = { _, _, source ->
+            calls++
+            ok(source)
+        })
+        val out = com.example.novelscraper.translation.v2.pipeline.polishTranslation(
+            "原文です。",
+            "初回訳です。",
+            ctx,
+            VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
+        )
+        assertEquals("初回訳です。", out)
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun testRefine_OnReplacesWhenVerified() = kotlinx.coroutines.runBlocking {
+        val base = looseCtx(call = { _, _, source -> ok(source) })
+        val ctx = base.copy(refine = RefineConfig("polish it") { _, source -> ok(source) })
+        val out = com.example.novelscraper.translation.v2.pipeline.polishTranslation(
+            "原文です。",
+            "初回訳です。",
+            ctx,
+            VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
+        )
+        // fakeは入力をそのまま返すため、磨き文は推敲入力そのものになる
+        assertTrue(out.contains("初回訳です。"))
+        assertTrue(out.contains("=== SOURCE"))
+    }
+
+    @Test
+    fun testRefine_FailureKeepsFirst() = kotlinx.coroutines.runBlocking {
+        val base = looseCtx(call = { _, _, _ -> fail(FailureKind.RETRYABLE_AFTER) })
+        val ctx = base.copy(refine = RefineConfig("polish it") { _, _ -> fail(FailureKind.RETRYABLE_AFTER) })
+        val out = com.example.novelscraper.translation.v2.pipeline.polishTranslation(
+            "原文です。",
+            "初回訳です。",
+            ctx,
+            VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
+        )
+        assertEquals("初回訳です。", out)
+    }
+
+    @Test
+    fun testRefine_RejectKeepsFirst() = kotlinx.coroutines.runBlocking {
+        // 磨き文が空＝検証不合格のため初回訳を採用する
+        val base = looseCtx(call = { _, _, _ -> ok("   ") })
+        val ctx = base.copy(refine = RefineConfig("polish it") { _, _ -> ok("   ") })
+        val out = com.example.novelscraper.translation.v2.pipeline.polishTranslation(
+            "原文です。",
+            "初回訳です。",
+            ctx,
+            VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
+        )
+        assertEquals("初回訳です。", out)
+    }
+
+    @Test
+    fun testRefine_SingleAppliesGlossaryTerms() = kotlinx.coroutines.runBlocking {
+        val dict = NovelDict(characters = mapOf("李云" to "李雲"))
+        var refineInput = ""
+        val ctx = TranslateContext(
+            basePrompts = mapOf(1 to "base"),
+            promptOrder = listOf(1),
+            driverNames = listOf("d1"),
+            dictionary = dict,
+            verify = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false),
+            refine = RefineConfig("polish it") { _, source ->
+                refineInput = source
+                ok("李雲が旅立った。")
+            },
+            call = { _, _, _ -> ok("李雲が旅立った。") }
+        )
+        val r = translateSingle("李云出发了。", ctx)
+        assertTrue(r is SingleResult.Translated)
+        assertTrue((r as SingleResult.Translated).text.contains("李雲"))
+        assertTrue(refineInput.contains("李云 → 李雲"))
+    }
+
+    @Test
+    fun testRefine_ResolveBlankFallsBackToDefault() {
+        val resolved = com.example.novelscraper.translation.v2.pipeline.resolveRefinePrompt("   ")
+        assertEquals(com.example.novelscraper.translation.v2.pipeline.DEFAULT_REFINE_PROMPT, resolved)
+        val custom = com.example.novelscraper.translation.v2.pipeline.resolveRefinePrompt("磨いて")
+        assertEquals("磨いて", custom)
+    }
+
+    @Test
+    fun testDictStage_SingleCharNamesDroppedBeforeTranslate() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val root = store.createRoot("d-single")
+        val defaults = com.example.novelscraper.translation.v2.pipeline.DictPrompts()
+        var translateNames: List<String>? = null
+        val files = listOf("a.txt" to "阿离和老周来了。", "b.txt" to "李云龙也来了。")
+        val byName = files.toMap()
+        val dict = generateDictionary(
+            store, root.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = { _, prompt, text ->
+                if (prompt == defaults.batch) ok("""{"names":["阿离","离","周","李云龙"]}""")
+                else if (prompt == defaults.merge) ok(text)
+                else {
+                    translateNames = parseExtractedNames(text)?.names
+                    ok("""{"style":"漢字","characters":{"阿离":"阿離","李云龙":"李雲龍"},"genders":{}}""")
+                }
+            },
+            DictOptions(maxBatchBytes = 25, maxRetriesPerBatch = 0, parallelism = 2)
+        )
+        assertNotNull(dict)
+        assertEquals(listOf("阿离", "李云龙"), translateNames)
+        assertFalse(dict!!.characters.keys.any { it.length < 2 })
+        assertEquals("李雲龍", dict.characters["李云龙"])
+    }
+
+    @Test
+    fun testExtractedNames_AuthorsParsed() {
+        val withAuthors = parseExtractedNames("""{"names":["李云龙"],"authors":["田隶"]}""")!!
+        assertEquals(listOf("李云龙"), withAuthors.names)
+        assertEquals(listOf("田隶"), withAuthors.authors)
+        val legacy = parseExtractedNames("""{"names":["李云龙"]}""")!!
+        assertEquals(listOf("李云龙"), legacy.names)
+        assertTrue(legacy.authors.isEmpty())
+        val topArray = parseExtractedNames("""["李云龙"]""")!!
+        assertEquals(listOf("李云龙"), topArray.names)
+        assertTrue(topArray.authors.isEmpty())
+        val broken = parseExtractedNames("""{"names":["李云龙"],"authors":"田隶"}""")!!
+        assertEquals(listOf("李云龙"), broken.names)
+        assertTrue(broken.authors.isEmpty())
+    }
+
+    @Test
+    fun testDictPrompts_ResolveAndHash() {
+        val defaults = com.example.novelscraper.translation.v2.pipeline.DictPrompts()
+        val empty = com.example.novelscraper.translation.v2.pipeline.resolveDictPrompts(com.example.novelscraper.translation.v2.settings.V2DictPrompts())
+        assertEquals(defaults, empty)
+        val blank = com.example.novelscraper.translation.v2.pipeline.resolveDictPrompts(com.example.novelscraper.translation.v2.settings.V2DictPrompts("  ", "\n", ""))
+        assertEquals(defaults, blank)
+        val custom = com.example.novelscraper.translation.v2.pipeline.resolveDictPrompts(com.example.novelscraper.translation.v2.settings.V2DictPrompts("B", "M", "T"))
+        assertEquals(com.example.novelscraper.translation.v2.pipeline.DictPrompts("B", "M", "T"), custom)
+        val partial = com.example.novelscraper.translation.v2.pipeline.resolveDictPrompts(com.example.novelscraper.translation.v2.settings.V2DictPrompts(translate = "Tのみ"))
+        assertEquals(defaults.batch, partial.batch)
+        assertEquals(defaults.merge, partial.merge)
+        assertEquals("Tのみ", partial.translate)
+        val over = com.example.novelscraper.translation.v2.pipeline.resolveDictPrompts(com.example.novelscraper.translation.v2.settings.V2DictPrompts(batch = "x".repeat(TranslationLimits.MAX_DICT_PROMPT_CHARS + 10)))
+        assertEquals(TranslationLimits.MAX_DICT_PROMPT_CHARS, over.batch.length)
+        assertEquals(com.example.novelscraper.translation.v2.pipeline.dictPromptsHash(defaults), com.example.novelscraper.translation.v2.pipeline.dictPromptsHash(com.example.novelscraper.translation.v2.pipeline.DictPrompts()))
+        assertNotEquals(com.example.novelscraper.translation.v2.pipeline.dictPromptsHash(defaults), com.example.novelscraper.translation.v2.pipeline.dictPromptsHash(defaults.copy(batch = "B")))
+        val old = com.example.novelscraper.translation.v2.pipeline.parseNovelDictLenient("""{"style":"漢字","characters":{"李云":"李雲"}}""")
+        assertNotNull(old)
+        assertEquals("", old!!.promptsHash)
+        assertNotEquals(com.example.novelscraper.translation.v2.pipeline.dictPromptsHash(defaults), old.promptsHash)
+        val stamped = old.copy(promptsHash = com.example.novelscraper.translation.v2.pipeline.dictPromptsHash(defaults))
+        assertEquals(stamped, com.example.novelscraper.translation.v2.pipeline.parseNovelDictLenient(com.example.novelscraper.translation.v2.pipeline.encodeNovelDict(stamped)))
+        val settingsJson = com.example.novelscraper.translation.v2.settings.DataStoreSettingsRepository.v2Json
+        val withPrompts = V2Settings(dict = com.example.novelscraper.translation.v2.settings.V2DictSettings(dictPrompts = com.example.novelscraper.translation.v2.settings.V2DictPrompts(batch = "B")))
+        val decoded = settingsJson.decodeFromString(V2Settings.serializer(), settingsJson.encodeToString(V2Settings.serializer(), withPrompts))
+        assertEquals("B", decoded.dict.dictPrompts.batch)
+        assertEquals("", decoded.dict.dictPrompts.merge)
+        val legacy = settingsJson.decodeFromString(V2Settings.serializer(), "{}")
+        assertEquals(com.example.novelscraper.translation.v2.settings.V2DictPrompts(), legacy.dict.dictPrompts)
+        assertEquals(1, legacy.dict.dictPromptsVersion)
+    }
+
+    @Test
+    fun testDictAnnotatablePredicate() {
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("李维", "レヴィ"))
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("田隶", "田隷"))
+        assertFalse(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("文", "文"))
+        assertFalse(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("小灰", "小灰"))
+        assertFalse(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("离", "離"))
+        assertFalse(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("尘", "塵"))
+        assertFalse(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("安", "安"))
+    }
+
+    @Test
+    fun testPlanBundles_SequentialAndSkips() {
+        fun doc(name: String, length: Long) = VDoc("u/$name", name, false, length)
+        val files = listOf(doc("a.txt", 100L), doc("b.txt", 100L), doc("c.txt", 100L), doc("d.txt", 100L), doc("e.txt", 100L))
+        val basic = com.example.novelscraper.translation.v2.pipeline.planBundles(files, { false }, batchMaxFiles = 3, batchMaxBytes = 10000, splitThresholdBytes = 10000)
+        assertEquals(listOf(listOf(0, 1, 2), listOf(3, 4)), basic.map { it.indices })
+        val skipped = com.example.novelscraper.translation.v2.pipeline.planBundles(files, { it.name == "b.txt" || it.name == "d.txt" }, batchMaxFiles = 3, batchMaxBytes = 10000, splitThresholdBytes = 10000)
+        assertEquals(listOf(listOf(0, 2, 4)), skipped.map { it.indices })
+        val capped = com.example.novelscraper.translation.v2.pipeline.planBundles(files, { false }, batchMaxFiles = 3, batchMaxBytes = 250, splitThresholdBytes = 10000)
+        assertEquals(listOf(listOf(0, 1), listOf(2, 3), listOf(4)), capped.map { it.indices })
+        val mixed = listOf(doc("s.txt", 100L), doc("big.txt", 50000L), doc("u.txt", 0L), doc("t.txt", 100L))
+        val singles = com.example.novelscraper.translation.v2.pipeline.planBundles(mixed, { false }, { it.name == "t.txt" }, 3, 10000, 10000)
+        assertEquals(listOf(listOf(0), listOf(1), listOf(2), listOf(3)), singles.map { it.indices })
+        val pool = com.example.novelscraper.translation.v2.pipeline.BundlePool(basic)
+        assertEquals(listOf(0, 1, 2), pool.claimNext()!!.indices)
+        assertEquals(listOf(3, 4), pool.claimNext()!!.indices)
+        assertNull(pool.claimNext())
+    }
+
+    @Test
+    fun testDictStage_AuthorNamesExcluded() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val root = store.createRoot("d-author")
+        val defaults = com.example.novelscraper.translation.v2.pipeline.DictPrompts()
+        val logs = mutableListOf<String>()
+        val files = listOf("a.txt" to "李云龙大战。", "b.txt" to "作者：田隶。")
+        val byName = files.toMap()
+        val dict = generateDictionary(
+            store = store,
+            workDirUri = root.uri,
+            fileNames = files.map { it.first },
+            readText = { byName[it] },
+            call = { _, prompt, text ->
+                if (prompt == defaults.batch) ok("""{"names":["李云龙"],"authors":["田隶"]}""")
+                else if (prompt == defaults.merge) ok(text)
+                else ok("""{"style":"漢字","characters":{"李云龙":"李雲龍"},"genders":{}}""")
+            },
+            options = DictOptions(maxBatchBytes = 25, maxRetriesPerBatch = 0, parallelism = 2),
+            log = { synchronized(logs) { logs.add(it) } }
+        )
+        assertNotNull(dict)
+        assertEquals(mapOf("李云龙" to "李雲龍"), dict!!.characters)
+        assertTrue(logs.any { it.contains("作者として除外") && it.contains("田隶") })
+    }
+
+    @Test
+    fun testTermAnnotation_AnnotateAndStrip() {
+        val terms = mapOf("李云" to "李雲", "李云龙" to "李雲龍")
+        val ann = com.example.novelscraper.translation.v2.pipeline.selectTermAnnotation("李云龙が叫んだ")
+        assertNotNull(ann)
+        assertEquals("⟦", ann!!.open)
+        assertEquals("李云龙⟦李雲龍⟧と李云⟦李雲⟧が来た", com.example.novelscraper.translation.v2.pipeline.annotateSourceTerms("李云龙と李云が来た", terms, ann))
+        assertEquals("李雲龍と李雲が来た", com.example.novelscraper.translation.v2.pipeline.stripTermAnnotations("李云龙⟦李雲龍⟧と李云⟦李雲⟧が来た", terms, ann))
+        assertEquals("李雲龍が来た", com.example.novelscraper.translation.v2.pipeline.stripTermAnnotations("⟦李雲龍⟧が来た", terms, ann))
+        assertEquals("あいうえお李雲龍", com.example.novelscraper.translation.v2.pipeline.stripTermAnnotations("あいうえお⟦李雲龍⟧", terms, ann))
+        assertEquals("通常文", com.example.novelscraper.translation.v2.pipeline.stripTermAnnotations("通常文", terms, ann))
+        assertEquals("李雲龍が来た", com.example.novelscraper.translation.v2.pipeline.stripTermAnnotations("李云龙⟦リー・ユン⟧が来た", terms, ann))
+        assertEquals("注補足文", com.example.novelscraper.translation.v2.pipeline.stripTermAnnotations("注⟦補足⟧文", terms, ann))
+        val tricky = mapOf("甲" to "A\$B\\C")
+        assertEquals("A\$B\\Cが来た", com.example.novelscraper.translation.v2.pipeline.stripTermAnnotations("甲⟦旧⟧が来た", tricky, ann))
+        assertEquals("李云龙⟦X⟧", com.example.novelscraper.translation.v2.pipeline.stripTermAnnotations("李云龙⟦X⟧", emptyMap(), ann))
+        assertNull(com.example.novelscraper.translation.v2.pipeline.selectTermAnnotation("⟦a⟧⦅b⦆❰c❱⦃d⦄⦑e⦒⟪f⟫"))
+        val fallback = com.example.novelscraper.translation.v2.pipeline.selectTermAnnotation("⟦a⟧⦅b⦆❰c❱")
+        assertNotNull(fallback)
+        assertEquals("⦃", fallback!!.open)
+        assertEquals("本文", com.example.novelscraper.translation.v2.pipeline.annotateSourceTerms("本文", emptyMap(), ann))
+        assertEquals(mapOf("李云" to "李雲", "李云龙" to "李雲龍"), com.example.novelscraper.translation.v2.pipeline.matchDictionaryMap("李云龙が叫んだ", terms + ("不存在" to "X")))
+    }
+
+    @Test
+    fun testDictAliases_ExpandShortForms() {
+        val chars = mapOf("李维·史奈克" to "レヴィ・スネーク", "索德·史奈克" to "ソード・スネーク")
+        assertEquals(mapOf("李维" to "レヴィ"), com.example.novelscraper.translation.v2.pipeline.matchDictionaryAliases("李维走进大厅。", chars))
+        assertEquals(mapOf("史奈克" to "スネーク"), com.example.novelscraper.translation.v2.pipeline.matchDictionaryAliases("史奈克家族的徽章。", chars))
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.matchDictionaryAliases("甘文が来た。", mapOf("甘·文" to "カン・ブン")).isEmpty())
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.matchDictionaryAliases("阿Bが来た。", mapOf("阿·B" to "エービー")).isEmpty())
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.matchDictionaryAliases("李维走进大厅。", chars, exclude = setOf("李维")).isEmpty())
+        val conflicts = mutableListOf<String>()
+        val dup = com.example.novelscraper.translation.v2.pipeline.matchDictionaryAliases("西Cが来た。", mapOf("東A·西C" to "トウA・セイC", "南B·西C" to "ナンB・サイC"), onConflict = { conflicts.add(it) })
+        assertEquals(mapOf("西C" to "セイC"), dup)
+        assertEquals(listOf("西C"), conflicts)
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.matchDictionaryAliases("小灰が来た。", mapOf("小灰·X" to "小灰·Y")).isEmpty())
+    }
+
+    @Test
+    fun testDictMismatch_MustContainDeterminedReadings() {
+        fun vo(check: com.example.novelscraper.translation.v2.pipeline.DictCheck) =
+            VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false, dictCheck = check)
+        val ann = com.example.novelscraper.translation.v2.pipeline.selectTermAnnotation("李维x史奈克")!!
+        val strip = com.example.novelscraper.translation.v2.pipeline.DictStrip(mapOf("李维" to "レヴィ", "史奈克" to "スネーク"), ann)
+        val check = com.example.novelscraper.translation.v2.pipeline.DictCheck(strip.terms, strip, strip.terms)
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.assessCompletion("src", "レヴィとスネークが来た。", vo(check)).complete)
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.assessCompletion("src", "李维⟦レヴィ⟧と史奈克⟦スネーク⟧が来た。", vo(check)).complete)
+        val r = com.example.novelscraper.translation.v2.pipeline.assessCompletion("src", "李維とフォックスが来た。", vo(check))
+        assertFalse(r.complete)
+        assertTrue(r.note.startsWith("dict-mismatch"))
+        assertTrue(r.note.contains("残存0/2件"))
+        val plain = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.assessCompletion("src", "何か文。", plain).complete)
+        val blank = com.example.novelscraper.translation.v2.pipeline.assessCompletion("src", "   ", vo(check))
+        assertFalse(blank.complete)
+        assertEquals("blank", blank.note)
+    }
+
+    @Test
+    fun testBatch_UnclosedTailSegmentNotRescued() {
+        val cutText = "<trans id=\"1\">第一話の訳文です。</trans>\n<trans id=\"2\">第二話の途中まで生成された訳文"
+        val parsed = parseBatchResponse(cutText)
+        assertNotNull(parsed)
+        assertEquals("第一話の訳文です。", parsed!![1])
+        assertNull(parsed!![2])
+    }
+
+    @Test
+    fun testTranslateSingle_ExpandsAliasesEndToEnd() = kotlinx.coroutines.runBlocking {
+        val dict = NovelDict(characters = mapOf("李维·史奈克" to "レヴィ・スネーク"))
+        var capturedSource: String? = null
+        val ctx = looseCtx(call = { _, _, source ->
+            capturedSource = source
+            ok(source)
+        }).copy(dictionary = dict)
+        val r = translateSingle("李维走进大厅。", ctx)
+        assertTrue(r is SingleResult.Translated)
+        assertEquals("李维⟦レヴィ⟧走进大厅。", capturedSource)
+        assertEquals("レヴィ走进大厅。", (r as SingleResult.Translated).text)
+    }
+
+    @Test
+    fun testDictEchoEntries_SkippedEntirely() = kotlinx.coroutines.runBlocking {
+        val dict = NovelDict(characters = mapOf("文" to "文", "李维" to "レヴィ"))
+        var capturedSource: String? = null
+        val ctx = looseCtx(call = { _, _, source ->
+            capturedSource = source
+            ok("レヴィは祝日だ。")
+        }).copy(dictionary = dict)
+        val r = translateSingle("李维は文化の日だ。", ctx)
+        assertTrue(r is SingleResult.Translated)
+        assertEquals("李维⟦レヴィ⟧は文化の日だ。", capturedSource)
+        assertEquals("レヴィは祝日だ。", (r as SingleResult.Translated).text)
+    }
+
+    @Test
+    fun testDictSingleCharEntries_SkippedWithoutCorruption() = kotlinx.coroutines.runBlocking {
+        val dict = NovelDict(characters = mapOf("离" to "離", "李维" to "レヴィ"))
+        var capturedSource: String? = null
+        val ctx = looseCtx(call = { _, _, source ->
+            capturedSource = source
+            ok("レヴィは大広間を去った。")
+        }).copy(dictionary = dict)
+        val r = translateSingle("李维离开大厅。", ctx)
+        assertTrue(r is SingleResult.Translated)
+        assertEquals("李维⟦レヴィ⟧离开大厅。", capturedSource)
+        assertEquals("レヴィは大広間を去った。", (r as SingleResult.Translated).text)
+    }
+
+    @Test
+    fun testTranslateSingle_DictMismatchFailsTransient() = kotlinx.coroutines.runBlocking {
+        val dict = NovelDict(characters = mapOf("李维" to "レヴィ", "史奈克" to "スネーク"))
+        val ctx = looseCtx(call = { _, _, _ ->
+            ok("李維とフォックスが叫んだ。")
+        }).copy(dictionary = dict)
+        val r = translateSingle("李维と史奈克が叫んだ。", ctx)
+        assertTrue(r is SingleResult.Failed)
+        val f = r as SingleResult.Failed
+        assertFalse("赤札化しないこと", f.isDeterministic)
+        assertTrue(f.note.contains("dict-mismatch"))
+        assertFalse(shouldPersistFailed(f))
+    }
+
+    @Test
+    fun testTranslateSingle_DictMismatchToleratesOne() = kotlinx.coroutines.runBlocking {
+        // 必須2件中1件欠けは合格する（8/9通過）
+        val dict = NovelDict(characters = mapOf("李维" to "レヴィ", "史奈克" to "スネーク"))
+        val ctx = looseCtx(call = { _, _, _ ->
+            ok("レヴィとフォックスが叫んだ。")
+        }).copy(dictionary = dict)
+        val r = translateSingle("李维と史奈克が叫んだ。", ctx)
+        assertTrue(r is SingleResult.Translated)
+        assertTrue((r as SingleResult.Translated).text.contains("レヴィ"))
+    }
+
+    @Test
+    fun testTranslateLarge_DictMismatchHoldsWithoutFailedFile() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryFileStore()
+        val root = store.createRoot("w_mismatch")
+        val work = store.createDir(root.uri, ".parts_mm")!!
+        val out = store.createDir(root.uri, "out")!!
+        val dict = NovelDict(characters = mapOf("李维" to "レヴィ", "史奈克" to "スネーク"))
+        val ctx = looseCtx(call = { _, _, _ ->
+            ok("李維とフォックスが叫んだ。")
+        }).copy(dictionary = dict)
+        val outcome = translateLarge(store, work.uri, out.uri, "mm.txt", "李维と史奈克が叫んだ。", ctx, LargeOptions(chunkSizeBytes = 100000))
+        assertTrue(outcome is LargeOutcome.Held)
+        assertTrue((outcome as LargeOutcome.Held).reason.contains("一時的失敗"))
+        var failedFound = 0
+        for (child in store.children(work.uri)) {
+            val docs = if (child.isDirectory) store.children(child.uri) else listOf(child)
+            if (docs.any { it.name.endsWith(".failed") }) failedFound = 1
+        }
+        assertFalse("赤札を作らないこと", failedFound != 0)
+    }
+
+    @Test
+    fun testTranslateSingle_AnnotatesTermsAndStripsEcho() = kotlinx.coroutines.runBlocking {
+        val dict = NovelDict(characters = mapOf("李云龙" to "李雲龍"))
+        var capturedSource: String? = null
+        var capturedPrompt: String? = null
+        val ctx = looseCtx(call = { _, prompt, source ->
+            capturedPrompt = prompt
+            capturedSource = source
+            ok("李雲龍が叫んだ。")
+        }).copy(dictionary = dict)
+        val r = translateSingle("李云龙が叫んだ。", ctx)
+        assertTrue(r is SingleResult.Translated)
+        assertEquals("李云龙⟦李雲龍⟧が叫んだ。", capturedSource)
+        assertTrue(capturedPrompt!!.contains("[確定訳語]"))
+        assertFalse(capturedPrompt!!.contains("[人物対応表]"))
+        val ctx2 = looseCtx(call = { _, _, _ ->
+            ok("李云龙⟦李雲龍⟧が叫んだ。")
+        }).copy(dictionary = dict)
+        val r2 = translateSingle("李云龙が叫んだ。", ctx2)
+        assertTrue(r2 is SingleResult.Translated)
+        assertEquals("李雲龍が叫んだ。", (r2 as SingleResult.Translated).text)
+    }
+
+    @Test
+    fun testDictPolicy_ForLangMapping() {
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.KO) is com.example.novelscraper.translation.v2.pipeline.DictPolicy.Ko)
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.ZH) is com.example.novelscraper.translation.v2.pipeline.DictPolicy.Default)
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.EN) is com.example.novelscraper.translation.v2.pipeline.DictPolicy.En)
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.JA) is com.example.novelscraper.translation.v2.pipeline.DictPolicy.Default)
+        assertEquals("対応表", com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.KO).logLabel())
+        assertEquals("注釈", com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.ZH).logLabel())
+    }
+
+    @Test
+    fun testDictPolicy_RequiredTerms() {
+        val terms = mapOf("사재혁" to "サ・ジェヒョク", "혁이" to "ヒョギ")
+        val koPolicy = com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.KO)
+        assertEquals(setOf("사재혁"), koPolicy.check(terms, null).required.keys)
+        val zh = com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.ZH)
+        val ann = com.example.novelscraper.translation.v2.pipeline.selectTermAnnotation("x")!!
+        assertEquals(terms.keys, zh.check(terms, ann).required.keys)
+        assertTrue(zh.check(terms, null).required.isEmpty())
+        assertTrue(koPolicy.check(emptyMap<String, String>(), null).required.isEmpty())
+    }
+
+    @Test
+    fun testDictPolicy_MatchParityWithLegacy() {
+        val chars = mapOf("李云" to "李雲", "李云龙" to "李雲龍")
+        val def = com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.ZH)
+        assertEquals(matchDictionaryMap("李云龙が来た", chars), def.matchTerms("李云龙が来た", chars))
+        val ko = com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.KO)
+        assertEquals(
+            com.example.novelscraper.translation.v2.pipeline.matchDictionaryMapKo("사재혁이 왔다", mapOf("사재혁" to "サ・ジェヒョク")),
+            ko.matchTerms("사재혁이 왔다", mapOf("사재혁" to "サ・ジェヒョク"))
+        )
+        // 動作例：文法の中身は拾わず、文節先頭の人物は拾う
+        assertFalse(ko.matchTerms("물이나 떠와", mapOf("이나" to "イナ")).containsKey("이나"))
+        assertTrue(ko.matchTerms("이나가 말했다", mapOf("이나" to "イナ")).containsKey("이나"))
+        assertTrue(def.matchAliases("李维走进大厅。", mapOf("李维·史奈克" to "レヴィ・スネーク")).isNotEmpty())
+        assertTrue(ko.matchAliases("李维走进大厅。", mapOf("李维·史奈克" to "レヴィ・スネーク")).isEmpty())
+    }
+
+    @Test
+    fun testDictPolicy_PrepareShapes() {
+        val terms = mapOf("李云" to "李雲")
+        val def = com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.ZH)
+        val pa = def.prepare("李云が来た", terms)
+        assertNotNull(pa.annotation)
+        assertNull(pa.glossary)
+        assertTrue(pa.sendText.contains("⟦李雲⟧"))
+        val ko = com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.KO)
+        val pk = ko.prepare("이나가 말했다", mapOf("이나" to "イナ"))
+        assertNull(pk.annotation)
+        assertEquals(mapOf("이나" to "イナ"), pk.glossary)
+        assertEquals("이나가 말했다", pk.sendText)
+        assertNull(def.prepare("本文", emptyMap()).annotation)
+        assertNull(ko.prepare("本文", emptyMap()).glossary)
+    }
+
+    @Test
+    fun testDictPolicy_EnBoundaryMatch() {
+        val en = com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.EN)
+        val marks = mapOf("Mark" to "マーク")
+        // 動作例：一般語の中身は拾わず、独立した人名は拾う
+        assertFalse(en.matchTerms("Market opens at nine.", marks).containsKey("Mark"))
+        assertTrue(en.matchTerms("Mark came home.", marks).containsKey("Mark"))
+        assertTrue(en.matchTerms("Hey, Mark!", marks).containsKey("Mark"))
+        assertTrue(en.matchTerms("John's book is thick.", mapOf("John" to "ジョン")).containsKey("John"))
+        // 動作例：大文字小文字は区別する（文中の助動詞は拾わない）
+        assertFalse(en.matchTerms("I will go there.", mapOf("Will" to "ウィル")).containsKey("Will"))
+        assertTrue(en.matchTerms("Will you come?", mapOf("Will" to "ウィル")).containsKey("Will"))
+        assertFalse(en.matchTerms("The Wills protested.", mapOf("Will" to "ウィル")).containsKey("Will"))
+        // 対応表方式（原文温存・注釈なし）
+        val prepared = en.prepare("Mark came home.", marks)
+        assertNull(prepared.annotation)
+        assertEquals(mapOf("Mark" to "マーク"), prepared.glossary)
+        assertEquals("Mark came home.", prepared.sendText)
+        assertEquals("対応表", en.logLabel())
+        assertTrue(en.matchAliases("Mark came.", marks).isEmpty())
+    }
+
+    @Test
+    fun testDictPolicy_EnRequiredLenientShort() {
+        val en = com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.EN)
+        val check = en.check(mapOf("Alexander" to "アレクサンダー", "Al" to "アル"), null)
+        assertEquals(setOf("Alexander"), check.required.keys)
+        assertEquals(setOf("Alexander", "Al"), check.terms.keys)
+        assertNull(check.strip)
+    }
+
+    @Test
+    fun testRefine_EnGlossaryEndToEnd() = kotlinx.coroutines.runBlocking {
+        val dict = NovelDict(characters = mapOf("Arthur" to "アーサー"))
+        var refineInput = ""
+        val ctx = TranslateContext(
+            basePrompts = mapOf(2 to "base"),
+            promptOrder = listOf(2),
+            driverNames = listOf("d1"),
+            dictionary = dict,
+            sourceLang = SourceLang.EN,
+            verify = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false),
+            refine = RefineConfig("polish it") { _, source ->
+                refineInput = source
+                ok("アーサーが旅立った。")
+            },
+            call = { _, _, _ -> ok("アーサーが旅立った。") }
+        )
+        val r = translateSingle("Arthur left for the journey.", ctx)
+        assertTrue(r is SingleResult.Translated)
+        assertTrue((r as SingleResult.Translated).text.contains("アーサー"))
+        // 推敲入力に原文・初回訳・対応表の3点が入ること
+        assertTrue(refineInput.contains("Arthur left for the journey."))
+        assertTrue(refineInput.contains("アーサーが旅立った。"))
+        assertTrue(refineInput.contains("Arthur → アーサー"))
+    }
+
+    @Test
+    fun testDictPolicy_KoShortAlternates() {
+        val ko = com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.KO)
+        // 基本：フル→短形の許容読みが出る
+        val alts = ko.alternates(mapOf("진예서" to "ジン・イェソ", "윤채원" to "ユン・チェウォン"))
+        assertEquals(listOf("イェソ"), alts["진예서"])
+        assertEquals(listOf("チェウォン"), alts["윤채원"])
+        // 2文字名・中黒なし・空値は対象外
+        assertTrue(ko.alternates(mapOf("이나" to "イナ")).isEmpty())
+        assertTrue(ko.alternates(mapOf("가나" to "カナ")).isEmpty())
+        assertTrue(ko.alternates(mapOf("abc" to "")).isEmpty())
+        // 章内に短形名の本人がいる時は不採用
+        assertTrue(ko.alternates(mapOf("진예서" to "ジン・イェソ", "예서" to "イェソ")).isEmpty())
+        // 同じ短形に別読みが2者は不採用
+        assertTrue(
+            ko.alternates(mapOf("진예서" to "ジン・イェソ", "한예서" to "ハン・エソ")).isEmpty()
+        )
+        // 既定方式は許容読みなし
+        val def = com.example.novelscraper.translation.v2.pipeline.DictPolicy.forLang(SourceLang.ZH)
+        assertTrue(def.alternates(mapOf("李云龙" to "李雲龍")).isEmpty())
+    }
+
+    @Test
+    fun testDictCheck_ToleratesOneMissing() {
+        fun vo(check: com.example.novelscraper.translation.v2.pipeline.DictCheck) =
+            VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false, dictCheck = check)
+        val terms = (1..9).associate { "K$it" to "V$it" }
+        val check = com.example.novelscraper.translation.v2.pipeline.DictCheck(terms, null, terms)
+        // 8/9通過
+        val eight = (1..8).joinToString("") { "V$it" }
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.assessCompletion("src", eight, vo(check)).complete)
+        // 7/9は不合格
+        val seven = (1..7).joinToString("") { "V$it" }
+        val r = com.example.novelscraper.translation.v2.pipeline.assessCompletion("src", seven, vo(check))
+        assertFalse(r.complete)
+        assertTrue(r.note.contains("残存7/9件"))
+        // 必須1件の1欠けも許容する
+        val solo = com.example.novelscraper.translation.v2.pipeline.DictCheck(mapOf("K" to "V"), null, mapOf("K" to "V"))
+        assertTrue(com.example.novelscraper.translation.v2.pipeline.assessCompletion("src", "関係ない文。", vo(solo)).complete)
+    }
+
+    @Test
+    fun testTranslateSingle_KoShortAndTolerated() = kotlinx.coroutines.runBlocking {
+        // 動作例：37話型。短形イェソで必須を満たし、単発のユン・チェウォン欠けは1件許容で通過する
+        val dict = NovelDict(characters = mapOf("진예서" to "ジン・イェソ", "윤채원" to "ユン・チェウォン"))
+        val ctx = looseCtx(call = { _, _, _ ->
+            ok("イェソが尋ねた。")
+        }).copy(dictionary = dict, sourceLang = SourceLang.KO)
+        val r = translateSingle("진예서가 물었다. 윤채원이 만들었다.", ctx)
+        assertTrue(r is SingleResult.Translated)
+        assertTrue((r as SingleResult.Translated).text.contains("イェソ"))
     }
 }
 

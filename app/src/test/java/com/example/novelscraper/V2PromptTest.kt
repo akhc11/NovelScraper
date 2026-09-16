@@ -1,6 +1,7 @@
 package com.example.novelscraper
 
 import com.example.novelscraper.translation.v2.pipeline.SourceLang
+import com.example.novelscraper.translation.v2.pipeline.TermAnnotation
 import com.example.novelscraper.translation.v2.pipeline.buildBatchFormat
 import com.example.novelscraper.translation.v2.pipeline.buildProfilePrompt
 import com.example.novelscraper.translation.v2.pipeline.buildSystemPrompt
@@ -106,18 +107,44 @@ class V2PromptTest {
     }
 
     @Test
-    fun testBuildSystemPrompt_NoHardcodedKatakanaStyle() {
-        val promptWithDict = buildSystemPrompt(
-            basePrompt = "ベースプロンプト",
-            dictionaryEntries = listOf("李云: 李雲", "张伟: 張偉")
+    fun testBuildSystemPrompt_GlossarySlot() {
+        val terms = mapOf("이나" to "イナ")
+        // 指定行あり：人名規則の隣に混ざり、指定行自体は残らないこと
+        val mixed = buildSystemPrompt(
+            basePrompt = "人名ルール\n[人物対応表挿入位置]\n出力制約",
+            glossary = terms
         )
+        assertFalse(mixed.contains("[人物対応表挿入位置]"))
+        assertTrue(mixed.contains("[人物対応表]"))
+        assertTrue(mixed.indexOf("[人物対応表]") > mixed.indexOf("人名ルール"))
+        assertTrue(mixed.indexOf("[人物対応表]") < mixed.indexOf("出力制約"))
+        // 指定行なし：従来通り末尾に付くこと
+        val appended = buildSystemPrompt(basePrompt = "ベースプロンプト", glossary = terms, enableCompletionMarker = false)
+        assertTrue(appended.contains("[人物対応表]"))
+        assertTrue(appended.endsWith("- 이나 → イナ\n"))
+        // 表なし：指定行は消えること
+        val removed = buildSystemPrompt(basePrompt = "人名ルール\n[人物対応表挿入位置]\n出力制約")
+        assertFalse(removed.contains("[人物対応表挿入位置]"))
+        assertFalse(removed.contains("[人物対応表]"))
+    }
+
+    @Test
+    fun testBuildSystemPrompt_AnnotationOnly() {
+        val promptWithAnn = buildSystemPrompt(
+            basePrompt = "ベースプロンプト",
+            termAnnotation = TermAnnotation("⟦", "⟧")
+        )
+        // 対応表ブロックは廃止され、確定訳語の1行指示のみになること
+        assertFalse(promptWithAnn.contains("[登場人物対応表]"))
+        assertTrue(promptWithAnn.contains("[確定訳語]"))
+        assertTrue(promptWithAnn.contains("言い換え・修正は厳禁"))
         // 勝手な人名表記固定（カタカナ等）が注入されないこと
-        assertFalse(promptWithDict.contains("[人名の表記統一ルール]"))
-        assertFalse(promptWithDict.contains("カタカナ"))
-        // 登場人物対応表とその厳守指示のみが含まれること
-        assertTrue(promptWithDict.contains("[登場人物対応表]"))
-        assertTrue(promptWithDict.contains("李云: 李雲"))
-        assertTrue(promptWithDict.contains("张伟: 張偉"))
+        assertFalse(promptWithAnn.contains("[人名の表記統一ルール]"))
+        assertFalse(promptWithAnn.contains("カタカナ"))
+        // 注釈なし時はどちらも含まれないこと
+        val plain = buildSystemPrompt(basePrompt = "ベースプロンプト")
+        assertFalse(plain.contains("[確定訳語]"))
+        assertFalse(plain.contains("[登場人物対応表]"))
     }
 }
 

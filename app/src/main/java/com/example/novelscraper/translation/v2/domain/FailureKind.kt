@@ -59,21 +59,51 @@ fun FailureKind.isQuotaLike(): Boolean =
 fun FailureKind.isTerminal(): Boolean = this == FailureKind.FATAL || isDeterministic()
 
 /**
+ * 出力上限による打切りか判定（pure）。
+ * 技術的根拠1行：打切りの方言（Gemini=MAX_TOKENS系、OpenRouter=length系＋生値）を1述語にし、両社での判定乖離をなくす。
+ */
+fun isOutputTruncated(vararg reasons: String?): Boolean = reasons.any { r ->
+    r.equals("length", ignoreCase = true) ||
+        r.equals("max_tokens", ignoreCase = true) ||
+        r.equals("max-tokens", ignoreCase = true)
+}
+
+/**
+ * 検証不合格理由の単一真実。文字列の散在は判定乖離の温床のため、生成と照合はここを経由する。
+ * 技術的根拠1行：理由文字列の二重実装は必ず乖離するため、値自体は従来通り・参照だけ寄せる。
+ */
+object FailureNotes {
+    const val CONTEXT_LENGTH = "context-length"
+    const val VERIFY_REJECTED = "verify-rejected"
+    const val MARKER_MISSING = "marker-missing"
+    const val SIZE_RATIO = "size-ratio"
+    const val KANA_FLOOR = "kana-floor"
+    const val LINE_COUNT = "line-count"
+    const val BLANK = "blank"
+    const val RESIDUAL = "residual"
+    const val QUALITY_REJECTED = "quality-rejected"
+    const val CUTOFF_LENGTH = "cutoff:length"
+    const val CUTOFF_MAX_TOKENS = "cutoff:max-tokens"
+    /** 注釈した確定訳が訳文に無い（辞書不遵守）。確定旗群に含めないため一時的扱いになる。 */
+    const val DICT_MISMATCH = "dict-mismatch"
+}
+
+/**
  * .failed ファイルを作成すべき「ファイル内容起因の確定失敗」か判定（pure）。
  * 技術的根拠1行：通信瞬断・5xx・429等の外的要因による失敗は.failedを作らず未完了保留とする。
  */
 fun isDeterministicFailure(kind: FailureKind, note: String = ""): Boolean = when (kind) {
     FailureKind.BLOCKED_DETERMINISTIC -> true
     FailureKind.FATAL -> {
-        note.contains("context-length") ||
-        note.contains("verify-rejected") ||
-        note.contains("marker-missing") ||
-        note.contains("size-ratio") ||
-        note.contains("kana-floor") ||
-        note.contains("line-count") ||
-        note.contains("blank") ||
-        note.contains("residual") ||
-        note.contains("quality-rejected")
+        note.contains(FailureNotes.CONTEXT_LENGTH) ||
+        note.contains(FailureNotes.VERIFY_REJECTED) ||
+        note.contains(FailureNotes.MARKER_MISSING) ||
+        note.contains(FailureNotes.SIZE_RATIO) ||
+        note.contains(FailureNotes.KANA_FLOOR) ||
+        note.contains(FailureNotes.LINE_COUNT) ||
+        note.contains(FailureNotes.BLANK) ||
+        note.contains(FailureNotes.RESIDUAL) ||
+        note.contains(FailureNotes.QUALITY_REJECTED)
     }
     else -> false
 }

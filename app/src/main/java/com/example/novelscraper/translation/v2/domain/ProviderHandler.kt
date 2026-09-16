@@ -38,3 +38,13 @@ sealed interface LlmResult {
 interface ProviderHandler {
     suspend fun call(request: LlmRequest): LlmResult
 }
+
+/**
+ * 層間の口（Ports）。中心部は実装ではなくこの口だけに依存する。
+ * 技術的根拠1行：外側（OkHttp・SAF・Android枠組み）の差し替えを呼出側の配線だけで済ませ、中心部の書換えを不要にする。
+ */
+/** 中断可能な待機の口。実体は巡回器への sleeper 注入で満たす。 */
+typealias Sleeper = suspend (Long) -> Unit
+
+/** 進捗通知の口。実体はエンジンの状態反映コールバックで満たす。 */
+typealias ProgressObserver = (done: Int, total: Int, fileName: String) -> Unit

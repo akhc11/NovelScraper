@@ -86,4 +86,33 @@ class UrlExtractorTest {
         val inputWithExclamation = "必読です！https://ncode.syosetu.com/n12345/1/！"
         assertEquals("https://ncode.syosetu.com/n12345/1/", UrlExtractor.extractUrl(inputWithExclamation))
     }
+
+    @Test
+    fun testExtractFromCandidatesPrefersFirstUrl() {
+        // 共有intentの複数ソース（EXTRA_TEXT > HTML > ClipData > SUBJECT）の優先順位を検証
+        val result = UrlExtractor.extractUrlFromCandidates(
+            "https://ncode.syosetu.com/n11111/1/",
+            "https://ncode.syosetu.com/n22222/1/",
+            null
+        )
+        assertEquals("https://ncode.syosetu.com/n11111/1/", result)
+    }
+
+    @Test
+    fun testExtractFromCandidatesSkipsEmptySources() {
+        // EXTRA_TEXTが空でも後続ソースから抽出できる（Chrome stale対策の前提）
+        val result = UrlExtractor.extractUrlFromCandidates(
+            null,
+            "タイトルのみ",
+            "https://kakuyomu.jp/works/1234567890",
+            "ページタイトル"
+        )
+        assertEquals("https://kakuyomu.jp/works/1234567890", result)
+    }
+
+    @Test
+    fun testExtractFromCandidatesReturnsNullWhenNoUrl() {
+        assertNull(UrlExtractor.extractUrlFromCandidates(null, "", "URLなしの文章です。"))
+        assertNull(UrlExtractor.extractUrlFromCandidates())
+    }
 }

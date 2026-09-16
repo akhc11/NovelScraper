@@ -337,6 +337,34 @@ class V2DomainTest {
     }
 
     @Test
+    fun testHandlerParsers_TruncationWithTextIsFailure() {
+        // 非空でも打切り信号があれば未完扱い（切れ端の完成誤認を防ぐ）。保持扱いのため決定性は偽
+        val orTrunc = parseOpenRouterResponse(
+            200,
+            """{"choices": [{"message": {"content": "途中までの訳文"}, "finish_reason": "length"}]}"""
+        )
+        assertTrue(orTrunc is com.example.novelscraper.translation.v2.domain.LlmResult.Failure)
+        val orF = (orTrunc as com.example.novelscraper.translation.v2.domain.LlmResult.Failure).failure
+        assertEquals("cutoff:length", orF.note)
+        assertFalse(com.example.novelscraper.translation.v2.domain.isDeterministicFailure(orF.kind, orF.note))
+        // 生値のみの場合も検出する
+        val orNative = parseOpenRouterResponse(
+            200,
+            """{"choices": [{"message": {"content": "途中までの訳文"}, "finish_reason": "stop", "native_finish_reason": "LENGTH"}]}"""
+        )
+        assertTrue(orNative is com.example.novelscraper.translation.v2.domain.LlmResult.Failure)
+
+        val geminiTrunc = parseGeminiResponse(
+            200,
+            """{"candidates": [{"content": {"parts": [{"text": "途中までの訳文"}]}, "finishReason": "MAX_TOKENS"}]}"""
+        )
+        assertTrue(geminiTrunc is com.example.novelscraper.translation.v2.domain.LlmResult.Failure)
+        val gF = (geminiTrunc as com.example.novelscraper.translation.v2.domain.LlmResult.Failure).failure
+        assertEquals("cutoff:max-tokens", gF.note)
+        assertFalse(com.example.novelscraper.translation.v2.domain.isDeterministicFailure(gF.kind, gF.note))
+    }
+
+    @Test
     fun testOpenRouterParams_Gating() {
         // reasoningEffort: 表外値・空白は落とす。大文字・前後空白は正規化する。noneは公式指定値として通す
         assertEquals(null, resolveReasoningEffort(null))

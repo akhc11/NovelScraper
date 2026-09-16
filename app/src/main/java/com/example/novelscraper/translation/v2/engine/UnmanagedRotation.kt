@@ -7,6 +7,7 @@ import com.example.novelscraper.translation.v2.domain.FailureKind
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ProviderDescriptor
 import com.example.novelscraper.translation.v2.domain.ProviderId
+import com.example.novelscraper.translation.v2.domain.Sleeper
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.V2SendGate
 import com.example.novelscraper.translation.v2.domain.toProviderId
@@ -31,7 +32,7 @@ class UnmanagedRotation(
     private val sendGateIntervalMs: Long = 10_000L,
     private val stopped: () -> Boolean = { false },
     private val meter: CostMeter? = null,
-    private val sleeper: suspend (Long) -> Unit = { delay(it) },
+    private val sleeper: Sleeper = { delay(it) },
     private val log: (String) -> Unit = {}
 ) : PromptRouter {
     override var exhausted: Boolean = false
@@ -93,14 +94,14 @@ class UnmanagedRotation(
                                     }
                                     FailureKind.QUOTA_DAILY, FailureKind.QUOTA_MINUTE -> {
                                         quotaSeenThisEpoch = true
-                                        if (handleQuotaRetry(result.failure, cooldownSec, TranslationLimits.UNMANAGED_COOLDOWN_MAX_SEC.toLong(), sameLeft, sleeper, log, stopped)) {
+                                        if (handleRetryableWait(result.failure, result.failure.kind.name, cooldownSec.toLong(), TranslationLimits.UNMANAGED_COOLDOWN_MAX_SEC.toLong(), maxSameRetries - sameLeft, maxSameRetries, sleeper = sleeper, log = log, stopped = stopped)) {
                                             sameLeft--
                                             continue
                                         }
                                         break
                                     }
                                     FailureKind.RETRYABLE_AFTER -> {
-                                        if (handleTransientRetry(result.failure, transientRetryDelaySec, sameLeft, sleeper, log, stopped)) {
+                                        if (handleRetryableWait(result.failure, "一時エラー", transientRetryDelaySec.toLong(), TranslationLimits.WAIT_MAX_SEC, maxSameRetries - sameLeft, maxSameRetries, sleeper = sleeper, log = log, stopped = stopped)) {
                                             sameLeft--
                                             continue
                                         }

@@ -523,15 +523,15 @@ class V2EngineTest {
         val names = store.children(outDir.uri).map { it.name }
         assertTrue(names.containsAll(listOf("s1.txt", "s2.txt", "big.txt")))
         assertTrue(names.none { it.endsWith(".failed") })
-        assertEquals(small, store.readText(store.findChild(outDir.uri, "s1.txt")!!.uri))
+        assertEquals("これはテストの本文です。勇者が旅に出ました。".replace("勇者", "ユウシャ"), store.readText(store.findChild(outDir.uri, "s1.txt")!!.uri))
         val bigOut = store.readText(store.findChild(outDir.uri, "big.txt")!!.uri)!!
         assertEquals(bigBody.lines().count { it.isNotBlank() }, bigOut.lines().count { it.isNotBlank() })
         assertEquals(
-            bigBody.lines().first { it.isNotBlank() },
+            bigBody.lines().first { it.isNotBlank() }.replace("勇者", "ユウシャ"),
             bigOut.lines().first { it.isNotBlank() }
         )
         assertEquals(
-            bigBody.lines().last { it.isNotBlank() },
+            bigBody.lines().last { it.isNotBlank() }.replace("勇者", "ユウシャ"),
             bigOut.lines().last { it.isNotBlank() }
         )
         // 大ファイル作業所は掃除され、辞書は公開される
@@ -805,8 +805,8 @@ class V2EngineTest {
     }
 
     @Test
-    fun testRunEngine_DictModelFallbackToProfile() = kotlinx.coroutines.runBlocking {
-        // 辞書モデル名が空欄でも、登録プロファイルのモデル名へ自動フォールバックして辞書生成が成功する
+    fun testRunEngine_DictModelBlankAbortsWithoutFallback() = kotlinx.coroutines.runBlocking {
+        // 辞書モデル空欄時はプロファイルや既定モデルへフォールバックせず中断する（利用者指定モデルのみ使用）
         val store = InMemoryFileStore()
         val folder = store.createRoot("novel-dict-fallback")
         for (name in listOf("ch1.txt", "ch2.txt")) {
@@ -849,16 +849,59 @@ class V2EngineTest {
             )
         )
         val summary = engine.run(listOf(folder.uri), settings)
-        assertFalse(summary.aborted)
-        assertEquals(2, summary.completedFiles)
-        assertTrue(receivedModels.isNotEmpty())
+        assertEquals(0, summary.completedFiles)
         assertTrue("空文字モデルへのリクエストが一切ないこと", receivedModels.none { it.isBlank() })
-        assertTrue("プロファイルのモデルにフォールバックしていること", receivedModels.all { it == "gemini-3.5-flash" })
+        assertTrue("フォールバック送信がないこと", receivedModels.isEmpty())
         val published = store.findChild(folder.uri, "dictionary.json")
-        assertNotNull("辞書ファイルが生成されること", published)
-        val loaded = DictionaryBuilder.parseDictJson(store.readText(published!!.uri) ?: "")
-        assertNotNull(loaded)
-        assertEquals(2, loaded!!.characters.size)
+        assertNull("辞書モデル未設定時は辞書ファイルが生成されないこと", published)
+        assertNull("作業所を作らず中断すること", store.findChild(folder.uri, ".dict_building"))
+    }
+
+    @Test
+    fun testDictionaryBuilder_MergeScopeQuotaReported() = kotlinx.coroutines.runBlocking {
+        // 抽出モデル≠マージ送信用モデル時、日次枯渇は実際に送ったモデル側のスコープに報告される
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-dict-merge-scope")
+        for ((name, body) in listOf("a.txt" to "山田の物語です。", "b.txt" to "鈴木の物語です。")) {
+            val doc = store.createFile(folder.uri, name, "text/plain")!!
+            store.writeText(doc.uri, body)
+        }
+        val goodJson = """{"names":["山田"]}"""
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val sys = request.systemPrompt
+                return if (sys.contains("Merge the dictionary") || sys.contains("Review the merged")) {
+                    LlmResult.Failure(ClassifiedFailure(FailureKind.QUOTA_DAILY))
+                } else {
+                    LlmResult.Success(goodJson)
+                }
+            }
+        }
+        val pool = QuotaPool(listOf("k1"))
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "m-extract")),
+            limits = V2Limits(requestDelaySec = 0),
+            dict = V2DictSettings(
+                enabled = true,
+                providerId = "gemini",
+                model = "m-extract",
+                mergeModel = "m-merge",
+                batchMaxBytes = 25,
+                requestDelaySec = 0,
+                cooldown429Sec = 0
+            )
+        )
+        val files = store.children(folder.uri).filter { !it.isDirectory }.sortedBy { it.name }
+        val result = DictionaryBuilder(
+            store = store,
+            buildHandler = { _, _, _ -> handler },
+            stopped = { false },
+            log = {}
+        ).build(folder.uri, files, settings, pool)
+        assertNull("マージ枯渇時は保留（null）", result)
+        assertFalse("抽出スコープは枯渇扱いしないこと", pool.isExhausted(listOf("m-extract")))
+        assertTrue("実際に送ったマージスコープを枯渇扱いすること", pool.isExhausted(listOf("m-merge")))
     }
 
     @Test

@@ -15,6 +15,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.example.novelscraper.translation.v2.settings.V2DictPrompts
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2PromptPreset
 import com.example.novelscraper.translation.v2.settings.V2Settings
@@ -42,6 +43,7 @@ fun V2SettingsDialog(
     importWarnings: List<String> = emptyList()
 ) {
     var selectedTab by remember { mutableStateOf(V2SettingsTab.MODELS) }
+    var showHelp by remember { mutableStateOf(false) }
 
     // モデル個別プロファイルリスト
     val profiles = remember { mutableStateListOf<V2ModelProfile>().apply { addAll(initial.profiles) } }
@@ -73,10 +75,26 @@ fun V2SettingsDialog(
     // プロンプト編集
     val customPromptsMap = remember { mutableStateMapOf<Int, String>().apply { putAll(initial.customPrompts) } }
 
+    // 辞書プロンプト編集（空・空白は保存時に落として既定文扱いにする）
+    val dictPromptsMap = remember {
+        mutableStateMapOf<String, String>().apply {
+            initial.dict.dictPrompts.batch.takeIf { it.isNotBlank() }?.let { put("batch", it) }
+            initial.dict.dictPrompts.merge.takeIf { it.isNotBlank() }?.let { put("merge", it) }
+            initial.dict.dictPrompts.translate.takeIf { it.isNotBlank() }?.let { put("translate", it) }
+        }
+    }
+
     fun buildDraftSettings(): V2Settings {
         val baseWithCommon = commonState.applyTo(initial)
         return baseWithCommon.copy(
             profiles = profiles.toList(),
+            dict = baseWithCommon.dict.copy(
+                dictPrompts = V2DictPrompts(
+                    batch = dictPromptsMap["batch"] ?: "",
+                    merge = dictPromptsMap["merge"] ?: "",
+                    translate = dictPromptsMap["translate"] ?: ""
+                )
+            ),
             promptSelection = initial.promptSelection.copy(
                 autoEnabled = autoPromptEnabled,
                 autoOrderKo = parsePromptList(autoOrderKoText, listOf(3, 7)),
@@ -106,12 +124,24 @@ fun V2SettingsDialog(
                     .padding(14.dp)
             ) {
                 // タイトル
-                Text(
-                    text = "AI / LLM 翻訳 (v2) 詳細設定",
-                    color = AppColors.textPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "AI / LLM 翻訳 (v2) 詳細設定",
+                        color = AppColors.textPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(
+                        onClick = { showHelp = true },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text("？ ヘルプ", color = AppColors.accentTealLight, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -190,7 +220,8 @@ fun V2SettingsDialog(
 
                         V2SettingsTab.PROMPTS -> {
                             V2PromptsTab(
-                                customPromptsMap = customPromptsMap
+                                customPromptsMap = customPromptsMap,
+                                dictPromptsMap = dictPromptsMap
                             )
                         }
                     }
@@ -236,6 +267,11 @@ fun V2SettingsDialog(
                 }
             }
         }
+    }
+
+    // ヘルプダイアログ
+    if (showHelp) {
+        V2HelpDialog(onDismiss = { showHelp = false })
     }
 
     // プリセット追加ダイアログ

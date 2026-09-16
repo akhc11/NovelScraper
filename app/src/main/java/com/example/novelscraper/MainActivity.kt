@@ -1,15 +1,11 @@
 package com.example.novelscraper
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.widget.Toast
@@ -66,16 +62,28 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
+        // androidx.core.content.IntentCompat.EXTRA_HTML_TEXT と同値。新規依存を追加せず参照するための定数。
+        private const val EXTRA_HTML_TEXT = "android.intent.extra.HTML_TEXT"
     }
 
     private lateinit var viewModel: ScrapingViewModel
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var mainWebView: WebView? = null
-    private var lastToggleLiveTranslateTime = 0L
+    private val webViewHolder = WebViewHolder()
+    private lateinit var inspectorController: InspectorController
+    private lateinit var liveTranslateController: LiveTranslateController
+    private lateinit var probeController: ProbeController
+    private lateinit var bridgeFactory: ScraperBridgeFactory
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         viewModel = ViewModelProvider(this)[ScrapingViewModel::class.java]
+        val shortToast: (String) -> Unit =
+            { msg -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+        val isAlive: () -> Boolean = { !isFinishing && !isDestroyed }
+        inspectorController = InspectorController(webViewHolder) { viewModel.uiState.value.currentConfig }
+        liveTranslateController = LiveTranslateController(webViewHolder, shortToast)
+        probeController = ProbeController(webViewHolder, viewModel, isAlive, shortToast)
+        bridgeFactory = ScraperBridgeFactory(viewModel, mainHandler, this, isAlive, shortToast)
         setupSystemUI()
         checkNotificationPermission()
         WebView.setWebContentsDebuggingEnabled(true)
@@ -103,6 +111,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onDestroy() {
+        webViewHolder.clear()
+        super.onDestroy()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -111,16 +124,60 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
-        if (intent.action == Intent.ACTION_SEND && (intent.type?.startsWith("text/") == true || intent.type == "text/plain")) {
-            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
-                ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
-            val extractedUrl = UrlExtractor.extractUrl(sharedText)
-            if (extractedUrl != null) {
-                viewModel.closePanels()
-                viewModel.setInputUrl(extractedUrl)
-                viewModel.setCurrentUrl(extractedUrl)
-                Toast.makeText(this, "共有されたURLを開きます", Toast.LENGTH_SHORT).show()
+        if (intent.action != Intent.ACTION_SEND) return
+        // Manifestは text/plain のみ宣言。受信側は text/* と type==null（EXTRA_TEXT付きの変則共有）を
+        // 寛容に受け付ける。判定は「データ有無」が主、MIMEは補助（公式「想定外データが来る前提で検証せよ」に準拠）。
+        val type = intent.type
+        if (type != null && !type.startsWith("text/")) return
+        try {
+            val extraText = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+            val htmlText = intent.getCharSequenceExtra(EXTRA_HTML_TEXT)?.toString()
+                ?: intent.getStringExtra(EXTRA_HTML_TEXT)
+            val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
+            val clipTexts = mutableListOf<String?>()
+            intent.clipData?.let { clip ->
+                for (i in 0 until clip.itemCount) {
+                    val item = clip.getItemAt(i)
+                    clipTexts += item.text?.toString()
+                    clipTexts += item.htmlText?.toString()
+                }
             }
+            val candidates = mutableListOf<String?>()
+            candidates += extraText
+            candidates += htmlText
+            candidates += clipTexts
+            candidates += subject
+            val extractedUrl = UrlExtractor.extractUrlFromCandidates(*candidates.toTypedArray())
+            if (extractedUrl != null) {
+                // setCurrentUrlがinputUrlも同時更新するためsetInputUrlの重複呼び出しはしない。
+                // 同一URL再共有は状態更新せずToastのみで二重ロードと表示矛盾を防ぐ。
+                val currentNormalized = viewModel.uiState.value.currentUrl.trimEnd('/')
+                if (currentNormalized == extractedUrl.trimEnd('/')) {
+                    viewModel.closePanels()
+                    Toast.makeText(this, "そのURLは既に開いています", Toast.LENGTH_SHORT).show()
+                } else {
+                    viewModel.closePanels()
+                    viewModel.setCurrentUrl(extractedUrl)
+                    Toast.makeText(this, "共有されたURLを開きます", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                android.util.Log.w(TAG, "handleIntent: no URL found in shared content (type=$type)")
+                Toast.makeText(this, "共有内容にURLが見つかりませんでした", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "handleIntent: failed to handle shared intent", e)
+            Toast.makeText(this, "共有の受け取りに失敗しました", Toast.LENGTH_SHORT).show()
+        } finally {
+            // 消費済み化: 回転・再生成・タスク復帰での再発火を防ぐ（actionをMAINに戻し共有extraを除去）。
+            intent.removeExtra(Intent.EXTRA_TEXT)
+            intent.removeExtra(Intent.EXTRA_SUBJECT)
+            intent.removeExtra(EXTRA_HTML_TEXT)
+            try {
+                intent.clipData = null
+            } catch (_: Exception) {
+                android.util.Log.w(TAG, "handleIntent: failed to clear clipData")
+            }
+            intent.action = Intent.ACTION_MAIN
         }
     }
 
@@ -143,7 +200,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val target = if (android.util.Patterns.WEB_URL.matcher(input).matches() || android.webkit.URLUtil.isValidUrl(input)) {
-            if (!input.startsWith("http")) "https://$input" else input
+            if (!input.lowercase().startsWith("http")) "https://$input" else input
         } else {
             "https://www.google.com/search?q=${java.net.URLEncoder.encode(input, "UTF-8")}"
         }
@@ -191,111 +248,43 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        // UiEventの一元収集点（表示は従来通りToast。文言・長さ不変）。
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.eventBus.events.collect { event ->
+                    when (event) {
+                        is UiEvent.ShowToast -> Toast.makeText(
+                            this@MainActivity,
+                            event.message,
+                            if (event.isLong) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
+                        ).show()
+                        // 発行元なし（予約型）。単一パイプライン維持のため状態更新経由に寄せる。
+                        is UiEvent.NavigateToUrl -> viewModel.setCurrentUrl(event.url)
+                    }
+                }
+            }
+        }
     }
 
     private fun launchAnalysisTool(view: WebView) {
-        view.evaluateJavascript(ScrapingScriptBuilder.buildErudaScript(), null)
+        inspectorController.launchAnalysisTool(view)
     }
 
     @android.annotation.SuppressLint("JavascriptInterface")
     private fun setupWebView(view: WebView) {
-        mainWebView = view
-        val bridge = NovelScraperBridge(
-            onApply = { target, selector ->
-                mainHandler.post {
-                    if (!isFinishing && !isDestroyed) {
-                        try {
-                            val field = when (target.lowercase().trim()) {
-                                "body" -> SelectorField.BODY
-                                "title" -> SelectorField.TITLE
-                                "next" -> SelectorField.NEXT
-                                "folder" -> SelectorField.FOLDER
-                                "folder_link", "folderlink" -> SelectorField.FOLDER_LINK
-                                "chapter" -> SelectorField.CHAPTER
-                                "exclude" -> SelectorField.EXCLUDE
-                                else -> SelectorField.valueOf(target.uppercase().trim())
-                            }
-                            viewModel.applySelectorToConfig(field, selector)
-                            Toast.makeText(this@MainActivity, "${field.displayName}に反映しました", Toast.LENGTH_SHORT).show()
-                        } catch (e: Exception) {
-                            Toast.makeText(this@MainActivity, "適用失敗: ${e.message}", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            },
-            onCopy = { selector ->
-                mainHandler.post {
-                    if (!isFinishing && !isDestroyed) {
-                        try {
-                            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            val clip = ClipData.newPlainText("CSS Selector", selector)
-                            clipboard.setPrimaryClip(clip)
-                            Toast.makeText(this@MainActivity, "セレクタをコピーしました", Toast.LENGTH_SHORT).show()
-                        } catch (e: Exception) {
-                            Toast.makeText(this@MainActivity, "コピー失敗: ${e.message}", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            },
-            onRemove = { selector ->
-                mainHandler.post {
-                    if (!isFinishing && !isDestroyed) {
-                        viewModel.removeExcludeSelector(selector)
-                    }
-                }
-            },
-            onStatusUpdate = { status ->
-                mainHandler.post {
-                    if (!isFinishing && !isDestroyed) {
-                        Log.d(TAG, "onLiveTranslateStatus: $status")
-                        viewModel.handleLiveTranslateStatus(status)
-                        if (status == "SUCCESS") {
-                            Toast.makeText(this@MainActivity, "ページを翻訳しました", Toast.LENGTH_SHORT).show()
-                        } else if (status == "RESTORED") {
-                            Toast.makeText(this@MainActivity, "原文に復元しました", Toast.LENGTH_SHORT).show()
-                        } else if (status.startsWith("ERROR")) {
-                            Toast.makeText(this@MainActivity, "翻訳エラー: $status", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            }
-        )
-        view.addJavascriptInterface(bridge, "AndroidBridge")
+        bridgeFactory.attach(view, webViewHolder)
     }
 
     private fun toggleLiveTranslation(view: WebView?) {
-        val now = System.currentTimeMillis()
-        if (now - lastToggleLiveTranslateTime < 500L) {
-            Log.d(TAG, "toggleLiveTranslation: Debounced rapid toggle click")
-            return
-        }
-        lastToggleLiveTranslateTime = now
-
-        val v = view ?: mainWebView
-        if (v == null) {
-            Log.e(TAG, "toggleLiveTranslation: WebView is null")
-            Toast.makeText(this, "WebViewの初期化待ちです", Toast.LENGTH_SHORT).show()
-            return
-        }
-        Log.d(TAG, "toggleLiveTranslation: Evaluating script on WebView url=${v.url}")
-        val js = LiveTranslateScriptBuilder.buildToggleLiveTranslateScript()
-        v.evaluateJavascript(js) { res ->
-            Log.d(TAG, "toggleLiveTranslation evaluateJavascript result: $res")
-        }
+        liveTranslateController.toggle(view)
     }
 
     private fun injectInspector(view: WebView?) {
-        view?.let { v ->
-            mainWebView = v
-            val config = viewModel.uiState.value.currentConfig
-            v.evaluateJavascript(ScrapingScriptBuilder.buildInspectorScript(config), null)
-        }
+        inspectorController.inject(view)
     }
 
     private fun removeInspector(view: WebView?) {
-        view?.let { v ->
-            v.evaluateJavascript(ScrapingScriptBuilder.buildInspectorStopScript(), null)
-        }
+        inspectorController.remove(view)
     }
 
     /**
@@ -303,22 +292,7 @@ class MainActivity : ComponentActivity() {
      * 候補カードの適用/自動再テストは Compose 側 (MainScreen) で行う。
      */
     private fun handleExcludeRequest(selector: String) {
-        val view = mainWebView ?: return
-        view.evaluateJavascript(ScrapingScriptBuilder.buildCandidateProbeScript(selector)) { res ->
-            if (res != null && res != "null") {
-                try {
-                    val raw = Json.decodeFromString<String>(res)
-                    val items = Json.decodeFromString<List<ExcludeCandidate>>(raw)
-                    if (items.isNotEmpty()) {
-                        viewModel.setExcludeCandidates(ExcludeCandidatesState(baseSelector = selector, items = items))
-                    } else {
-                        Toast.makeText(this, "除外候補が見つかりません", Toast.LENGTH_SHORT).show()
-                    }
-                } catch (e: Exception) {
-                    Toast.makeText(this, "候補取得失敗: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
+        probeController.handleExcludeRequest(selector)
     }
 
     private fun checkNotificationPermission() {

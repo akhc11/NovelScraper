@@ -1,5 +1,6 @@
 package com.example.novelscraper.translation.v2.pipeline
 
+import com.example.novelscraper.translation.v2.infra.AtomicFileGateway
 import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.VDoc
 import kotlinx.coroutines.CancellationException
@@ -381,25 +382,9 @@ private suspend fun resolveInputsByHash(
     return resolved
 }
 
-/** 異常終了時の別名残骸だけ掃除する（名簿外のため結合には不可視だが hygiene として除去）。 */
+/** 異常終了時の別名残骸だけ掃除する（実体は [AtomicFileGateway]）。 */
 private suspend fun sweepSessionTmp(store: FileStore, outDirUri: String, log: (String) -> Unit) {
-    try {
-        for (child in store.children(outDirUri)) {
-            if (!child.isDirectory && child.name.startsWith(".tmp_")) {
-                try {
-                    store.deleteFile(child.uri)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (t: Throwable) {
-                    log("chunk tmp sweep failed: ${child.name} ${t.message}")
-                }
-            }
-        }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (t: Throwable) {
-        log("chunk tmp sweep failed: ${t.message}")
-    }
+    AtomicFileGateway(store, log).sweepStaleTmp(outDirUri)
 }
 
 /**

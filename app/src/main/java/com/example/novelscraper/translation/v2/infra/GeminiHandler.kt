@@ -2,8 +2,10 @@ package com.example.novelscraper.translation.v2.infra
 
 import com.example.novelscraper.translation.v2.domain.ClassifiedFailure
 import com.example.novelscraper.translation.v2.domain.FailureKind
+import com.example.novelscraper.translation.v2.domain.FailureNotes
 import com.example.novelscraper.translation.v2.domain.GeminiErrorMapper
 import com.example.novelscraper.translation.v2.domain.GenericErrorMapper
+import com.example.novelscraper.translation.v2.domain.isOutputTruncated
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ProviderHandler
@@ -147,6 +149,11 @@ internal fun parseGeminiResponse(code: Int, body: String, retryAfterSec: Long? =
             return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "decode-error"))
         }
         val candidate = resp.candidates?.firstOrNull()
+        val finishReason = candidate?.finishReason
+        // 技術的根拠1行：上限打切りは本文の有無に関わらず未完として扱い、切れ端の完成誤認と空振りの確定化を防ぐ。
+        if (isOutputTruncated(finishReason)) {
+            return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = FailureNotes.CUTOFF_MAX_TOKENS))
+        }
         val text = candidate?.content?.parts
             ?.filter { it.thought != true }
             ?.mapNotNull { it.text }
@@ -154,7 +161,6 @@ internal fun parseGeminiResponse(code: Int, body: String, retryAfterSec: Long? =
             .orEmpty()
         if (text.isBlank()) {
             val blockReason = resp.promptFeedback?.blockReason
-            val finishReason = candidate?.finishReason
             return when {
                 blockReason != null ->
                     LlmResult.Failure(ClassifiedFailure(FailureKind.BLOCKED_DETERMINISTIC, note = "block:$blockReason"))

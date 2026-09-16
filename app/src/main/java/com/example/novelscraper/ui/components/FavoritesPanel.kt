@@ -70,7 +70,8 @@ fun FavoritesPanel(
                 FavoriteItem(
                     name = name,
                     url = url,
-                    onClick = { onFavoriteClick(url) },
+                    // 空URLタップは無操作（遷移ガードが無視するため表示のみ維持）。
+                    onClick = { if (url.isNotBlank()) onFavoriteClick(url) },
                     onDelete = { onDeleteClick(name) }
                 )
             }

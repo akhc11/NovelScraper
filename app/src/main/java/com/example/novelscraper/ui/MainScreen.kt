@@ -74,6 +74,8 @@ fun MainScreen(
     val v2EngineState by v2ViewModel.engineState.collectAsState()
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    // レンダラープロセス死亡時の再生成キー（破棄済みWebViewは再利用禁止が公式要件）。
+    var webViewKey by remember { mutableIntStateOf(0) }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -143,7 +145,9 @@ fun MainScreen(
     }
 
     // URL変更時のナビゲーション（正規化比較により同一URLの不要な二重リロードを完全防止）
-    LaunchedEffect(uiState.currentUrl) {
+    // 発火点はここ1箇所に集約。webViewRefもキーに含め、冷起動・WebView再生成時の取りこぼしを防ぐ。
+    // SSoTはViewModel.currentUrl。factory側で直接loadしない（二重発火防止）。
+    LaunchedEffect(uiState.currentUrl, webViewRef) {
         val view = webViewRef
         if (view != null && uiState.currentUrl.isNotEmpty()) {
             val currentNormalized = view.url?.trimEnd('/') ?: ""
@@ -180,8 +184,8 @@ fun MainScreen(
                     viewModel.togglePanel(PanelType.FAVORITES)
                 },
                 onUrlSubmit = { url ->
+                    // ナビゲーション発火はLaunchedEffect(currentUrl)に一本化し二重loadUrlを防ぐ。
                     viewModel.setCurrentUrl(url)
-                    webViewRef?.let { callbacks.onNavigate(url, it) }
                 },
                 onUrlChange = { viewModel.setInputUrl(it) },
                 onPanelToggle = { panel ->
@@ -215,7 +219,7 @@ fun MainScreen(
                         if (liveUrl != null && liveUrl != uiState.currentUrl) {
                             viewModel.setCurrentUrl(liveUrl)
                         }
-                        val currentTask = activeTasks.firstOrNull { it.currentUrl == url }
+                        val currentTask = activeTasks.firstOrNull { it.currentUrl == url || it.startUrl == url }
                         if (currentTask != null) {
                             currentTask.stop()
                         } else {
@@ -240,6 +244,8 @@ fun MainScreen(
         ) {
             // 背景レイヤー: WebView（画面遷移を行わず常駐）
             Column(modifier = Modifier.fillMaxSize()) {
+                // webViewKey変更でfactoryから再生成する（onRenderProcessGone後の復旧用）。
+                key(webViewKey) {
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx).apply {
@@ -297,10 +303,13 @@ fun MainScreen(
                                     val didCrash = detail?.didCrash() ?: false
                                     val reason = if (didCrash) "レンダラークラッシュ (C++エラー)" else "メモリ不足によるOS強制終了 (OOM)"
                                     Log.e("MainScreen", "WebView onRenderProcessGone 検知: $reason")
+                                    // 公式要件：死亡インスタンスは階層から外してdestroyし、参照を cleared して新規生成する。
                                     try {
                                         view?.destroy()
                                     } catch (_: Exception) {}
-                                    Toast.makeText(context, "ブラウザ描画プロセスが停止しました ($reason)", Toast.LENGTH_LONG).show()
+                                    webViewRef = null
+                                    Toast.makeText(context, "ブラウザ描画プロセスが停止しました ($reason)。再生成します", Toast.LENGTH_LONG).show()
+                                    webViewKey++
                                     return true // アプリ本体のクラッシュを100%阻止
                                 }
                             }
@@ -329,6 +338,7 @@ fun MainScreen(
                             alpha = if (uiState.overlay == Overlay.None || uiState.overlay is Overlay.InspectMode) 1f else 0f
                         }
                 )
+                }
 
                 // 独立したステータスバー（翻訳高頻度更新時のリコンポジションを局所化）
                 AppStatusBar(
@@ -400,9 +410,8 @@ fun MainScreen(
                             onCloseClick = { viewModel.closePanels() },
                             onStopTaskClick = { task -> task.stop(); viewModel.removeTask(task) },
                             onHistoryItemClick = { url ->
-                                webViewRef?.let { callbacks.onNavigate(url, it) }
+                                // setCurrentUrlがinputUrlも同期するため重複setはしない。遷移はLaunchedEffectに一本化。
                                 viewModel.setCurrentUrl(url)
-                                viewModel.setInputUrl(url)
                                 viewModel.closePanels()
                             },
                             onHistoryResumeClick = { folder ->
@@ -425,9 +434,7 @@ fun MainScreen(
                         FavoritesPanel(
                             favorites = favorites,
                             onFavoriteClick = { url ->
-                                webViewRef?.let { callbacks.onNavigate(url, it) }
                                 viewModel.setCurrentUrl(url)
-                                viewModel.setInputUrl(url)
                                 viewModel.closePanels()
                             },
                             onDeleteClick = { name -> viewModel.deleteFavorite(name) },
@@ -456,9 +463,8 @@ fun MainScreen(
                                     TranslationEngine.PAPAGO -> "https://papago.naver.com/?sk=ko&tk=ja"
                                     TranslationEngine.LLM_API -> "https://aistudio.google.com/"
                                 }
-                                webViewRef?.let { callbacks.onNavigate(targetUrl, it) }
+                                // 遷移はLaunchedEffect(currentUrl)に一本化。
                                 viewModel.setCurrentUrl(targetUrl)
-                                viewModel.setInputUrl(targetUrl)
                                 viewModel.closePanels()
                             },
                             onCloseClick = { viewModel.closePanels() }

@@ -18,7 +18,7 @@ import kotlinx.coroutines.*
  */
 class ScrapingTask(
     context: Context,
-    private val startUrl: String,
+    val startUrl: String,
     val config: ScraperConfig,
     private val useImages: Boolean,
     private val isDesktop: Boolean,

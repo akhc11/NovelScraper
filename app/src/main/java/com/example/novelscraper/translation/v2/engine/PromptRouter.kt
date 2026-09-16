@@ -6,6 +6,8 @@ import com.example.novelscraper.translation.v2.domain.FailureKind
 import com.example.novelscraper.translation.v2.domain.LlmRequest
 import com.example.novelscraper.translation.v2.domain.LlmResult
 import com.example.novelscraper.translation.v2.domain.ProviderDescriptor
+import com.example.novelscraper.translation.v2.domain.RetryPolicy
+import com.example.novelscraper.translation.v2.domain.Sleeper
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.V2SendGate
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
@@ -38,7 +40,7 @@ internal fun epochGuard(profileCount: Int, promptCount: Int): Int =
 suspend fun patientSleep(
     totalMs: Long,
     stopped: () -> Boolean,
-    sleeper: suspend (Long) -> Unit
+    sleeper: Sleeper
 ) {
     var remaining = totalMs.coerceAtLeast(0)
     while (remaining > 0) {
@@ -90,49 +92,33 @@ internal suspend fun executeLlmCall(
 }
 
 /**
- * 一時エラー（5xx・通信瞬断等）の待機・再送判定（RotationとUnmanagedRotationで共有）。
- * 技術的根拠1行：待機秒数解決・ログ出力・スリープ処理のコピペ重複を排除し、DRY原則を徹底する。
+ * 待機・再送判定の唯一の実装（一時系・制限系で共有）。
+ * サーバ指定秒（Retry-After）を最優先し、なければ [RetryPolicy] の式で解く。
+ * 技術的根拠1行：待機秒数解決・ログ・睡眠の分散実装は必ず乖離するため、式は方針に、手順はここに一本化する。
  */
-internal suspend fun handleTransientRetry(
+internal suspend fun handleRetryableWait(
     failure: ClassifiedFailure,
-    transientRetryDelaySec: Int,
-    sameLeft: Int,
-    sleeper: suspend (Long) -> Unit,
+    label: String,
+    baseDelaySec: Long,
+    capSec: Long,
+    retriesUsed: Int,
+    maxRetries: Int,
+    policy: RetryPolicy = RetryPolicy(),
+    sleeper: Sleeper,
     log: (String) -> Unit,
     stopped: () -> Boolean = { false }
 ): Boolean {
-    if (sameLeft <= 0) return false
-    val waitSec = failure.retryAfterSec?.toLong()?.coerceIn(0L, TranslationLimits.RETRY_AFTER_MAX_SEC)
-        ?: transientRetryDelaySec.toLong().coerceIn(0L, TranslationLimits.WAIT_MAX_SEC)
-    if (waitSec > 0) {
-        log("一時エラーのため ${waitSec}秒待機して再送します")
-        patientSleep(waitSec * 1000L, stopped, sleeper)
+    if (retriesUsed >= maxRetries) return false
+    val serverMs = failure.retryAfterSec?.toLong()
+        ?.coerceIn(0L, TranslationLimits.RETRY_AFTER_MAX_SEC)?.times(1000L)
+    val waitMs = serverMs
+        ?: policy.copy(baseDelayMs = baseDelaySec * 1000L, maxDelayMs = capSec * 1000L)
+            .delayForAttempt(retriesUsed + 1)
+    if (waitMs > 0) {
+        log("$label のため ${waitMs / 1000L}秒待機して再送します")
+        patientSleep(waitMs, stopped, sleeper)
     } else {
-        log("一時エラーのため即座に再送します")
-    }
-    return true
-}
-
-/**
- * 429レート制限・クォータ一時エラーの待機・再送判定（RotationとUnmanagedRotationで共有）。
- */
-internal suspend fun handleQuotaRetry(
-    failure: ClassifiedFailure,
-    cooldownSec: Int,
-    maxCooldownSec: Long,
-    sameLeft: Int,
-    sleeper: suspend (Long) -> Unit,
-    log: (String) -> Unit,
-    stopped: () -> Boolean = { false }
-): Boolean {
-    if (sameLeft <= 0) return false
-    val waitSec = failure.retryAfterSec?.toLong()?.coerceIn(0L, TranslationLimits.RETRY_AFTER_MAX_SEC)
-        ?: cooldownSec.toLong().coerceIn(0L, maxCooldownSec)
-    if (waitSec > 0) {
-        log("${failure.kind} のため ${waitSec}秒待機して再送します")
-        patientSleep(waitSec * 1000L, stopped, sleeper)
-    } else {
-        log("${failure.kind} のため即座に再送します")
+        log("$label のため即座に再送します")
     }
     return true
 }

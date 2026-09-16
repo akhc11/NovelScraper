@@ -11,6 +11,7 @@ import com.example.novelscraper.translation.v2.domain.ProviderHandler
 import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.domain.RequestOptions
+import com.example.novelscraper.translation.v2.domain.Sleeper
 import com.example.novelscraper.translation.v2.domain.ThinkingSupport
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.toProviderId
@@ -20,6 +21,7 @@ import com.example.novelscraper.translation.v2.domain.resolveDouble
 import com.example.novelscraper.translation.v2.domain.resolveInt
 import com.example.novelscraper.translation.v2.domain.resolveOption
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
+import com.example.novelscraper.translation.v2.settings.V2Settings
 
 /** ハンドラー生成。資格情報（キー）とエンドポイントの束縛は呼出側の責務 */
 typealias HandlerFactory = (profile: V2ModelProfile, key: String) -> ProviderHandler
@@ -50,8 +52,7 @@ fun resolveProfileOptions(
         return resolveDouble(range, null, value).value
     }
     val modelMaxTokens = caps?.maxOutputTokens ?: 65536
-    val resolvedMaxTokens = profile.maxOutputTokens?.coerceIn(TranslationLimits.MIN_OUTPUT_TOKENS, modelMaxTokens)
-        ?: modelMaxTokens
+    val resolvedMaxTokens = V2Settings.resolveMaxTokens(profile.maxOutputTokens, modelMaxTokens)
     return RequestOptions(
         temperature = gateSampling("temperature", profile.temperature),
         topP = gateSampling("topP", profile.topP),
@@ -83,7 +84,7 @@ class Rotation(
     private val sendGateIntervalMs: Long = 10_000L,
     private val stopped: () -> Boolean = { false },
     private val meter: CostMeter? = null,
-    private val sleeper: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+    private val sleeper: Sleeper = { kotlinx.coroutines.delay(it) },
     private val log: (String) -> Unit = {}
 ) : PromptRouter {
     override var exhausted: Boolean = false
@@ -199,7 +200,7 @@ class Rotation(
                                             val scope = scopesFor(profile).firstOrNull() ?: profile.model
                                             failedScopes.add(keyIndex to scope)
                                         }
-                                        if (handleQuotaRetry(result.failure, geminiCooldownSec, TranslationLimits.COOLDOWN_MAX_SEC.toLong(), sameLeft, sleeper, log, stopped)) {
+                                        if (handleRetryableWait(result.failure, result.failure.kind.name, geminiCooldownSec.toLong(), TranslationLimits.COOLDOWN_MAX_SEC.toLong(), maxSameRetries - sameLeft, maxSameRetries, sleeper = sleeper, log = log, stopped = stopped)) {
                                             sameLeft--
                                             continue
                                         }
@@ -207,7 +208,7 @@ class Rotation(
                                     }
                                     FailureKind.RETRYABLE_AFTER -> {
                                         // 技術的根拠1行：5xxや通信一時エラーはクォータ枯渇ではないためプール報告せず、一時エラー待機設定で再試行する。
-                                        if (handleTransientRetry(result.failure, transientRetryDelaySec, sameLeft, sleeper, log, stopped)) {
+                                        if (handleRetryableWait(result.failure, "一時エラー", transientRetryDelaySec.toLong(), TranslationLimits.WAIT_MAX_SEC, maxSameRetries - sameLeft, maxSameRetries, sleeper = sleeper, log = log, stopped = stopped)) {
                                             sameLeft--
                                             continue
                                         }

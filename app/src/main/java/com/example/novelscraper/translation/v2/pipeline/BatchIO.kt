@@ -1,5 +1,6 @@
 package com.example.novelscraper.translation.v2.pipeline
 
+import com.example.novelscraper.translation.v2.infra.VDoc
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -31,10 +32,6 @@ private val BATCH_JSON_RESCUE_KEYMAP = Regex(
 )
 private val BATCH_TRANS_REGEX = Regex(
     """<trans\s+[^>]*?id\s*=\s*["']?([0-9０-９]+)["']?[^>]*>([\s\S]*?)</\s*trans\s*>""",
-    RegexOption.IGNORE_CASE
-)
-private val BATCH_TRANS_UNCLOSED_REGEX = Regex(
-    """<trans\s+[^>]*?id\s*=\s*["']?([0-9０-９]+)["']?[^>]*>([\s\S]*)$""",
     RegexOption.IGNORE_CASE
 )
 private val BATCH_CHAPTER_REGEX = Regex(
@@ -276,7 +273,8 @@ fun parseBatchJsonResponse(text: String): Map<Int, String>? {
 
 /**
  * `<trans id="N">...</trans>` のXMLタグ形式パーサー。
- * クォート有無、全角タグ、全角数字、属性前後空白、大文字小文字、途絶タグ救済に対応。
+ * クォート有無、全角タグ、全角数字、属性前後空白、大文字小文字に対応。
+ * 閉じタグのない末尾断片は未完として採用しない（欠け分は単品再送に回す）。
  */
 fun parseBatchXmlResponse(text: String): Map<Int, String>? {
     val raw = stripFences(text).trim()
@@ -284,9 +282,7 @@ fun parseBatchXmlResponse(text: String): Map<Int, String>? {
 
     val normalized = normalizeFullWidthBatchTags(raw)
     val result = linkedMapOf<Int, String>()
-    // 技術的根拠1行：正規表現走査は1回にし、末尾救済は同一結果を使い回す。
-    val matches = BATCH_TRANS_REGEX.findAll(normalized).toList()
-    for (m in matches) {
+    for (m in BATCH_TRANS_REGEX.findAll(normalized)) {
         val id = normalizeDigits(m.groupValues[1]).toIntOrNull() ?: continue
         if (id < 0 || result.containsKey(id)) continue
         val bodyRange = m.groups[2]?.range ?: continue
@@ -296,29 +292,45 @@ fun parseBatchXmlResponse(text: String): Map<Int, String>? {
         }
     }
 
-    // 末尾セグメントが途絶して </trans> が欠けている場合の救済（1件以上の完成タグがある場合）
-    if (result.isNotEmpty()) {
-        val lastMatch = matches.lastOrNull()
-        if (lastMatch != null && lastMatch.range.last < normalized.length - 1) {
-            val tail = normalized.substring(lastMatch.range.last + 1)
-            val unclosedMatch = BATCH_TRANS_UNCLOSED_REGEX.find(tail)
-            if (unclosedMatch != null) {
-                val id = normalizeDigits(unclosedMatch.groupValues[1]).toIntOrNull()
-                if (id != null && !result.containsKey(id)) {
-                    val groupRange = unclosedMatch.groups[2]?.range
-                    if (groupRange != null) {
-                        val absStart = lastMatch.range.last + 1 + groupRange.first
-                        val content = raw.substring(absStart).trim()
-                        if (content.isNotBlank()) {
-                            result[id] = content
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     return result.ifEmpty { null }
+}
+
+/**
+ * 束ね応答の完成判定。閉じた箱ごとに検証し、欠け（不在・検証NG）を欠番として返す。
+ * 技術的根拠1行：欠けの判定を1箇所にし、保存路と再送路での数え違いをなくす。
+ */
+data class BatchValidation(
+    /** 0-based index → 検証済み訳文 */
+    val verified: Map<Int, String>,
+    /** 欠けている1-based id */
+    val missingIds: List<Int>,
+    /** 0-based index → 採用時の検証条件（推敲の再検証用）。欠け分は含まない */
+    val vos: Map<Int, VerifyOptions> = emptyMap()
+)
+
+fun validateBatchCompleteness(
+    items: List<Pair<String, String>>,
+    parsed: Map<Int, String>,
+    verify: VerifyOptions,
+    /** itemsと同順の検査条件。方式差は言語方針が吸収する */
+    checks: List<DictCheck?> = emptyList()
+): BatchValidation {
+    val isZeroIndexed = parsed.containsKey(0) && !parsed.containsKey(items.size)
+    val verified = linkedMapOf<Int, String>()
+    val missing = mutableListOf<Int>()
+    val vos = linkedMapOf<Int, VerifyOptions>()
+    // 技術的根拠1行：束ね片は栞を持たないため栞検査は外す（検査条件だけ話別に差す）。
+    val base = verify.copy(markerEnabled = false)
+    for ((idx, item) in items.withIndex()) {
+        val seg = parsed[idx + 1] ?: if (isZeroIndexed) parsed[idx] else null
+        val vo = checks.getOrNull(idx)?.let { base.copy(dictCheck = it) } ?: base.copy(dictCheck = null)
+        val ok = seg?.let { verifyTranslation(item.second, it, vo) }
+        if (ok != null) {
+            verified[idx] = ok
+            vos[idx] = vo
+        } else missing.add(idx + 1)
+    }
+    return BatchValidation(verified, missing, vos)
 }
 
 /**
@@ -422,5 +434,58 @@ fun detectBatchSwap(
     }
 
     return false
+}
+
+/** 束ね計画の単位。files 添字の連番 run。 */
+data class FileBundle(val indices: List<Int>)
+
+/**
+ * 束ね計画の唯一の入口。残ファイルを前から順に束ねる。
+ * サイズ見積りは VDoc.length（生サイズ）。0以下＝不明として単独束にする（安全側）。
+ * 技術的根拠1行：束ね決定権を1箇所に集め、作業者間の奪い合いを構造的に不可能にする。
+ */
+fun planBundles(
+    files: List<VDoc>,
+    isSkipped: (VDoc) -> Boolean,
+    forceSingle: (VDoc) -> Boolean = { false },
+    batchMaxFiles: Int = 3,
+    batchMaxBytes: Int,
+    splitThresholdBytes: Int
+): List<FileBundle> {
+    val maxFiles = batchMaxFiles.coerceAtLeast(1)
+    val bundles = mutableListOf<FileBundle>()
+    var cur = mutableListOf<Int>()
+    var curBytes = 0L
+    fun flush() {
+        if (cur.isNotEmpty()) {
+            bundles.add(FileBundle(cur.toList()))
+            cur = mutableListOf()
+            curBytes = 0L
+        }
+    }
+    for ((idx, f) in files.withIndex()) {
+        if (isSkipped(f)) continue
+        val est = f.length
+        if (maxFiles == 1 || forceSingle(f) || est <= 0L || est > splitThresholdBytes) {
+            flush()
+            bundles.add(FileBundle(listOf(idx)))
+            continue
+        }
+        if (cur.size + 1 > maxFiles || curBytes + est > batchMaxBytes) flush()
+        cur.add(idx)
+        curBytes += est
+    }
+    flush()
+    return bundles
+}
+
+/**
+ * 束プール。束番号の払い出しだけを担う共有受付（既存の占有集合と同型の同期方式）。
+ */
+class BundlePool(bundles: List<FileBundle>) {
+    private val queue: ArrayDeque<FileBundle> = ArrayDeque(bundles)
+    fun claimNext(): FileBundle? = synchronized(queue) {
+        if (queue.isEmpty()) null else queue.removeFirst()
+    }
 }
 

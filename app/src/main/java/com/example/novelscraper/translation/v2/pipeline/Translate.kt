@@ -2,17 +2,17 @@ package com.example.novelscraper.translation.v2.pipeline
 
 import com.example.novelscraper.translation.v2.domain.CostMeter
 import com.example.novelscraper.translation.v2.domain.ClassifiedFailure
+import com.example.novelscraper.translation.v2.domain.DefaultRetryPolicy
 import com.example.novelscraper.translation.v2.domain.FailureKind
+import com.example.novelscraper.translation.v2.domain.FailureNotes
 import com.example.novelscraper.translation.v2.domain.LlmResult
+import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.isDeterministicFailure
 import com.example.novelscraper.translation.v2.domain.isQuotaLike
+import com.example.novelscraper.translation.v2.infra.AtomicFileGateway
 import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.VDoc
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
-
-/** SAFでの同名衝突による自動付与 " (1)" を検知する正規表現（呼出毎コンパイル回避） */
-private val COLLISION_RENAME_REGEX = Regex(""".*\s\(\d+\).*""")
 
 /** 一回の試行単位（ドライバー名＋プロンプト＋入力＋呼出）。順序＝退避優先順 */
 data class Attempt(
@@ -30,7 +30,7 @@ sealed interface DriverOutcome {
 
 data class AttemptOptions(
     val maxSameRetries: Int = 2,
-    val retryDelayMs: (attempt: Int) -> Long = { attempt -> 1000L * (attempt + 1) },
+    val retryDelayMs: (attempt: Int) -> Long = DefaultRetryPolicy::delayForAttempt,
     val stopped: () -> Boolean = { false },
     val meter: CostMeter? = null,
     val log: (String) -> Unit = {}
@@ -41,17 +41,58 @@ data class AttemptOptions(
  * エンジン経路では Rotation がモデル巡回・コスト計上を担うため、同一切替なし（maxSameRetries=0）かつ
  * meter=null で使う（ここにmeterを渡すと二重計上になる）。
  */
+/**
+ * 試行群の集計（PolicyEngine の判定核）。運転者単位・指示文単位の両役が共有する。
+ * 技術的根拠1行：終端決定の二重実装は必ず乖離するため、仕分けと決定はここに一本化する。
+ */
+class AttemptTally {
+    private var sawConfig = false
+    private var sawDeterministic = false
+    private var sawTransient = false
+    private var lastKind: FailureKind? = null
+    private var lastNote = ""
+    private var detKind: FailureKind? = null
+    private var detNote: String? = null
+
+    fun record(kind: FailureKind, note: String) {
+        lastKind = kind
+        lastNote = note
+        when (kind) {
+            FailureKind.BLOCKED_DETERMINISTIC, FailureKind.FATAL -> {
+                sawDeterministic = true
+                detKind = kind
+                detNote = note
+            }
+            FailureKind.CONFIG -> sawConfig = true
+            FailureKind.QUOTA_DAILY, FailureKind.QUOTA_MINUTE, FailureKind.RETRYABLE_AFTER -> sawTransient = true
+        }
+    }
+
+    /** 品質不合格（検証NG）は終端種別を FATAL 扱いで記録するが、確定旗は立てない（最終述語に委ねる）。 */
+    fun recordQualityReject(note: String) {
+        lastKind = FailureKind.FATAL
+        lastNote = note
+    }
+
+    /** 設定のみ・かつ他種別なし */
+    val configOnly: Boolean get() = sawConfig && !sawDeterministic && !sawTransient
+
+    /** 無駄打ち防止：設定・一時的失敗が出たら巡回を打ち切る */
+    fun shouldBreak(): Boolean = sawConfig || sawTransient
+
+    fun terminal(default: FailureKind): FailureKind = when {
+        configOnly -> FailureKind.CONFIG
+        sawDeterministic -> detKind ?: FailureKind.BLOCKED_DETERMINISTIC
+        else -> lastKind ?: default
+    }
+
+    fun note(): String = if (sawDeterministic) (detNote ?: lastNote) else lastNote
+}
+
 suspend fun attemptDrivers(attempts: List<Attempt>, options: AttemptOptions = AttemptOptions()): DriverOutcome {
-    var sawConfig = false
-    var sawDeterministic = false
-    var sawTransient = false
-    var lastFailureKind: FailureKind? = null
+    val tally = AttemptTally()
     val budget = RetryBudget()
     var lastDriver: String? = null
-    var lastNote = ""
-
-    var lastDeterministicKind: FailureKind? = null
-    var lastDeterministicNote: String? = null
 
     for (attempt in attempts) {
         if (options.stopped()) return DriverOutcome.Stopped
@@ -68,33 +109,12 @@ suspend fun attemptDrivers(attempts: List<Attempt>, options: AttemptOptions = At
                 settled.result.text, settled.result.promptTokens, settled.result.completionTokens
             )
             is CallSettled.Stopped -> return DriverOutcome.Stopped
-            is CallSettled.Terminal -> {
-                lastNote = settled.failure.note
-                lastFailureKind = settled.failure.kind
-                when (settled.failure.kind) {
-                    FailureKind.BLOCKED_DETERMINISTIC, FailureKind.FATAL -> {
-                        sawDeterministic = true
-                        lastDeterministicKind = settled.failure.kind
-                        lastDeterministicNote = settled.failure.note
-                    }
-                    FailureKind.CONFIG -> sawConfig = true
-                    FailureKind.QUOTA_DAILY, FailureKind.QUOTA_MINUTE, FailureKind.RETRYABLE_AFTER -> {
-                        sawTransient = true
-                    }
-                }
-            }
+            is CallSettled.Terminal -> tally.record(settled.failure.kind, settled.failure.note)
         }
     }
     if (options.stopped()) return DriverOutcome.Stopped
     // 技術的根拠1行：設定エラーのみならワーカー停止、確定的失敗ならその障害種別を維持（FATAL丸め込みによる判定漏れ防止）、外的要因のみなら元の障害種別を返して.failed作成を防ぐ。
-    val terminal = when {
-        sawConfig && !sawDeterministic && !sawTransient -> FailureKind.CONFIG
-        sawDeterministic -> lastDeterministicKind ?: FailureKind.BLOCKED_DETERMINISTIC
-        else -> lastFailureKind ?: FailureKind.RETRYABLE_AFTER
-    }
-    val configOnly = sawConfig && !sawDeterministic && !sawTransient
-    val note = if (sawDeterministic) (lastDeterministicNote ?: lastNote) else lastNote
-    return DriverOutcome.GiveUp(terminal, configOnly = configOnly, note = note)
+    return DriverOutcome.GiveUp(tally.terminal(FailureKind.RETRYABLE_AFTER), configOnly = tally.configOnly, note = tally.note())
 }
 
 data class VerifyOptions(
@@ -103,19 +123,14 @@ data class VerifyOptions(
     val kanaFloor: Double = 0.2,
     val markerEnabled: Boolean = true,
     /** Null disables residual detection (keeps existing callers/tests unchanged). */
-    val residual: ResidualOptions? = null
+    val residual: ResidualOptions? = null,
+    /** 非null時は辞書検査（注釈畳み＋必須語存在）を行う。方式差は言語方針が吸収する */
+    val dictCheck: DictCheck? = null
 )
 
 fun verifyTranslation(sourceText: String, translatedText: String, options: VerifyOptions): String? {
-    val stripped = stripFences(translatedText)
-    val withoutMarker = checkAndStripMarker(stripped, options.markerEnabled) ?: return null
-    val cleaned = withoutMarker.trim()
-    if (cleaned.isBlank()) return null
-    if (options.residual != null && residualFailure(cleaned, options.residual) != null) return null
-    if (!lineCountOk(sourceText, cleaned)) return null
-    if (!sizeRatioOk(sourceText, cleaned, options.sizeMinPct, options.sizeMaxPct)) return null
-    if (!meetsKanaFloor(cleaned, options.kanaFloor)) return null
-    return cleaned
+    val receipt = assessCompletion(sourceText, translatedText, options)
+    return if (receipt.complete) receipt.cleaned else null
 }
 
 sealed interface SingleResult {
@@ -130,13 +145,27 @@ sealed interface SingleResult {
     data object Stopped : SingleResult
 }
 
+/**
+ * 最終推敲の設定ひとまとまり。null＝推敲なし（既定）。
+ * 技術的根拠1行：on/off・指示文・送り口の3点が散ると有効条件が路ごとにずれるため、1個に束ねる。
+ */
+data class RefineConfig(
+    /** 解決済み推敲指示文 */
+    val prompt: String,
+    /** 磨き専用の送信 binding（主経路から作る。巡回・待機の適用は作り手の責務） */
+    val call: suspend (prompt: String, source: String) -> LlmResult
+)
+
 data class TranslateContext(
     val basePrompts: Map<Int, String>,
     val promptOrder: List<Int>,
     val driverNames: List<String>,
     val dictionary: NovelDict? = null,
-    val dictionaryStyle: String? = null,
     val verify: VerifyOptions = VerifyOptions(),
+    /** 言語検出結果。辞書方式の選択に使う（韓・英＝対応表、他＝注釈。既定は中国語互換のためZH） */
+    val sourceLang: SourceLang = SourceLang.ZH,
+    /** 最終推敲の設定ひとまとまり。null＝推敲なし（既定・従来動作） */
+    val refine: RefineConfig? = null,
     /** ドライバー名・プロンプト・入力を受けて送信する（巡回適用済み binding） */
     val call: suspend (driverName: String, prompt: String, source: String) -> LlmResult,
     /** バッチ枠専用の送信 binding（構造化出力の適用範囲をバッチに限定する）。null時はcallを使う */
@@ -154,21 +183,18 @@ data class TranslateContext(
 
 private fun buildAttempts(
     ctx: TranslateContext,
-    chunkText: String,
     prevTranslatedTail: String?,
     prevSourceTail: String?,
     sourceForMarker: String,
-    batchFormat: String? = null
+    batchFormat: String? = null,
+    /** 非null時は対応確定の1行指示を付ける（本文は呼出側で注釈済み） */
+    termAnnotation: TermAnnotation? = null,
+    /** 非null時は人物対応表を付ける（韓国語用。注釈方式とは択一） */
+    glossary: Map<String, String>? = null
 ): List<Attempt> {
     val attempts = mutableListOf<Attempt>()
     // 技術的根拠1行：構造化出力の適用範囲をバッチ枠に限定するため、枠種別で送信bindingを使い分ける
     val invoke = if (batchFormat != null) (ctx.callBatch ?: ctx.call) else ctx.call
-    // 技術的根拠1行：本文中に登場する人物のみを注入し、該当なし時は無関係な参考例を注入せずトークン浪費とハルシネーションを防ぐ
-    val dictEntries = if (ctx.dictionary != null) {
-        matchDictionaryEntries(chunkText, ctx.dictionary.characters, ctx.dictionary.genders)
-    } else {
-        emptyList()
-    }
     for (driver in ctx.driverNames) {
         for (promptNum in ctx.promptOrder.ifEmpty { listOf(1, 1) }) {
             val base = ctx.basePrompts[promptNum] ?: ctx.basePrompts.values.firstOrNull() ?: ""
@@ -176,8 +202,8 @@ private fun buildAttempts(
                 basePrompt = base,
                 previousTranslatedTail = prevTranslatedTail,
                 previousSourceTail = prevSourceTail,
-                dictionaryEntries = dictEntries,
-                dictionaryStyle = ctx.dictionaryStyle,
+                termAnnotation = termAnnotation,
+                glossary = glossary,
                 enableCompletionMarker = ctx.verify.markerEnabled,
                 batchFormat = batchFormat
             )
@@ -186,6 +212,47 @@ private fun buildAttempts(
         }
     }
     return attempts
+}
+
+/**
+ * 最終推敲の単一入口。単品・束ねの両路が共有する。
+ * 初回訳文を原文＋対応表付きで磨き直し、同一検査に通れば採用、不合格・制限・停止時は初回訳文をそのまま返す。
+ * 技術的根拠1行：磨き直しの成否判定を1箇所にし、路ごとの悪化（改悪採用・無限再送）を構造的に不可能にする。
+ * 動作例：初回「軍人やイナ、ベテラン」→推敲「軍人やベテラン」で採用、推敲が崩れたら初回を採用する。
+ */
+suspend fun polishTranslation(
+    content: String,
+    first: String,
+    ctx: TranslateContext,
+    verify: VerifyOptions
+): String {
+    val refine = ctx.refine
+    if (refine == null || refine.prompt.isBlank() || ctx.stopped()) return first
+    val terms = verify.dictCheck?.terms ?: emptyMap()
+    val input = buildRefineInput(content, first, terms)
+    val budget = RetryBudget()
+    // 技術的根拠1行：再試行の数え方・待機・停止検査は骨格カーネルに一任し、ここでは初回採用への倒し方だけを決める（待機再送なしの1回勝負）。
+    return when (val settled = callWithRetry(
+        { refine.call(refine.prompt, input) },
+        budget, 0, DefaultRetryPolicy::delayForAttempt,
+        ctx.stopped, ctx.meter, ctx.log
+    )) {
+        is CallSettled.Ok -> {
+            // 技術的根拠1行：磨き文に完走栞はないため栞検査だけ外し、人物・量・かな率の物差しは初回と同一にする。
+            val refined = verifyTranslation(content, settled.result.text, verify.copy(markerEnabled = false))
+            if (refined != null) {
+                ctx.log("✨ 推敲で更新しました")
+                refined
+            } else {
+                ctx.log("推敲結果を破棄し初回訳を採用します")
+                first
+            }
+        }
+        is CallSettled.Terminal -> first.also {
+            ctx.log("推敲を素通しします (${settled.failure.kind})")
+        }
+        is CallSettled.Stopped -> first
+    }
 }
 
 /**
@@ -200,24 +267,50 @@ suspend fun translateSingle(
 ): SingleResult {
     if (ctx.stopped()) return SingleResult.Stopped
 
-    // 技術的根拠1行：本文中に登場する人物のみを注入し、該当なし時は無関係な参考例を注入せずトークン浪費とハルシネーションを防ぐ
-    val dictEntries = if (ctx.dictionary != null) {
-        matchDictionaryEntries(content, ctx.dictionary.characters, ctx.dictionary.genders)
+    // 技術的根拠1行：方式選択は入口の1回だけにし、送る→確かめる→保存する骨格は言語で変えない。
+    val policy = DictPolicy.forLang(ctx.sourceLang)
+    // 技術的根拠1行：本文中に登場する人物のみを対象にし、該当なし時は無関係な参考例を注入せずトークン浪費とハルシネーションを防ぐ。
+    val dictTerms = if (ctx.dictionary != null) {
+        policy.matchTerms(content, ctx.dictionary.characters)
     } else {
-        emptyList()
+        emptyMap()
     }
+    val aliasTerms = if (ctx.dictionary != null) {
+        policy.matchAliases(
+            content, ctx.dictionary.characters,
+            exclude = dictTerms.keys,
+            limit = (TranslationLimits.DICT_MATCH_LIMIT - dictTerms.size).coerceAtLeast(0),
+            onConflict = { c -> ctx.log("辞書別名: 読み衝突のため先勝ち ($c)") }
+        )
+    } else {
+        emptyMap()
+    }
+    val allTerms = dictTerms + aliasTerms
+    // 技術的根拠1行：値同一・1字見出しは注釈が騒音と誤検知にしかならないため、適用・検証の両方から外す（可否は共有述語に寄せる）。
+    val activeTerms = allTerms.filter { (key, value) -> isAnnotatableTerm(key, value) }
+    val prepared = policy.prepare(content, activeTerms)
+    val check = policy.check(activeTerms, prepared.annotation)
+    // 技術的根拠1行：適用人数と方式を可視化し、辞書未使用（0名・衝突）と指示無視を切り分けられるようにする。
+    if (ctx.dictionary != null) {
+        val aliasNote = if (aliasTerms.isNotEmpty()) "＋別名${aliasTerms.size}件" else ""
+        if (prepared.annotation != null) {
+            ctx.log("辞書添付: ${activeTerms.size}名（登録${ctx.dictionary.characters.size}名中・${policy.logLabel()}$aliasNote）")
+        } else if (prepared.glossary != null) {
+            ctx.log("辞書添付: ${activeTerms.size}名（登録${ctx.dictionary.characters.size}名中・${policy.logLabel()}）")
+        } else if (activeTerms.isNotEmpty()) {
+            ctx.log("辞書添付: ${activeTerms.size}名（登録${ctx.dictionary.characters.size}名中・区切り衝突のため辞書なし）")
+        } else {
+            ctx.log("辞書添付: 0名（登録${ctx.dictionary.characters.size}名中・なし）")
+        }
+    }
+    // 技術的根拠1行：剥離条件は送信条件と同一にし、畳み忘れ・畳み過ぎの乖離をなくす。
+    val verify = ctx.verify.copy(dictCheck = check)
 
-    val source = appendMarker(content, ctx.verify.markerEnabled)
+    val source = appendMarker(prepared.sendText, verify.markerEnabled)
     val drivers = ctx.driverNames.ifEmpty { listOf("default") }
     val promptOrder = ctx.promptOrder.ifEmpty { listOf(1, 1) }
 
-    var lastFailureKind: FailureKind? = null
-    var lastNote = ""
-    var lastDeterministicKind: FailureKind? = null
-    var lastDeterministicNote: String? = null
-    var sawConfig = false
-    var sawDeterministic = false
-    var sawTransient = false
+    val tally = AttemptTally()
 
     for (driver in drivers) {
         for ((promptIdx, promptNum) in promptOrder.withIndex()) {
@@ -228,9 +321,9 @@ suspend fun translateSingle(
                 basePrompt = base,
                 previousTranslatedTail = prevTranslatedTail,
                 previousSourceTail = prevSourceTail,
-                dictionaryEntries = dictEntries,
-                dictionaryStyle = ctx.dictionaryStyle,
-                enableCompletionMarker = ctx.verify.markerEnabled,
+                termAnnotation = prepared.annotation,
+                glossary = prepared.glossary,
+                enableCompletionMarker = verify.markerEnabled,
                 batchFormat = null
             )
 
@@ -239,56 +332,39 @@ suspend fun translateSingle(
             // 技術的根拠: 第1引数に promptNum.toString() を渡し、bindCall側で試行中のプロンプト番号を正しく識別可能にする
             when (val settled = callWithRetry(
                 { ctx.call(promptNum.toString(), prompt, source) },
-                budget, ctx.maxSameRetries, { attempt -> 1000L * attempt },
+                budget, ctx.maxSameRetries, DefaultRetryPolicy::delayForAttempt,
                 ctx.stopped, ctx.meter, ctx.log
             )) {
                 is CallSettled.Ok -> {
                     // 品質チェック
-                    val verified = verifyTranslation(content, settled.result.text, ctx.verify)
+                    val verified = verifyTranslation(content, settled.result.text, verify)
                     if (verified != null) {
                         if (promptIdx > 0) {
                             ctx.log("✨ プロンプト#$promptNum でのリトライに成功しました")
                         }
-                        return SingleResult.Translated(verified)
+                        return SingleResult.Translated(polishTranslation(content, verified, ctx, verify))
                     }
 
                     // 品質チェック不合格
-                    val rejectReason = verifyRejectReason(content, settled.result.text, ctx.verify) ?: "verify-rejected"
+                    val rejectReason = verifyRejectReason(content, settled.result.text, verify)
+                        ?: FailureNotes.VERIFY_REJECTED
                     ctx.log("⚠️ 品質チェック不合格 ($rejectReason): プロンプト#$promptNum (${promptIdx + 1}/${promptOrder.size})")
-                    lastFailureKind = FailureKind.FATAL
-                    lastNote = rejectReason
+                    tally.recordQualityReject(rejectReason)
                     // 次のプロンプトへ進む
                 }
                 is CallSettled.Stopped -> return SingleResult.Stopped
-                is CallSettled.Terminal -> {
-                    lastNote = settled.failure.note
-                    lastFailureKind = settled.failure.kind
-                    when (settled.failure.kind) {
-                        FailureKind.BLOCKED_DETERMINISTIC, FailureKind.FATAL -> {
-                            sawDeterministic = true
-                            lastDeterministicKind = settled.failure.kind
-                            lastDeterministicNote = settled.failure.note
-                        }
-                        FailureKind.CONFIG -> sawConfig = true
-                        FailureKind.QUOTA_DAILY, FailureKind.QUOTA_MINUTE, FailureKind.RETRYABLE_AFTER -> {
-                            sawTransient = true
-                        }
-                    }
-                }
+                is CallSettled.Terminal -> tally.record(settled.failure.kind, settled.failure.note)
             }
-            if (sawConfig || sawTransient) break
+            if (tally.shouldBreak()) break
         }
-        if (sawConfig || sawTransient) break
+        if (tally.shouldBreak()) break
     }
 
     if (ctx.stopped()) return SingleResult.Stopped
-    if (sawConfig && !sawDeterministic && !sawTransient) return SingleResult.ConfigOnly
+    if (tally.configOnly) return SingleResult.ConfigOnly
 
-    val terminal = when {
-        sawDeterministic -> lastDeterministicKind ?: FailureKind.BLOCKED_DETERMINISTIC
-        else -> lastFailureKind ?: FailureKind.FATAL
-    }
-    val finalNote = if (sawDeterministic) (lastDeterministicNote ?: lastNote) else lastNote
+    val terminal = tally.terminal(FailureKind.FATAL)
+    val finalNote = tally.note()
     val isDeterministic = isDeterministicFailure(terminal, finalNote)
     return SingleResult.Failed(terminal, finalNote, isDeterministic = isDeterministic)
 }
@@ -319,13 +395,56 @@ suspend fun translateBatch(
     itemPrevTails: List<String?>? = null
 ): BatchOutcome {
     if (items.isEmpty() || ctx.stopped()) return BatchOutcome(0, 0)
-    val combined = buildBatchInput(items.map { it.first to it.second })
+    // 技術的根拠1行：方式選択は入口の1回だけにし、束ね・単品で数え方を変えない。
+    val policy = DictPolicy.forLang(ctx.sourceLang)
+    // 技術的根拠1行：束ね全体で1組の区切りを選び各話に注釈する（合成文に無ければ各話にも無いため1回の判定で足りる）。
+    val dictChars = ctx.dictionary?.characters ?: emptyMap()
+    val itemTerms = items.map { policy.matchTerms(it.second, dictChars) }
+    val itemAliases = items.mapIndexed { i, item ->
+        if (ctx.dictionary == null) emptyMap()
+        else policy.matchAliases(
+            item.second, dictChars,
+            exclude = itemTerms[i].keys,
+            limit = (TranslationLimits.DICT_MATCH_LIMIT - itemTerms[i].size).coerceAtLeast(0)
+        )
+    }
+    val combinedTerms = itemTerms.mapIndexed { i, terms ->
+        (terms + itemAliases[i]).filter { (key, value) -> isAnnotatableTerm(key, value) }
+    }
+    val batchPrepared = policy.prepare(
+        items.joinToString("\n") { it.second },
+        combinedTerms.fold(LinkedHashMap<String, String>()) { acc, m ->
+            for ((k, v) in m) if (!acc.containsKey(k)) acc[k] = v
+            acc
+        }
+    )
+    // 注釈不可時（区切り衝突時）は辞書なしで素通しする。
+    val sendItems = if (batchPrepared.annotation != null) {
+        items.mapIndexed { i, item -> item.first to annotateSourceTerms(item.second, combinedTerms[i], batchPrepared.annotation) }
+    } else items
+    if (ctx.dictionary != null) {
+        val attached = combinedTerms.sumOf { it.size }
+        val aliasTotal = itemAliases.sumOf { it.size }
+        val aliasNote = if (aliasTotal > 0) "＋別名${aliasTotal}件" else ""
+        if (batchPrepared.annotation != null) {
+            ctx.log("辞書添付: ${attached}名（登録${dictChars.size}名中・${policy.logLabel()}$aliasNote）")
+        } else if (batchPrepared.glossary != null) {
+            ctx.log("辞書添付: ${attached}名（登録${dictChars.size}名中・${policy.logLabel()}）")
+        } else if (attached > 0) {
+            ctx.log("辞書添付: ${attached}名（登録${dictChars.size}名中・区切り衝突のため辞書なし）")
+        } else {
+            ctx.log("辞書添付: 0名（登録${dictChars.size}名中・なし）")
+        }
+    }
+    val combined = buildBatchInput(sendItems)
     val batchCtx = ctx.copy(verify = ctx.verify.copy(markerEnabled = false))
     val batchFormat = if (ctx.batchJsonFormat) buildBatchJsonFormat(items.size) else buildBatchFormat(items.size)
     val attempts = buildAttempts(
-        batchCtx, combined,
+        batchCtx,
         prevTranslatedTail = null, prevSourceTail = prevSourceTail, combined,
-        batchFormat = batchFormat
+        batchFormat = batchFormat,
+        termAnnotation = batchPrepared.annotation,
+        glossary = batchPrepared.glossary
     )
     val outcome = attemptDrivers(
         attempts,
@@ -353,22 +472,30 @@ suspend fun translateBatch(
     var completed = 0
     var settled = 0
     val done = BooleanArray(items.size) { false }
-    val isZeroIndexed = parsed.containsKey(0) && !parsed.containsKey(items.size)
     val saved = mutableListOf<String>()
+    // 技術的根拠1行：欠けの判定は共有検証口に一任し、保存路と再送路で数え方を変えない。
+    // 技術的根拠1行：剥離条件は送信条件と同一にし、畳み忘れ・畳み過ぎの乖離をなくす。
+    val itemChecks = combinedTerms.map { terms ->
+        policy.check(terms, batchPrepared.annotation)
+    }
+    val validation = validateBatchCompleteness(items, parsed, ctx.verify, itemChecks)
+    if (validation.missingIds.isNotEmpty()) {
+        ctx.log("batch incomplete ids (単品再送へ): ${validation.missingIds.joinToString(",")}")
+    }
 
     for ((idx, item) in items.withIndex()) {
         if (ctx.stopped()) break
-        val (fileName, content) = item
-        val seg = parsed[idx + 1] ?: if (isZeroIndexed) parsed[idx] else null
-        val verified = seg?.let { verifyTranslation(content, it, ctx.verify.copy(markerEnabled = false)) }
-        if (verified != null) {
-            if (saveOutputText(store, outputDirUri, fileName, verified, log = ctx.log) != null) {
-                completed++
-                settled++
-                done[idx] = true
-                saved.add(fileName)
-                ctx.log("batch saved: $fileName")
-            }
+        val (fileName, _) = item
+        val verified = validation.verified[idx] ?: continue
+        // 技術的根拠1行：磨き直しは単品路と同一口に寄せ、束ね独自の再送・保存手順を作らない。
+        val vo = validation.vos[idx] ?: ctx.verify.copy(markerEnabled = false)
+        val final = polishTranslation(item.second, verified, ctx, vo)
+        if (saveOutputText(store, outputDirUri, fileName, final, log = ctx.log) != null) {
+            completed++
+            settled++
+            done[idx] = true
+            saved.add(fileName)
+            ctx.log("batch saved: $fileName")
         }
     }
 
@@ -449,23 +576,14 @@ private suspend fun resolveBatchItems(
 }
 
 /**
- * 重複 "(1)" を作らない生成。プロバイダが同名衝突時に自動リネームする環境向け。
- * 技術的根拠1行：作成物の実名が要求と異なり、かつ衝突重複（" (1)"）の場合のみ消して既存を探し直す。拡張子正規化等は受容する。
+ * 重複 "(1)" を作らない生成。実体は [AtomicFileGateway]。
  */
 internal suspend fun findOrCreateFile(
     store: FileStore,
     dirUri: String,
     name: String,
     mime: String
-): VDoc? {
-    store.findChild(dirUri, name)?.let { return it }
-    val created = store.createFile(dirUri, name, mime) ?: return null
-    if (created.name.equals(name, ignoreCase = true)) return created
-    val isCollisionRename = COLLISION_RENAME_REGEX.matches(created.name)
-    if (!isCollisionRename) return created
-    store.deleteFile(created.uri)
-    return store.findChild(dirUri, name)
-}
+): VDoc? = AtomicFileGateway(store).findOrCreateFile(dirUri, name, mime)
 
 /**
  * 骨格カーネル（単一パイプラインの不変部）。
@@ -531,9 +649,7 @@ suspend fun callWithRetry(
 }
 
 /**
- * 唯一の訳文保存実装。別名に書く→照合→確定の順で公開し、保存済み文書またはnullを返す。
- * 確定は置換対応時のみ置換し、非対応時は直接確定＋照合に退行する。いずれも照合不一致は失敗とする。
- * 技術的根拠1行：未検証の上書きを全経路でなくし、異常終了のどの時点でも欠落を完成と誤認しない方向に収束させる。
+ * 訳文保存口。実体は [AtomicFileGateway.saveVerified]。
  */
 suspend fun saveOutputText(
     store: FileStore,
@@ -543,76 +659,15 @@ suspend fun saveOutputText(
     mime: String = "text/plain",
     existing: VDoc? = null,
     log: (String) -> Unit = {}
-): VDoc? {
-    if (existing != null) {
-        // 同一文書への上書きはURIを保つため直接書込＋照合とする
-        if (!store.writeText(existing.uri, text)) {
-            log("output save error (write): $fileName")
-            return null
-        }
-        if (!verifyBytes(store, existing.uri, fileName, text, log)) return null
-        return existing
-    }
-    // 別名は完成判定から不可視な接頭辞にし、異常終了の残骸は次回保存時に自己掃除する
-    val tmpName = ".tmp_" + fileName.replace('.', '_')
-    try {
-        store.findChild(dirUri, tmpName)?.let { if (!it.isDirectory) store.deleteFile(it.uri) }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (t: Throwable) {
-        log("tmp sweep failed: $tmpName ${t.message}")
-    }
-    val tmp = findOrCreateFile(store, dirUri, tmpName, mime)
-        ?: run {
-            log("output save error (create): $fileName")
-            return null
-        }
-    if (!store.writeText(tmp.uri, text)) {
-        log("output save error (write): $fileName")
-        deleteQuietly(store, tmp.uri, log)
-        return null
-    }
-    if (!verifyBytes(store, tmp.uri, fileName, text, log)) {
-        deleteQuietly(store, tmp.uri, log)
-        return null
-    }
-    // 確定：置換を試みる。旧成果物は置換成功時に置き換わり、非対応時は直接確定＋照合に退行する。
-    try {
-        store.renameFile(dirUri, tmp.uri, fileName)?.let { return it }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (_: Exception) {
-        // 非対応時は退行経路へ
-    }
-    // 退行：直接作成＋書込＋照合
-    deleteQuietly(store, tmp.uri, log)
-    val direct = findOrCreateFile(store, dirUri, fileName, mime)
-        ?: run {
-            log("output save error (create): $fileName")
-            return null
-        }
-    if (!store.writeText(direct.uri, text)) {
-        log("output save error (write): $fileName")
-        return null
-    }
-    if (!verifyBytes(store, direct.uri, fileName, text, log)) return null
-    return direct
-}
+): VDoc? = AtomicFileGateway(store, log).saveVerified(dirUri, fileName, text, mime, existing)
 
-/** 最善努力の削除。失敗は記録のみで本流を止めない。 */
+/** 最善努力の削除。実体は [AtomicFileGateway]。 */
 internal suspend fun deleteQuietly(store: FileStore, fileUri: String, log: (String) -> Unit) {
-    try {
-        store.deleteFile(fileUri)
-    } catch (e: CancellationException) {
-        throw e
-    } catch (t: Throwable) {
-        log("cleanup failed: $fileUri ${t.message}")
-    }
+    AtomicFileGateway(store, log).deleteQuietly(fileUri)
 }
 
 /**
- * 書込内容の照合。確定済みURIから直接読み返して全文照合する。
- * 技術的根拠1行：作成直後の文書は一覧未反映・表示名改変があり得るため名寄せ再検索を使わず、確定済みURIで照合する。
+ * 書込内容の照合。実体は [AtomicFileGateway]。
  */
 suspend fun verifyBytes(
     store: FileStore,
@@ -620,18 +675,7 @@ suspend fun verifyBytes(
     fileName: String,
     text: String,
     log: (String) -> Unit = {}
-): Boolean {
-    val read = try {
-        store.readText(fileUri)
-    } catch (e: CancellationException) {
-        throw e
-    } catch (_: Exception) {
-        null
-    }
-    if (read == text) return true
-    log("output verify error (content): $fileName")
-    return false
-}
+): Boolean = AtomicFileGateway(store, log).verifyBytes(fileUri, fileName, text)
 
 /**
  * 唯一の失敗確定方針。内容依存の確定的失敗だけ `.failed` 確定し、

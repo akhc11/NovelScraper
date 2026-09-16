@@ -2,22 +2,22 @@ package com.example.novelscraper
 
 import android.app.Application
 import android.net.Uri
-import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.novelscraper.scraper.*
 import com.example.novelscraper.translation.web.*
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.*
 
 class ScrapingViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = PreferencesRepository(application)
+    private val presetRepository = PresetRepository(application)
     private val fileRepository = FileRepository(application)
     private val serviceController = ScraperServiceController(application)
+
+    // 履歴・お気に入りの状態＋永続化はLibraryStoreに委譲（同一スコープ駆動）。
+    private val libraryStore = LibraryStore(application, viewModelScope)
 
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
@@ -25,11 +25,9 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     private val _presets = MutableStateFlow<Map<String, ScraperConfig>>(emptyMap())
     val presets: StateFlow<Map<String, ScraperConfig>> = _presets.asStateFlow()
 
-    private val _favorites = MutableStateFlow<Map<String, String>>(emptyMap())
-    val favorites: StateFlow<Map<String, String>> = _favorites.asStateFlow()
+    val favorites: StateFlow<Map<String, String>> get() = libraryStore.favorites
 
-    private val _history = MutableStateFlow<Map<String, HistoryItem>>(emptyMap())
-    val history: StateFlow<Map<String, HistoryItem>> = _history.asStateFlow()
+    val history: StateFlow<Map<String, HistoryItem>> get() = libraryStore.history
 
     private val taskList = mutableListOf<ScrapingTask>()
     private val _activeTasks = MutableStateFlow<List<ScrapingTask>>(emptyList())
@@ -37,6 +35,13 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     private val _currentStatusText = MutableStateFlow("待機中")
     val currentStatusText: StateFlow<String> = _currentStatusText.asStateFlow()
+
+    // UI層への一方向イベント（Toast等の表示はActivityが収集して描画する）。
+    val eventBus = UiEventBus()
+
+    private fun notify(message: String, long: Boolean = false) {
+        viewModelScope.launch { eventBus.send(UiEvent.ShowToast(message, isLong = long)) }
+    }
 
     // autoUrl の自動適用管理（同一サイト巡回中や検索・ホーム離脱時に、ユーザーの手動編集設定が勝手に上書きされるのを防止）
     private var lastAppliedAutoUrlDomain: String = ""
@@ -47,13 +52,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     init {
         viewModelScope.launch {
-            repository.presetsFlow.collect { _presets.value = it }
-        }
-        viewModelScope.launch {
-            repository.favoritesFlow.collect { _favorites.value = it }
-        }
-        viewModelScope.launch {
-            repository.historyFlow.collect { _history.value = it }
+            presetRepository.presetsFlow.collect { _presets.value = it }
         }
         viewModelScope.launch {
             repository.webViewDarkModeFlow.collect { isDark ->
@@ -105,7 +104,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                         endCheck = "list|index|toc|javascript|null",
                         autoUrl = "syosetu.com"
                     )
-                    repository.savePresets(initialPresets)
+                    presetRepository.savePresets(initialPresets)
                     repository.saveSetupDone(true)
                 }
             }
@@ -206,12 +205,12 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     fun savePreset(name: String, config: ScraperConfig) {
         lastAppliedAutoUrlDomain = config.autoUrl
         isConfigManuallyEdited = false
-        viewModelScope.launch { repository.updatePresets { it[name] = config } }
+        viewModelScope.launch { presetRepository.updatePresets { it[name] = config } }
     }
 
     fun deletePreset(name: String) {
         viewModelScope.launch {
-            repository.updatePresets { it.remove(name) }
+            presetRepository.updatePresets { it.remove(name) }
             if (_uiState.value.currentPresetName == name) {
                 lastAppliedAutoUrlDomain = ""
                 isConfigManuallyEdited = false
@@ -221,41 +220,30 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun saveFavorite(title: String, url: String) {
-        viewModelScope.launch { repository.updateFavorites { it[title] = url } }
+        libraryStore.saveFavorite(title, url)
     }
 
     fun deleteFavorite(title: String) {
-        viewModelScope.launch { repository.updateFavorites { it.remove(title) } }
+        libraryStore.deleteFavorite(title)
     }
 
     fun updateHistory(folderName: String, title: String, chapter: String, url: String, nextUrl: String, config: ScraperConfig) {
-        if (url.startsWith("javascript:") || url.startsWith("data:") || url.length > 2000) return
-        val safeFolderName = folderName.ifEmpty { "(不明な作品)" }
-        val dateStr = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault()).format(Date())
-        val item = HistoryItem(
-            title = title,
-            chapter = chapter,
-            url = url,
-            config = config,
-            time = dateStr,
-            presetName = _uiState.value.currentPresetName,
-            timestamp = System.currentTimeMillis(),
-            nextUrl = nextUrl
+        libraryStore.updateHistory(
+            folderName, title, chapter, url, nextUrl, config,
+            presetName = _uiState.value.currentPresetName
         )
-        viewModelScope.launch {
-            repository.updateHistory { historyMap ->
-                historyMap[safeFolderName] = item
-            }
-        }
     }
 
     fun deleteHistory(folderName: String) {
-        viewModelScope.launch { repository.updateHistory { it.remove(folderName) } }
+        libraryStore.deleteHistory(folderName)
     }
 
     fun setInputUrl(url: String) { _uiState.update { it.copy(inputUrl = url) } }
 
     fun setCurrentUrl(url: String) {
+        // 同一URLの重複更新を抑止（WebViewClientの3コールバックが同URLで連呼するため）。
+        // ナビゲーション発火（LaunchedEffect）は正規化比較で同一URLを無視するので、ここでの早期復帰と整合する。
+        if (_uiState.value.currentUrl == url) return
         _uiState.update { 
             it.copy(
                 currentUrl = url, 
@@ -327,7 +315,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
             status.startsWith("ERROR:") -> {
                 val errorMsg = status.removePrefix("ERROR:").trim()
                 _uiState.update { it.copy(isLiveTranslating = false) }
-                Toast.makeText(getApplication(), "ライブ翻訳エラー: $errorMsg", Toast.LENGTH_LONG).show()
+                notify("ライブ翻訳エラー: $errorMsg", long = true)
             }
         }
     }
@@ -373,36 +361,6 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 overlay = Overlay.None
             )
         }
-    }
-
-    fun selectFavorite(title: String, url: String) {
-        _uiState.update {
-            it.copy(
-                inputUrl = url,
-                currentUrl = url,
-                overlay = Overlay.None
-            )
-        }
-    }
-
-    fun selectHistory(item: HistoryItem) {
-        val targetUrl = item.nextUrl.ifEmpty { item.url }
-        lastAppliedAutoUrlDomain = item.config.autoUrl
-        isConfigManuallyEdited = false
-        _uiState.update {
-            it.copy(
-                inputUrl = targetUrl,
-                currentUrl = targetUrl,
-                currentPresetName = item.presetName,
-                currentConfig = item.config,
-                overlay = Overlay.None
-            )
-        }
-    }
-
-    fun selectHistoryFolder(folderName: String) {
-        val item = _history.value[folderName] ?: return
-        selectHistory(item)
     }
 
     // ---- フォルダ翻訳機能 ----
@@ -479,14 +437,16 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun startScraping(targetUrl: String, initialFolderName: String = "(取得中...)") {
+        // currentUrlは巡回で進むため開始URLでも照合する（2話目以降の重複起動・停止失敗を防ぐ）。
         val isAlreadyRunning = taskList.any { task ->
             task.isRunning && (
                 task.currentUrl == targetUrl ||
+                task.startUrl == targetUrl ||
                 (initialFolderName.isNotEmpty() && initialFolderName != "(取得中...)" && task.folderName == initialFolderName)
             )
         }
         if (isAlreadyRunning) {
-            Toast.makeText(getApplication(), "既にスクレイピング実行中です", Toast.LENGTH_SHORT).show()
+            notify("既にスクレイピング実行中です")
             return
         }
 
@@ -509,7 +469,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                     viewModelScope.launch {
                         val success = fileRepository.saveChapter(folderName, title, content, chapterNum)
                         if (!success) {
-                            Toast.makeText(getApplication(), "ファイル保存に失敗しました: $title ($chapterNum)", Toast.LENGTH_SHORT).show()
+                            notify("ファイル保存に失敗しました: $title ($chapterNum)")
                         }
                     }
                 }
@@ -525,19 +485,19 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     fun exportPresets(uri: Uri) {
         viewModelScope.launch {
-            val result = repository.exportPresets(uri)
+            val result = presetRepository.exportPresets(uri)
             val msg = if (result.isSuccess) {
                 "プリセットをエクスポートしました"
             } else {
                 "エクスポートに失敗しました: ${result.exceptionOrNull()?.message ?: "不明なエラー"}"
             }
-            Toast.makeText(getApplication(), msg, Toast.LENGTH_LONG).show()
+            notify(msg, long = true)
         }
     }
 
     fun importPresets(uri: Uri) {
         viewModelScope.launch {
-            val result = repository.importPresets(uri)
+            val result = presetRepository.importPresets(uri)
             val msg = if (result.isSuccess) {
                 "${result.getOrNull()} 件のプリセットをインポートしました"
             } else {
@@ -549,7 +509,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 }
                 "インポートに失敗しました: $errorDetails"
             }
-            Toast.makeText(getApplication(), msg, Toast.LENGTH_LONG).show()
+            notify(msg, long = true)
         }
     }
 

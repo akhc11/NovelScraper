@@ -8,6 +8,7 @@ import com.example.novelscraper.translation.v2.domain.ProviderId
 import com.example.novelscraper.translation.v2.domain.ProviderRegistry
 import com.example.novelscraper.translation.v2.domain.QuotaPool
 import com.example.novelscraper.translation.v2.domain.TranslationLimits
+import com.example.novelscraper.translation.v2.domain.capabilitiesFor
 import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.domain.V2DeclaredEncoding
 import com.example.novelscraper.translation.v2.domain.V2SendGate
@@ -16,6 +17,8 @@ import com.example.novelscraper.translation.v2.domain.DictResolveResult
 import com.example.novelscraper.translation.v2.infra.FileStore
 import com.example.novelscraper.translation.v2.infra.VDoc
 import com.example.novelscraper.translation.v2.pipeline.NovelDict
+import com.example.novelscraper.translation.v2.pipeline.BundlePool
+import com.example.novelscraper.translation.v2.pipeline.planBundles
 import com.example.novelscraper.translation.v2.pipeline.SourceLang
 import com.example.novelscraper.translation.v2.pipeline.V2_PROMPT_1_ZH
 import com.example.novelscraper.translation.v2.pipeline.V2_PROMPT_2_EN
@@ -400,24 +403,42 @@ class RunEngine(
             profile.id to order
         }
         val promptOrder = profilePromptOrders[profiles.first().id] ?: listOf(1, 1)
-        val claims = Collections.synchronizedSet(mutableSetOf<String>())
         val workerCount = settings.limits.parallelWorkers.coerceIn(
             TranslationLimits.WORKER_COUNT_RANGE.first,
             TranslationLimits.WORKER_COUNT_RANGE.last
         )
         // 参加プロファイルの最小 maxOutputChars を採用（小型モデルへのローテーション時のトークン溢れを抑える）
         val targetOutputChars = profiles.minOfOrNull { it.maxOutputChars } ?: 15000
-        val optimalInputBytes = V2Settings.calculateInputLimitBytes(effectiveLang, targetOutputChars)
-        val splitThresholdBytes = optimalInputBytes
-        val chunkSizeBytes = (optimalInputBytes * 0.9).toInt().coerceAtLeast(3000)
-        val batchMaxBytes = (optimalInputBytes * 0.85).toInt().coerceAtLeast(3000)
-        addLog("capacity: limit=${optimalInputBytes}B, chunk=${chunkSizeBytes}B, batch=${batchMaxBytes}B (source=${effectiveLang.name}, maxOutput=${targetOutputChars} chars)")
+        // 技術的根拠1行：文字上限とトークン上限の突合せは CapacityPlanner に一任し、二重管理しない。
+        fun modelMaxOf(profile: V2ModelProfile): Int =
+            profile.providerId.toProviderId()?.let { descriptors[it] }
+                ?.capabilitiesFor(profile.model)?.maxOutputTokens ?: 65536
+        val modelMaxTokens = profiles.minOfOrNull { modelMaxOf(it) } ?: 65536
+        val effectiveTokens = profiles.minOfOrNull { V2Settings.resolveMaxTokens(it.maxOutputTokens, modelMaxOf(it)) }
+            ?: modelMaxTokens
+        val plan = V2Settings.planCapacity(effectiveLang, targetOutputChars, effectiveTokens, modelMaxTokens)
+        val optimalInputBytes = plan.inputLimitBytes
+        val splitThresholdBytes = plan.splitThresholdBytes
+        val chunkSizeBytes = plan.chunkSizeBytes
+        val batchMaxBytes = plan.batchMaxBytes
+        addLog("capacity: limit=${optimalInputBytes}B, chunk=${chunkSizeBytes}B, batch=${batchMaxBytes}B (source=${effectiveLang.name}, maxOutput=${plan.targetOutputChars} chars)")
 
         val contextTracker = SourceContextTracker(
             files = files,
             store = store,
             contextLines = settings.prevContext.lines,
             enabled = settings.prevContext.enabled
+        )
+        // 技術的根拠1行：束ね決定権は計画＋プールに一本化し、作業者は束単位で受け取る（奪い合いなし・連番維持）。
+        val bundlePool = BundlePool(
+            planBundles(
+                files = files,
+                isSkipped = { f -> existing.contains(f.name) || existing.contains("${f.name}.failed") },
+                forceSingle = { f -> existing.contains(".parts_${f.name}") },
+                batchMaxFiles = options.batchMaxFiles,
+                batchMaxBytes = batchMaxBytes,
+                splitThresholdBytes = splitThresholdBytes
+            )
         )
 
         supervisorScope {
@@ -443,10 +464,10 @@ class RunEngine(
                             if (stopFlag.get()) return@launch
                         }
                         runWorker(
-                            wId, files, outputDir.uri, existing, claims,
+                            wId, files, outputDir.uri, existing, bundlePool,
                             settings, router, novelDict,
                             completed, total,
-                            batchMaxBytes, splitThresholdBytes, chunkSizeBytes,
+                            splitThresholdBytes, chunkSizeBytes,
                             effectiveLang, promptOrder,
                             profiles, profilePromptOrders,
                             contextTracker
@@ -580,13 +601,12 @@ class RunEngine(
         files: List<com.example.novelscraper.translation.v2.infra.VDoc>,
         outputDirUri: String,
         existing: MutableSet<String>,
-        claims: MutableSet<String>,
+        bundlePool: BundlePool,
         settings: V2Settings,
         router: PromptRouter,
         novelDict: NovelDict?,
         completed: AtomicInteger,
         total: Int,
-        batchMaxBytes: Int,
         splitThresholdBytes: Int,
         chunkSizeBytes: Int,
         sourceLang: SourceLang,
@@ -604,7 +624,6 @@ class RunEngine(
             novelDict = novelDict,
             completed = completed,
             total = total,
-            batchMaxBytes = batchMaxBytes,
             splitThresholdBytes = splitThresholdBytes,
             chunkSizeBytes = chunkSizeBytes,
             sourceLang = sourceLang,
@@ -615,7 +634,7 @@ class RunEngine(
             files = files,
             outputDirUri = outputDirUri,
             existing = existing,
-            claims = claims,
+            pool = bundlePool,
             stopped = { stopFlag.get() },
             onFileStart = { fileName, done, tot ->
                 _state.update { it.copy(fileName = fileName, statusText = "翻訳中: $fileName ($done/$tot)") }
@@ -638,6 +657,7 @@ class RunEngine(
         settings: V2Settings,
         meter: CostMeter
     ): PromptRouter {
+        // 技術的根拠1行：外側部品（Handler・盤・計量・待機）の束縛はこの Composition Root に集約し、中心部は口だけに依存させる。
         val descriptors = ProviderRegistry.descriptors
         val handlerFactory: (V2ModelProfile, String) -> ProviderHandler = { profile, key ->
             buildHandler(settings, profile, key)

@@ -32,6 +32,7 @@ class V2CommonTabState(
     val outputSubDir: MutableState<String>,
     val parallelWorkers: MutableState<String>,
     val requestDelay: MutableState<String>,
+    val trialMaxFiles: MutableState<String>,
     val splitEnabled: MutableState<Boolean>,
     val splitSize: MutableState<String>,
     val splitEncoding: MutableState<String>,
@@ -39,6 +40,10 @@ class V2CommonTabState(
     val prevLines: MutableState<String>,
     val refineEnabled: MutableState<Boolean>,
     val refinePrompt: MutableState<String>,
+    val refineThinking: MutableState<String?>,
+    val refineThinkingBudget: MutableState<String>,
+    val refineReasoningEffort: MutableState<String?>,
+    val refineReasoningEnabled: MutableState<Boolean?>,
     val sizeRatioZhMinText: MutableState<String>,
     val sizeRatioZhMaxText: MutableState<String>,
     val sizeRatioKoMinText: MutableState<String>,
@@ -92,6 +97,7 @@ class V2CommonTabState(
             limits = base.limits.copy(
                 parallelWorkers = parallelWorkers.value.toIntOrNull() ?: base.limits.parallelWorkers,
                 requestDelaySec = requestDelay.value.toIntOrNull() ?: base.limits.requestDelaySec,
+                filesPerFolder = trialMaxFiles.value.toIntOrNull() ?: base.limits.filesPerFolder,
                 outputSubDir = outputSubDir.value.ifBlank { base.limits.outputSubDir }
             ),
             split = base.split.copy(
@@ -105,7 +111,11 @@ class V2CommonTabState(
             ),
             refine = base.refine.copy(
                 enabled = refineEnabled.value,
-                prompt = refinePrompt.value
+                prompt = refinePrompt.value,
+                thinkingLevel = refineThinking.value?.ifBlank { null },
+                thinkingBudget = refineThinkingBudget.value.ifBlank { null }?.toIntOrNull(),
+                reasoningEffort = refineReasoningEffort.value?.ifBlank { null },
+                reasoningEnabled = refineReasoningEnabled.value
             ),
             sizeRatios = V2SizeRatios(
                 zhMin = sizeRatioZhMinText.value.toIntOrNull() ?: base.sizeRatios.zhMin,
@@ -136,6 +146,7 @@ class V2CommonTabState(
                 outputSubDir = mutableStateOf(initial.limits.outputSubDir),
                 parallelWorkers = mutableStateOf(initial.limits.parallelWorkers.toString()),
                 requestDelay = mutableStateOf(initial.limits.requestDelaySec.toString()),
+                trialMaxFiles = mutableStateOf(initial.limits.filesPerFolder.toString()),
                 splitEnabled = mutableStateOf(initial.split.enabled),
                 splitSize = mutableStateOf(initial.split.splitSizeChars.toString()),
                 splitEncoding = mutableStateOf(initial.split.inputEncoding),
@@ -143,6 +154,10 @@ class V2CommonTabState(
                 prevLines = mutableStateOf(initial.prevContext.lines.toString()),
                 refineEnabled = mutableStateOf(initial.refine.enabled),
                 refinePrompt = mutableStateOf(initial.refine.prompt),
+                refineThinking = mutableStateOf(initial.refine.thinkingLevel),
+                refineThinkingBudget = mutableStateOf(initial.refine.thinkingBudget?.toString() ?: ""),
+                refineReasoningEffort = mutableStateOf(initial.refine.reasoningEffort),
+                refineReasoningEnabled = mutableStateOf(initial.refine.reasoningEnabled),
                 sizeRatioZhMinText = mutableStateOf(initial.sizeRatios.zhMin.toString()),
                 sizeRatioZhMaxText = mutableStateOf(initial.sizeRatios.zhMax.toString()),
                 sizeRatioKoMinText = mutableStateOf(initial.sizeRatios.koMin.toString()),
@@ -283,6 +298,18 @@ internal fun V2CommonTab(
     }
 
     Spacer(modifier = Modifier.height(4.dp))
+
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("試し読み上限 (件/小説, 0=無制限):", color = AppColors.textSecondary, fontSize = 10.sp)
+            Spacer(modifier = Modifier.height(2.dp))
+            V2InputArea(value = state.trialMaxFiles.value, onValueChange = { state.trialMaxFiles.value = it }, singleLine = true)
+            Spacer(modifier = Modifier.height(2.dp))
+            Text("※例: 40 → 先頭40件で打ち切り→次の小説へ。続ける時は上限UP/0にして再実行 (続きから再開)", color = AppColors.textTertiary, fontSize = 8.sp)
+        }
+    }
+
+    Spacer(modifier = Modifier.height(4.dp))
     Row(verticalAlignment = Alignment.CenterVertically) {
         Checkbox(checked = state.splitEnabled.value, onCheckedChange = { state.splitEnabled.value = it })
         Text("巨大小説の物理分割 (part_*.txt化)", color = AppColors.textPrimary, fontSize = 10.sp)
@@ -387,6 +414,43 @@ internal fun V2CommonTab(
         Spacer(modifier = Modifier.height(4.dp))
         Text("▼ 既定文（参考・このままでは送信されません）", color = AppColors.textTertiary, fontSize = 9.sp)
         Text(DEFAULT_REFINE_PROMPT, color = AppColors.textSecondary, fontSize = 9.sp)
+        Spacer(modifier = Modifier.height(4.dp))
+        // 技術的根拠1行：推敲は複数プロファイルを束ねるため能力表で絞らず、送信直前の解決則に可否を一任する（表示＝候補、反映＝解決則）。
+        Text("推敲の思考レベル（空・継承＝翻訳と同じ）:", color = AppColors.textSecondary, fontSize = 9.sp)
+        Spacer(modifier = Modifier.height(2.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            SelectBox(label = "継承", selected = state.refineThinking.value == null, onClick = { state.refineThinking.value = null }, modifier = Modifier.weight(1f))
+            listOf("high", "medium", "low", "minimal").forEach { lvl ->
+                SelectBox(label = lvl, selected = state.refineThinking.value == lvl, onClick = { state.refineThinking.value = lvl }, modifier = Modifier.weight(1f))
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text("推敲の思考予算（2.5系のみ・空＝継承）:", color = AppColors.textSecondary, fontSize = 9.sp)
+        Spacer(modifier = Modifier.height(2.dp))
+        V2InputArea(value = state.refineThinkingBudget.value, onValueChange = { state.refineThinkingBudget.value = it }, singleLine = true)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text("推敲のReasoning Effort（OpenRouter・「継承」＝翻訳と同じ）:", color = AppColors.textSecondary, fontSize = 9.sp)
+        Spacer(modifier = Modifier.height(2.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            SelectBox(label = "継承", selected = state.refineReasoningEffort.value == null, onClick = { state.refineReasoningEffort.value = null }, modifier = Modifier.weight(1f))
+            listOf("low", "medium", "high").forEach { lvl ->
+                SelectBox(label = lvl, selected = state.refineReasoningEffort.value == lvl, onClick = { state.refineReasoningEffort.value = lvl }, modifier = Modifier.weight(1f))
+            }
+        }
+        Spacer(modifier = Modifier.height(2.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            listOf("none" to "none", "minimal" to "minimal", "xhigh" to "xhigh", "max" to "max").forEach { (v, label) ->
+                SelectBox(label = label, selected = state.refineReasoningEffort.value == v, onClick = { state.refineReasoningEffort.value = v }, modifier = Modifier.weight(1f))
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text("推敲のReasoning Enabled（OpenRouter・未指定＝継承）:", color = AppColors.textSecondary, fontSize = 9.sp)
+        Spacer(modifier = Modifier.height(2.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            SelectBox(label = "継承", selected = state.refineReasoningEnabled.value == null, onClick = { state.refineReasoningEnabled.value = null }, modifier = Modifier.weight(1f))
+            SelectBox(label = "OFF", selected = state.refineReasoningEnabled.value == false, onClick = { state.refineReasoningEnabled.value = false }, modifier = Modifier.weight(1f))
+            SelectBox(label = "ON", selected = state.refineReasoningEnabled.value == true, onClick = { state.refineReasoningEnabled.value = true }, modifier = Modifier.weight(1f))
+        }
     }
 
     Spacer(modifier = Modifier.height(8.dp))

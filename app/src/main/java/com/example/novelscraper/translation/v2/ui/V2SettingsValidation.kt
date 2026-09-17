@@ -135,6 +135,38 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
     if (settings.refine.prompt.length > TranslationLimits.MAX_DICT_PROMPT_CHARS) {
         issues.add(V2SettingsIssue("推敲プロンプトは上限${TranslationLimits.MAX_DICT_PROMPT_CHARS}字を超えた分を切り落として送信します", false))
     }
+    // 技術的根拠1行：推敲の上書きは翻訳プロファイル群に載るため、可否判定は既存の能力表・解決則に寄せて新規則を作らない。
+    if (settings.refine.enabled) {
+        val refine = settings.refine
+        settings.profiles.forEachIndexed { index, profile ->
+            val label = "推敲(モデル${index + 1})"
+            if (refine.thinkingLevel != null) {
+                val allowed = (ProviderRegistry.capabilitiesForOrNull(profile.providerId, profile.model)?.thinking as? ThinkingSupport.Levels)?.supported
+                if (allowed == null) {
+                    issues.add(V2SettingsIssue("$label: ${profile.model} は思考非対応のため thinkingLevel は送られません", false))
+                } else if (refine.thinkingLevel !in allowed) {
+                    issues.add(V2SettingsIssue("$label: thinkingLevel ${refine.thinkingLevel} は非対応のため送られません", false))
+                }
+            }
+            if (refine.thinkingBudget != null) {
+                val isBudget = ProviderRegistry.capabilitiesForOrNull(profile.providerId, profile.model)?.thinking is ThinkingSupport.Budget
+                if (!isBudget) {
+                    issues.add(V2SettingsIssue("$label: thinkingBudget は数値予算式モデルのみ有効のため送られません", false))
+                }
+            }
+            if (profile.providerId.toProviderId() == ProviderId.OPENROUTER) {
+                val effectiveEffort = refine.reasoningEffort ?: profile.reasoningEffort
+                if (!refine.reasoningEffort.isNullOrBlank() && resolveReasoningEffort(refine.reasoningEffort) == null) {
+                    issues.add(V2SettingsIssue("$label: reasoningEffort ${refine.reasoningEffort} は非対応のため送られません", false))
+                }
+                if (refine.reasoningEnabled != null && resolveReasoningEffort(effectiveEffort) != null) {
+                    issues.add(V2SettingsIssue("$label: reasoningEnabled優先のため reasoningEffort は無視されます", false))
+                }
+            } else if (refine.reasoningEffort != null || refine.reasoningEnabled != null) {
+                issues.add(V2SettingsIssue("$label: reasoning系はOpenRouter経路のみ有効のため送られません", false))
+            }
+        }
+    }
 
     val needsGemini = settings.profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI }
     if (needsGemini && settings.geminiKeys.none { it.isNotBlank() }) {
@@ -165,8 +197,13 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
     if (settings.transientRetryDelaySec < 0) {
         issues.add(V2SettingsIssue("一時エラー待機は0以上で指定してください", true))
     }
-    if (settings.limits.filesPerFolder < 0) {
-        issues.add(V2SettingsIssue("フォルダ上限は0以上で指定してください", true))
+    if (settings.limits.filesPerFolder !in TranslationLimits.TRIAL_FILES_RANGE) {
+        issues.add(
+            V2SettingsIssue(
+                "試し読み上限は${TranslationLimits.TRIAL_FILES_RANGE.first}〜${TranslationLimits.TRIAL_FILES_RANGE.last}で指定してください (0=無制限)",
+                true
+            )
+        )
     }
     if (settings.limits.outputSubDir.isBlank()) {
         issues.add(V2SettingsIssue("出力サブディレクトリが空です", true))
@@ -264,7 +301,10 @@ fun coercedV2Settings(settings: V2Settings): V2Settings {
                 TranslationLimits.WORKER_COUNT_RANGE.last
             ),
             requestDelaySec = settings.limits.requestDelaySec.coerceAtLeast(0),
-            filesPerFolder = settings.limits.filesPerFolder.coerceAtLeast(0)
+            filesPerFolder = settings.limits.filesPerFolder.coerceIn(
+                TranslationLimits.TRIAL_FILES_RANGE.first,
+                TranslationLimits.TRIAL_FILES_RANGE.last
+            )
         ),
         dict = settings.dict.copy(
             workerCount = settings.dict.workerCount.coerceIn(

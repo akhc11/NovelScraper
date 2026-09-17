@@ -238,6 +238,18 @@ class V2SettingsValidationTest {
     }
 
     @Test
+    fun testTrialCap_Validation() {
+        assertTrue(validateV2Settings(base()).none { it.blocksSave })
+        assertTrue(validateV2Settings(base().copy(limits = V2Limits(filesPerFolder = 40))).none { it.blocksSave })
+        val bad = base().copy(limits = V2Limits(filesPerFolder = 1001))
+        assertTrue(validateV2Settings(bad).any { it.blocksSave && it.message.contains("試し読み") })
+        assertEquals(1000, coercedV2Settings(bad).limits.filesPerFolder)
+        val negative = base().copy(limits = V2Limits(filesPerFolder = -1))
+        assertTrue(validateV2Settings(negative).any { it.blocksSave })
+        assertEquals(0, coercedV2Settings(negative).limits.filesPerFolder)
+    }
+
+    @Test
     fun testRefineOverride_DisabledEmitsNothing() {
         // 推敲OFF時は上書き値があっても検証しない（従来動作）
         val settings = base().copy(

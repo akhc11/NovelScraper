@@ -25,7 +25,8 @@ import kotlinx.serialization.json.contentOrNull
 data class NovelDict(
     val style: String = "カタカナ",
     val characters: Map<String, String> = emptyMap(),
-    val genders: Map<String, String> = emptyMap(),
+    /** 人物メモ（原文名→40字以内の性格・不変身分）。空＝未設定（訳語のみ従来通り）。 */
+    val profiles: Map<String, String> = emptyMap(),
     /** 生成時文面のハッシュ。空＝旧形式（照合時は不一致扱いで作り直す） */
     val promptsHash: String = ""
 )
@@ -34,7 +35,9 @@ data class NovelDict(
 data class ExtractedNames(
     val names: List<String> = emptyList(),
     /** 作者署名・注記・宣伝文由来の名前。名寄せ・命名には使わず機械除外する。欠落時は空扱い。 */
-    val authors: List<String> = emptyList()
+    val authors: List<String> = emptyList(),
+    /** 抽出断片で見た人物メモの素（原文名→候補文）。命名合成の根拠専用。欠落時は空扱い。 */
+    val hints: Map<String, List<String>> = emptyMap()
 )
 
 @Serializable
@@ -42,7 +45,7 @@ data class DictBuildManifest(val version: Int = 1, val batches: Map<String, Stri
 
 data class DictPrompts(
     val batch: String = "Extract person names (pure character names) from the novel text below.\n" +
-        "Output ONLY valid JSON matching this exact schema: {\"names\":[\"Name1\",\"Name2\"],\"authors\":[\"Author1\"]}.\n\n" +
+        "Output ONLY valid JSON matching this exact schema: {\"names\":[\"Name1\",\"Name2\"],\"authors\":[\"Author1\"],\"hints\":{\"Name1\":[\"人物メモ\"]}}.\n\n" +
         "【厳格な抽出ルール】\n" +
         "1. 抽出対象 (純粋な人名・固有名詞のみ):\n" +
         "   - 〇 抽出する: 登場人物のフルネーム、姓、名、愛称、ファーストネーム (原文表記のまま)\n" +
@@ -56,7 +59,10 @@ data class DictPrompts(
         "   - 「李云」「李云龙」「李云天」のように似ていても、それぞれ別人であるため、絶対に1つに統合せず別々の名前として漏れなく抽出してください。\n" +
         "4. 出力フォーマット:\n" +
         "   - 解説・挨拶・マークダウン記号は一切不要。純粋なJSONのみを出力してください。\n\n" +
-        "Example: {\"names\":[\"克莱恩\",\"周明瑞\",\"李云龙\",\"Arthur\",\"사재혁\",\"목진우\"],\"authors\":[]}",
+        "5. 人物メモの素（hints）:\n" +
+        "   - namesに挙げた人物のうち、この断片から読み取れる性格・変わらない身分だけを20字以内で書くこと（例: 「落ち着いた少年宗主」）。\n" +
+        "   - 変わる役職・所属・関係・あらすじは書かないこと。本文に証拠がない人物は省略し、憶測で書かないこと。\n\n" +
+        "Example: {\"names\":[\"克莱恩\",\"周明瑞\",\"李云龙\",\"Arthur\",\"사재혁\",\"목진우\"],\"authors\":[],\"hints\":{\"李云龙\":[\"落ち着いた少年宗主\"]}}",
 
     val merge: String = "Merge the dictionary names below into one clean JSON list. The input is already deduplicated by exact match.\n" +
         "Output ONLY valid JSON matching this exact schema: {\"names\":[\"Name1\",\"Name2\"]}.\n\n" +
@@ -76,7 +82,7 @@ data class DictPrompts(
 
     val translate: String = "Review the merged character names below and create a complete Japanese translation dictionary.\n" +
         "Output ONLY valid JSON matching this exact schema (no markdown, no explanations): " +
-        "{\"style\":\"カタカナ|漢字|ハイブリッド\",\"characters\":{\"OriginalName\":\"JapaneseName\"}}.\n\n" +
+        "{\"style\":\"カタカナ|漢字|ハイブリッド\",\"characters\":{\"OriginalName\":\"JapaneseName\"},\"profiles\":{\"OriginalName\":\"人物メモ（40字以内）\"}}.\n\n" +
         "【厳格な命名・翻訳ルール】（言語別基準：中国語＝漢字優先、韓国語＝カタカナ既定）\n" +
         "1. 表記スタイルの自動判定 & 作品全体での統一:\n" +
         "   中国語名は語源で判定し、迷う場合は漢字表記を優先すること。明らかな西洋音訳名のみカタカナに音訳し（克莱恩→クライン等）、中華名・意味の取れる複合名（黑山→黒山等）は日本の常用漢字・新字体に復元すること（李云→李雲等）。西洋と断定できない中国語名は漢字にすること。\n" +
@@ -87,9 +93,12 @@ data class DictPrompts(
         "3. 最終ノイズ除去:\n" +
         "   - 地名、組織名、役職、一般名詞が残っている場合は除外（キーに含めない）してください。\n" +
         "4. すべての値は自然な日本語（カタカナまたは漢字）であること。\n" +
-        "5. 出力フォーマット:\n" +
+        "5. 人物メモ（profiles）は入力のhintsを根拠に40字以内で合成すること（例: 「落ち着いた宗主の少年」）。\n" +
+        "   性格と変わらない身分だけを書き、変わる役職・所属・関係・あらすじは書かないこと。\n" +
+        "   hintsがない人物は空文字にし、憶測で書かないこと。\n" +
+        "6. 出力フォーマット:\n" +
         "   - 純粋なJSONのみを出力すること (解説・挨拶・コードブロック記号は一切不要)。\n\n" +
-        "Example: {\"style\":\"ハイブリッド\",\"characters\":{\"克莱恩\":\"クライン\",\"奥黛丽\":\"オードリー\",\"李云\":\"李雲\",\"李云龙\":\"李雲龍\",\"黑山\":\"黒山\",\"김민준\":\"キム・ミンジュン\",\"사재혁\":\"サ・ジェヒョク\"}}",
+        "Example: {\"style\":\"ハイブリッド\",\"characters\":{\"克莱恩\":\"クライン\",\"奥黛丽\":\"オードリー\",\"李云\":\"李雲\",\"李云龙\":\"李雲龍\",\"黑山\":\"黒山\",\"김민준\":\"キム・ミンジュン\",\"사재혁\":\"サ・ジェヒョク\"},\"profiles\":{\"李云\":\"落ち着いた宗主の少年\"}}",
 
     // 後方互換用エイリアス
     val review: String = translate
@@ -143,6 +152,81 @@ fun mergeDecision(totalBatches: Int, completedCount: Int, hasTransientFailure: B
     return totalBatches > 0 && completedCount in 1 until totalBatches && !hasTransientFailure
 }
 
+/**
+ * 断片群の人物メモ素を名寄せする（pure）。同名の候補を束ね、空・重複を落とし、上限で切る。
+ * 名簿にない名の素は捨てる（ノイズの持ち込み防止）。
+ * 技術的根拠1行：根拠は抽出断片にしかないため、束ねはここ1箇所に寄せて命名合成へ渡す。
+ */
+fun collectProfileHints(
+    batches: List<ExtractedNames>,
+    maxPerName: Int = TranslationLimits.MAX_HINTS_PER_NAME
+): Map<String, List<String>> {
+    val cap = maxPerName.coerceAtLeast(1)
+    val table = LinkedHashMap<String, MutableList<String>>()
+    for (batch in batches) {
+        val known = batch.names.toSet()
+        for ((name, hints) in batch.hints) {
+            if (name !in known) continue
+            val slot = table.getOrPut(name) { mutableListOf() }
+            for (hint in hints) {
+                if (hint.isNotBlank() && hint !in slot && slot.size < cap) {
+                    slot.add(hint)
+                }
+            }
+            // 技術的根拠1行：空スロットは「根拠あり」の誤認と後段の無駄走査を生むため残さない。
+            if (slot.isEmpty()) table.remove(name)
+        }
+    }
+    return table
+}
+
+/**
+ * 落選名の候補を生存名へ移す（pure）。·式短形の落選分だけをフルネーム側へ畳む。
+ * 技術的根拠1行：名寄せ則（·式はフルネーム統一）と同一則を機械側にも置き、短形断片の証拠を捨てない。
+ */fun transferShortHints(
+    survivors: Set<String>,
+    dropped: Collection<String>,
+    table: Map<String, List<String>>
+): Map<String, List<String>> {
+    if (table.isEmpty()) return table
+    val cap = TranslationLimits.MAX_HINTS_PER_NAME.coerceAtLeast(1)
+    val merged = table.mapValues { it.value.toMutableList() }.toMutableMap()
+    for (name in dropped) {
+        if (name in survivors) continue
+        val full = survivors.firstOrNull { it.contains("·") && name in it.split("·") } ?: continue
+        val slot = merged.getOrPut(full) { mutableListOf() }
+        for (hint in table[name].orEmpty()) {
+            if (hint !in slot && slot.size < cap) {
+                slot.add(hint)
+            }
+        }
+    }
+    return merged
+}
+
+/**
+ * 命名入力に載せる候補を総量上限で刈る（pure）。前方（名寄せ順）優先で詰め、超過分は後方切り捨て。
+ * 技術的根拠1行：大名簿時の入力肥大は小規模モデルの精度・上限を直撃するため、総量だけ上限を置く（1名枠は別途）。
+ */
+fun selectHintsForTranslate(
+    names: List<String>,
+    table: Map<String, List<String>>,
+    maxTotalChars: Int = TranslationLimits.MAX_TRANSLATE_HINTS_CHARS
+): Map<String, List<String>> {
+    val budget = maxTotalChars.coerceAtLeast(0)
+    val out = LinkedHashMap<String, List<String>>()
+    var used = 0
+    for (name in names) {
+        val hints = table[name].orEmpty()
+        if (hints.isEmpty()) continue
+        val cost = hints.sumOf { it.length }
+        if (used + cost > budget) break
+        out[name] = hints
+        used += cost
+    }
+    return out
+}
+
 private val dictJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
 private fun extractJsonObject(rawJson: String): String {
@@ -173,7 +257,7 @@ private fun decodeNovelDict(text: String, allowEmpty: Boolean): NovelDict? {
 
 /**
  * 変形JSONの救済（旧版の柔軟パーサー復活）。
- * {"名前": {"name"|"trans"|"japanese": "読み", "gender"|"sex": "男"}} 形式も拾う。
+ * {"名前": {"name"|"trans"|"japanese": "読み"}} 形式も拾う。旧"genders"キーは無視する。
  */
 private fun decodeNovelDictFlexible(text: String, allowEmpty: Boolean): NovelDict? {
     return try {
@@ -182,7 +266,7 @@ private fun decodeNovelDictFlexible(text: String, allowEmpty: Boolean): NovelDic
         val style = (element["style"] as? JsonPrimitive)?.contentOrNull ?: "カタカナ"
         val promptsHash = (element["promptsHash"] as? JsonPrimitive)?.contentOrNull ?: ""
         val charMap = mutableMapOf<String, String>()
-        val genderMap = mutableMapOf<String, String>()
+        val profileMap = mutableMapOf<String, String>()
         // 技術的根拠1行: charactersオブジェクト内外での同一パース処理のコピペ重複を排除し保守性を向上させる。
         val extractEntry = { k: String, v: kotlinx.serialization.json.JsonElement ->
             when (v) {
@@ -190,8 +274,6 @@ private fun decodeNovelDictFlexible(text: String, allowEmpty: Boolean): NovelDic
                 is JsonObject -> {
                     val nameVal = v["name"] ?: v["trans"] ?: v["japanese"]
                     if (nameVal is JsonPrimitive) nameVal.contentOrNull?.let { charMap[k] = it }
-                    val gVal = v["gender"] ?: v["sex"]
-                    if (gVal is JsonPrimitive) gVal.contentOrNull?.let { genderMap[k] = it }
                 }
                 else -> {}
             }
@@ -201,18 +283,18 @@ private fun decodeNovelDictFlexible(text: String, allowEmpty: Boolean): NovelDic
             for ((k, v) in charsObj) extractEntry(k, v)
         } else {
             for ((k, v) in element) {
-                if (k == "style" || k == "genders" || k == "characters") continue
+                if (k == "style" || k == "genders" || k == "characters" || k == "profiles") continue
                 extractEntry(k, v)
             }
         }
-        val gendersObj = element["genders"]
-        if (gendersObj is JsonObject) {
-            for ((k, v) in gendersObj) {
-                if (v is JsonPrimitive) v.contentOrNull?.let { genderMap[k] = it }
+        val profilesObj = element["profiles"]
+        if (profilesObj is JsonObject) {
+            for ((k, v) in profilesObj) {
+                if (v is JsonPrimitive) v.contentOrNull?.let { profileMap[k] = it }
             }
         }
         if (!allowEmpty && charMap.isEmpty()) return null
-        NovelDict(style = style, characters = charMap, genders = genderMap, promptsHash = promptsHash)
+        NovelDict(style = style, characters = charMap, profiles = profileMap, promptsHash = promptsHash)
     } catch (_: Exception) {
         null
     }
@@ -228,6 +310,27 @@ private fun stringListOf(element: kotlinx.serialization.json.JsonObject, key: St
     return arr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }.distinct()
 }
 
+/**
+ * 文字列または文字列配列の値を持つオブジェクトの読取。両形式を受理する。
+ * 技術的根拠1行：新旧・厳格・変形の3形式でhintsの載り方が違うため、読取だけ一本化して呼出側の分岐をなくす。
+ */
+private fun stringMapOf(element: kotlinx.serialization.json.JsonObject, key: String): Map<String, List<String>> {
+    val obj = element[key] as? kotlinx.serialization.json.JsonObject ?: return emptyMap()
+    val out = LinkedHashMap<String, List<String>>()
+    for ((k, v) in obj) {
+        val name = k.trim()
+        if (name.isEmpty()) continue
+        val values = when (v) {
+            is JsonPrimitive -> listOfNotNull(v.contentOrNull?.trim()?.takeIf { it.isNotBlank() })
+            is kotlinx.serialization.json.JsonArray ->
+                v.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }.distinct()
+            else -> emptyList()
+        }
+        if (values.isNotEmpty()) out[name] = values
+    }
+    return out
+}
+
 fun parseExtractedNames(rawJson: String): ExtractedNames? {
     return try {
         val text = extractJsonObject(rawJson)
@@ -241,15 +344,15 @@ fun parseExtractedNames(rawJson: String): ExtractedNames? {
             val namesArr = element["names"] as? kotlinx.serialization.json.JsonArray
             if (namesArr != null) {
                 val list = namesArr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }
-                return ExtractedNames(names = list.distinct(), authors = stringListOf(element, "authors"))
+                return ExtractedNames(names = list.distinct(), authors = stringListOf(element, "authors"), hints = stringMapOf(element, "hints"))
             }
             val chars = element["characters"]
             if (chars is JsonObject) {
                 val list = chars.keys.map { it.trim() }.filter { it.isNotBlank() }
-                return ExtractedNames(names = list.distinct(), authors = stringListOf(element, "authors"))
+                return ExtractedNames(names = list.distinct(), authors = stringListOf(element, "authors"), hints = stringMapOf(element, "hints"))
             } else if (chars is kotlinx.serialization.json.JsonArray) {
                 val list = chars.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }.filter { it.isNotBlank() }
-                return ExtractedNames(names = list.distinct(), authors = stringListOf(element, "authors"))
+                return ExtractedNames(names = list.distinct(), authors = stringListOf(element, "authors"), hints = stringMapOf(element, "hints"))
             }
             // 技術的根拠1行：名簿の構造がない応答は無効とし、空辞書としての誤採用（永久キャッシュ化）を防ぐ。
             return null
@@ -312,13 +415,15 @@ private fun isJapaneseHeadword(text: String): Boolean {
 
 /**
  * 日本語見出しでない項目の除去。抽出が原文表記をそのまま値にした場合（韓国語のまま等）を
- * 黙って採用しないための検査。性別表も生き残り項目に連動して刈る。
+ * 黙って採用しないための検査。人物メモも生き残り項目に連動して刈り、超過・非日本語はその人物分だけ落とす。
  */
 fun sanitizeNovelDict(dict: NovelDict): NovelDict {
     if (dict.characters.isEmpty()) return dict
     val kept = dict.characters.filterValues { isJapaneseHeadword(it) }
-    if (kept.size == dict.characters.size) return dict
-    return dict.copy(characters = kept, genders = dict.genders.filterKeys { it in kept })
+    val keptProfiles = dict.profiles.filterKeys { it in kept }
+        .filterValues { it.length <= TranslationLimits.MAX_PROFILE_CHARS && isJapaneseHeadword(it) }
+    if (kept.size == dict.characters.size && keptProfiles.size == dict.profiles.size) return dict
+    return dict.copy(characters = kept, profiles = keptProfiles)
 }
 
 fun selectSampleFiles(fileNames: List<String>, maxFiles: Int, uniform: Boolean): List<String> {
@@ -622,6 +727,16 @@ suspend fun generateDictionary(
 
     log("📖 辞書名寄せ完了: ${mergedNames.size}名 確定")
 
+    // 技術的根拠1行：根拠は抽出断片にしかないため、命名合成の入力に候補束を添えて当て推量にしない。
+    val hintTable = transferShortHints(
+        mergedNames.toSet(),
+        allExtractedNames - mergedNames.toSet(),
+        collectProfileHints(parsedBatches)
+    )
+    if (hintTable.isNotEmpty()) {
+        log("📖 辞書生成: 人物メモの素あり（${hintTable.size}名）")
+    }
+
     // 【Step 3: 命名・翻訳・レビュー（一括日本語付与）】
     // 確定した原文名一覧を受け取り、世界観判定とスタイル統一を行って正確な日本語訳を付与する。
     // 技術的根拠1行：1字名は一般語に誤爆するため登録しない（文面迂回の単一バッチ経路もここで閉じる）。
@@ -630,7 +745,13 @@ suspend fun generateDictionary(
         log("📖 辞書名寄せ: 1字の名前を${mergedNames.size - registrableNames.size}件除外します")
     }
     val effectiveTranslateRetries = options.reviewRetries.coerceIn(1, 5)
-    val translateInput = dictJson.encodeToString(ExtractedNames.serializer(), ExtractedNames(names = registrableNames))
+    val translateInput = dictJson.encodeToString(
+        ExtractedNames.serializer(),
+        ExtractedNames(
+            names = registrableNames,
+            hints = selectHintsForTranslate(registrableNames, hintTable)
+        )
+    )
     var translatedDict: NovelDict? = null
     var sawNonJapanese = false
 

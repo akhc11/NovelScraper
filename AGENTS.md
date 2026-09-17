@@ -27,13 +27,14 @@ $env:JAVA_TOOL_OPTIONS = "-Dfile.encoding=UTF-8"
 
 実機再起動が必要な時のみ：`adb logcat -c`→force-stop→`am start -n com.example.novelscraper/.MainActivity`（SDKパスは各自の`ANDROID_HOME`配下を使う）
 
-## Never（5件）
+## Never（6件）
 
 - 秘密情報・APIキー・`.env`をコミットしない
 - 生成物（`build/`・`graphify-out/`）を手編集しない
 - 失敗テストを無断で削除・スキップしない
 - 日本語ファイルのエンコーディングをUTF-8（BOMなし）以外にしない
 - 例外を無言で握りつぶさない（`catch → null`で終わらせない）
+- 小説プロンプト（翻訳・推敲）に特定ジャンル・作品固有の状況（学園・宿題・特定キャラ設定等）に依存した語句・例文を含めないこと（完全汎用・ジャンルニュートラルを厳守）
 
 ## Ask first
 

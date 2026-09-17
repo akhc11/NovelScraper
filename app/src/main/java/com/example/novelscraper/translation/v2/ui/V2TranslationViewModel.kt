@@ -15,6 +15,7 @@ import com.example.novelscraper.translation.v2.engine.RunEngine
 import com.example.novelscraper.translation.v2.engine.RunSummary
 import com.example.novelscraper.translation.v2.engine.defaultHandlerFor
 import com.example.novelscraper.translation.v2.infra.SafFileStore
+import com.example.novelscraper.translation.picker.FALLBACK_FOLDER_NAME
 import com.example.novelscraper.translation.v2.service.V2TranslationService
 import com.example.novelscraper.translation.v2.service.V2TranslationServiceController
 import com.example.novelscraper.translation.v2.settings.DataStoreSettingsRepository
@@ -93,7 +94,15 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
         val key = uri.toString()
         val current = _folders.value
         if (current.any { it.uri == key }) return
-        _folders.value = current + V2FolderItem(uri = key, name = name.ifBlank { "選択フォルダ" })
+        _folders.value = current + V2FolderItem(uri = key, name = name.ifBlank { FALLBACK_FOLDER_NAME })
+    }
+
+    /** 自前ブラウザ確定結果の一括追加(加算のみ。既存単発追加は不変)。 */
+    fun addFolderEntries(entries: List<Pair<String, String>>) {
+        for ((uriString, name) in entries) {
+            if (uriString.isBlank()) continue
+            addFolder(Uri.parse(uriString), name)
+        }
     }
 
     fun removeFolder(index: Int) {

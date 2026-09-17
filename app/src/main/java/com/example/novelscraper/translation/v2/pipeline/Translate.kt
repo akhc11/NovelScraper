@@ -172,6 +172,8 @@ data class TranslateContext(
     val callBatch: (suspend (driverName: String, prompt: String, source: String) -> LlmResult)? = null,
     /** バッチ枠をJSON形式で組み立てる（callBatch側のスキーマ指定と対にする） */
     val batchJsonFormat: Boolean = false,
+    /** 人物メモの添付可否。偽＝辞書にメモがあっても送らない（設定連動） */
+    val profileMemoEnabled: Boolean = true,
     /** 前文脈注入の設定連動（単体・バッチフォールバックで共有） */
     val prevContextLines: Int = 20,
     val prevContextEnabled: Boolean = true,
@@ -190,7 +192,9 @@ private fun buildAttempts(
     /** 非null時は対応確定の1行指示を付ける（本文は呼出側で注釈済み） */
     termAnnotation: TermAnnotation? = null,
     /** 非null時は人物対応表を付ける（韓国語用。注釈方式とは択一） */
-    glossary: Map<String, String>? = null
+    glossary: Map<String, String>? = null,
+    /** 非null・非blank時は人物メモブロックを付ける（方式を問わず併用可・参考情報） */
+    profileMemo: String? = null
 ): List<Attempt> {
     val attempts = mutableListOf<Attempt>()
     // 技術的根拠1行：構造化出力の適用範囲をバッチ枠に限定するため、枠種別で送信bindingを使い分ける
@@ -205,7 +209,8 @@ private fun buildAttempts(
                 termAnnotation = termAnnotation,
                 glossary = glossary,
                 enableCompletionMarker = ctx.verify.markerEnabled,
-                batchFormat = batchFormat
+                batchFormat = batchFormat,
+                profileMemo = profileMemo
             )
             val source = appendMarker(sourceForMarker, ctx.verify.markerEnabled)
             attempts.add(Attempt(driver, prompt, source) { invoke(driver, prompt, source) })
@@ -290,6 +295,10 @@ suspend fun translateSingle(
     val activeTerms = allTerms.filter { (key, value) -> isAnnotatableTerm(key, value) }
     val prepared = policy.prepare(content, activeTerms)
     val check = policy.check(activeTerms, prepared.annotation)
+    // 技術的根拠1行：メモは登場語だけに寄せ、未登場の持ち込み（トークン浪費・混同）をなくす。
+    val profileMemo = if (ctx.profileMemoEnabled && ctx.dictionary != null) {
+        buildProfileMemoBlock(profileMemoTerms(activeTerms, ctx.dictionary.profiles))
+    } else ""
     // 技術的根拠1行：適用人数と方式を可視化し、辞書未使用（0名・衝突）と指示無視を切り分けられるようにする。
     if (ctx.dictionary != null) {
         val aliasNote = if (aliasTerms.isNotEmpty()) "＋別名${aliasTerms.size}件" else ""
@@ -324,7 +333,8 @@ suspend fun translateSingle(
                 termAnnotation = prepared.annotation,
                 glossary = prepared.glossary,
                 enableCompletionMarker = verify.markerEnabled,
-                batchFormat = null
+                batchFormat = null,
+                profileMemo = profileMemo
             )
 
             val budget = RetryBudget()
@@ -436,6 +446,18 @@ suspend fun translateBatch(
             ctx.log("辞書添付: 0名（登録${dictChars.size}名中・なし）")
         }
     }
+    // 技術的根拠1行：メモは束ね登場語だけに寄せ、未登場の持ち込み（トークン浪費・混同）をなくす。
+    val batchMemo = if (ctx.profileMemoEnabled && ctx.dictionary != null) {
+        buildProfileMemoBlock(
+            profileMemoTerms(
+                combinedTerms.fold(LinkedHashMap<String, String>()) { acc, m ->
+                    for ((k, v) in m) if (!acc.containsKey(k)) acc[k] = v
+                    acc
+                },
+                ctx.dictionary.profiles
+            )
+        )
+    } else ""
     val combined = buildBatchInput(sendItems)
     val batchCtx = ctx.copy(verify = ctx.verify.copy(markerEnabled = false))
     val batchFormat = if (ctx.batchJsonFormat) buildBatchJsonFormat(items.size) else buildBatchFormat(items.size)
@@ -444,7 +466,8 @@ suspend fun translateBatch(
         prevTranslatedTail = null, prevSourceTail = prevSourceTail, combined,
         batchFormat = batchFormat,
         termAnnotation = batchPrepared.annotation,
-        glossary = batchPrepared.glossary
+        glossary = batchPrepared.glossary,
+        profileMemo = batchMemo
     )
     val outcome = attemptDrivers(
         attempts,

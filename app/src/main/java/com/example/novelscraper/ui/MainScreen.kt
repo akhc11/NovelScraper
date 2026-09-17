@@ -31,9 +31,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.*
 import com.example.novelscraper.scraper.*
+import com.example.novelscraper.translation.picker.PickerRootMenuDialog
+import com.example.novelscraper.translation.picker.PickerTargetAdapter
+import com.example.novelscraper.translation.picker.RootHealth
+import com.example.novelscraper.translation.picker.SafBrowserDialog
+import com.example.novelscraper.translation.picker.SafBrowserState
+import com.example.novelscraper.translation.picker.SafBrowserViewModel
+import com.example.novelscraper.translation.picker.treeDisplayName
 import com.example.novelscraper.translation.v2.ui.V2TranslationPanel
 import com.example.novelscraper.translation.v2.ui.V2TranslationViewModel
 import com.example.novelscraper.ui.components.*
@@ -101,9 +107,30 @@ fun MainScreen(
             } catch (_: Exception) {
                 // セキュリティ例外等のハンドリング
             }
-            val doc = DocumentFile.fromTreeUri(context, treeUri)
-            val folderName = doc?.name ?: treeUri.lastPathSegment ?: "選択フォルダ"
+            val folderName = treeDisplayName(context, treeUri)
             viewModel.addTranslationFolder(uiState.activeTranslationEngine, treeUri, folderName)
+        }
+    }
+
+    // 自前ブラウザ接続(加算のみ。既存ランチャーは不変)。
+    val pickerVM: SafBrowserViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+    val grantedRoots by pickerVM.grantedRoots.collectAsState()
+    val rootHealth by pickerVM.rootHealth.collectAsState()
+    var showRootMenu by remember { mutableStateOf(false) }
+    var browser by remember { mutableStateOf<SafBrowserState?>(null) }
+    LaunchedEffect(showRootMenu) {
+        if (showRootMenu) pickerVM.refreshHealth()
+    }
+
+    val grantLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            val folderName = treeDisplayName(context, treeUri)
+            pickerVM.persistRootPermission(treeUri, folderName) { saved ->
+                browser = pickerVM.openRoot(saved, folderName)
+                showRootMenu = false
+            }
         }
     }
 
@@ -147,12 +174,16 @@ fun MainScreen(
     // URL変更時のナビゲーション（正規化比較により同一URLの不要な二重リロードを完全防止）
     // 発火点はここ1箇所に集約。webViewRefもキーに含め、冷起動・WebView再生成時の取りこぼしを防ぐ。
     // SSoTはViewModel.currentUrl。factory側で直接loadしない（二重発火防止）。
+    // 技術的根拠1行：リダイレクト鎖の各hopコールバックが状態を前進させる度に旧hopへ再loadUrlすると鎖が再発火し地址欄が往復するため、直近要求済みは再要求しない（AOSP: loadUrlは現行ロードをcancelする）。
+    val recentNav = remember(webViewRef) { RecentNavigationDedup() }
     LaunchedEffect(uiState.currentUrl, webViewRef) {
         val view = webViewRef
         if (view != null && uiState.currentUrl.isNotEmpty()) {
             val currentNormalized = view.url?.trimEnd('/') ?: ""
             val targetNormalized = uiState.currentUrl.trimEnd('/')
-            if (currentNormalized != targetNormalized) {
+            if (currentNormalized != targetNormalized &&
+                recentNav.shouldRequest(targetNormalized, android.os.SystemClock.elapsedRealtime())
+            ) {
                 callbacks.onNavigate(uiState.currentUrl, view)
             }
         }
@@ -445,9 +476,10 @@ fun MainScreen(
                         TranslationPanel(
                             uiState = uiState,
                             isV2Translating = v2EngineState.isRunning,
-                            v2Content = { V2TranslationPanel(viewModel = v2ViewModel) },
+                            v2Content = { V2TranslationPanel(viewModel = v2ViewModel, onBrowseClick = { showRootMenu = true }) },
                             onSelectEngineTab = { engine -> viewModel.setActiveTranslationEngine(engine) },
                             onSelectFolderClick = { folderLauncher.launch(null) },
+                            onBrowseClick = { showRootMenu = true },
                             onRemoveFolderClick = { engine, index -> viewModel.removeTranslationFolder(engine, index) },
                             onClearFoldersClick = { engine -> viewModel.clearTranslationFolders(engine) },
                             onUpdateDelays = { engine, chunkDelay, fileDelay -> viewModel.updateTranslationDelays(engine, chunkDelay, fileDelay) },
@@ -558,6 +590,55 @@ fun MainScreen(
                     )
                 }
                 ActiveDialog.None -> {}
+            }
+
+            // 自前ブラウザ: 許可根メニュー(フォルダ内選択と同一の器・同一サイズ)。
+            if (showRootMenu) {
+                PickerRootMenuDialog(
+                    roots = grantedRoots,
+                    health = rootHealth,
+                    onOpen = { root ->
+                        val bad = (rootHealth[root.treeUri]
+                            ?: RootHealth.OK) != RootHealth.OK
+                        if (bad) {
+                            grantLauncher.launch(null)
+                        } else {
+                            browser = pickerVM.openRoot(root.treeUri, root.displayName)
+                            showRootMenu = false
+                        }
+                    },
+                    onForget = { pickerVM.forgetRoot(it.treeUri) },
+                    onGrantNew = { grantLauncher.launch(null) },
+                    onDismiss = { showRootMenu = false }
+                )
+            }
+
+            // 自前ブラウザ: 選択画面(確定後は現行キューへ加算するのみ)。
+            browser?.let { st ->
+                SafBrowserDialog(
+                    state = st,
+                    onConfirm = { targets, result ->
+                        val engine = uiState.activeTranslationEngine
+                        if (engine == TranslationEngine.LLM_API) {
+                            val entries = PickerTargetAdapter.toV2FolderEntries(targets)
+                            v2ViewModel.addFolderEntries(entries)
+                            Toast.makeText(context, "フォルダ${entries.size}件を登録しました", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val items = PickerTargetAdapter.toWebFolderItems(targets)
+                            viewModel.addTranslationFolderItems(engine, items)
+                            Toast.makeText(context, "${items.size}件を登録しました", Toast.LENGTH_SHORT).show()
+                        }
+                        if (result.truncated) {
+                            Toast.makeText(context, "上限のため一部除外しました", Toast.LENGTH_LONG).show()
+                        }
+                        browser = null
+                        pickerVM.closeBrowser()
+                    },
+                    onDismiss = {
+                        browser = null
+                        pickerVM.closeBrowser()
+                    }
+                )
             }
         }
     }

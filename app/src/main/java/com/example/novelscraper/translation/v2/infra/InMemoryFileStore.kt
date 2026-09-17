@@ -65,6 +65,10 @@ class InMemoryFileStore : FileStore {
         node.children.values.map { docOf("$dirUri/${it.name}", it) }
     }
 
+    override suspend fun probe(dirUri: String): Boolean = mutex.withLock {
+        nodeOf(dirUri)?.isDirectory == true
+    }
+
     override suspend fun openInputStream(fileUri: String): java.io.InputStream? = mutex.withLock {
         val node = nodeOf(fileUri) ?: return@withLock null
         if (node.isDirectory) return@withLock null

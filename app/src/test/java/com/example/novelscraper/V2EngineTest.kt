@@ -1658,4 +1658,159 @@ class V2EngineTest {
         assertNotNull(store.findChild(splitRoot.uri, "a"))
         assertNotNull(store.findChild(splitRoot.uri, "b"))
     }
+
+    @Test
+    fun testRunEngine_TrialCapPerNovel() = kotlinx.coroutines.runBlocking {
+        // 試し読み上限：先頭N件で打ち切り→次へ。残りは未翻訳のまま残し、上限UP/0の再実行で続きから再開できること。
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-trial")
+        for (name in listOf("a.txt", "b.txt", "c.txt", "d.txt", "e.txt")) {
+            val doc = store.createFile(folder.uri, name, "text/plain")!!
+            store.writeText(doc.uri, "これはテストの本文です。勇者が旅に出ました。")
+        }
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L, batchMaxFiles = 1),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val trial = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0, filesPerFolder = 2)
+        )
+        val first = engine.run(listOf(folder.uri), trial)
+        assertFalse(first.aborted)
+        assertEquals(5, first.totalFiles)
+        assertEquals(2, first.completedFiles)
+        val outDir = store.findChild(folder.uri, "翻訳完了_LLM")!!
+        val names = store.children(outDir.uri).map { it.name }.filter { it != ".lang_cache" }.sorted()
+        assertEquals(listOf("a.txt", "b.txt"), names)
+
+        // 上限内の再実行は追加翻訳なし（無駄打ちしない）
+        val capped = engine.run(listOf(folder.uri), trial)
+        assertFalse(capped.aborted)
+        assertEquals(2, capped.completedFiles)
+
+        // 上限解除の再実行で残りを続きから再開
+        val resume = engine.run(
+            listOf(folder.uri),
+            trial.copy(limits = trial.limits.copy(filesPerFolder = 0))
+        )
+        assertFalse(resume.aborted)
+        assertEquals(5, resume.completedFiles)
+        val resumed = store.children(outDir.uri).map { it.name }.filter { it != ".lang_cache" }.sorted()
+        assertEquals(listOf("a.txt", "b.txt", "c.txt", "d.txt", "e.txt"), resumed)
+    }
+
+    @Test
+    fun testRunEngine_TrialCapDictUsesAllFiles() = kotlinx.coroutines.runBlocking {
+        // 試し読み上限時も辞書は全件対象で生成すること。上限外(41件目以降相当)の人名が欠落すると、
+        // 再開時は同一文面ハッシュの辞書が再利用されるため欠落が確定してしまう。
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-trial-dict")
+        val names = listOf("アーロン", "ベーラ", "シーラ", "デーボ", "エド")
+        for ((i, name) in listOf("a.txt", "b.txt", "c.txt", "d.txt", "e.txt").zip(names)) {
+            val doc = store.createFile(folder.uri, i, "text/plain")!!
+            store.writeText(doc.uri, "勇者${name}は旅に出ました。仲間と共に魔王を倒す決意をしたのです。")
+        }
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val sys = request.systemPrompt
+                if (sys.contains("Extract person names") ||
+                    sys.contains("Merge the dictionary") ||
+                    sys.contains("Review the merged")
+                ) {
+                    val found = names.filter { request.userText.contains(it) }
+                    val chars = found.joinToString(",") { "\"勇者$it\":\"$it\"" }
+                    return LlmResult.Success("""{"style":"カタカナ","characters":{$chars},"genders":{}}""")
+                }
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L, batchMaxFiles = 1),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0, filesPerFolder = 2),
+            dict = com.example.novelscraper.translation.v2.settings.V2DictSettings(
+                enabled = true,
+                providerId = "gemini",
+                model = "gemini-3.5-flash"
+            )
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(2, summary.completedFiles)
+        // 本文は2件だけだが、辞書は上限外のエドまで含む全5名で公開されること
+        val published = store.findChild(folder.uri, "dictionary.json")
+        assertNotNull(published)
+        val dictText = store.readText(published!!.uri) ?: ""
+        for (name in names) {
+            assertTrue("辞書に${name}が含まれること", dictText.contains(name))
+        }
+    }
+
+    @Test
+    fun testRunEngine_StaleDictReusedWithoutRebuild() = kotlinx.coroutines.runBlocking {
+        // 辞書文面変更後も既存辞書は作り直さず再利用すること（無駄打ち防止）。作り直しは dictionary.json 削除時のみ。
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-stale-dict")
+        for (name in listOf("a.txt", "b.txt")) {
+            val doc = store.createFile(folder.uri, name, "text/plain")!!
+            store.writeText(doc.uri, "これはテストの本文です。勇者が旅に出ました。")
+        }
+        // ハッシュなしの旧辞書を事前配置（現行文面とは不一致＝stale扱い）
+        val stale = store.createFile(folder.uri, "dictionary.json", "application/json")!!
+        store.writeText(stale.uri, """{"style":"カタカナ","characters":{"勇者":"ユウシャ"},"genders":{}}""")
+        var dictCalls = 0
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                val sys = request.systemPrompt
+                if (sys.contains("Extract person names") ||
+                    sys.contains("Merge the dictionary") ||
+                    sys.contains("Review the merged")
+                ) {
+                    dictCalls++
+                    return LlmResult.Success("""{"style":"カタカナ","characters":{},"genders":{}}""")
+                }
+                val body = request.userText.trimEnd().removeSuffix("[SRC_END]").trimEnd()
+                return LlmResult.Success("$body\n[SRC_END]")
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(requestDelaySec = 0),
+            dict = com.example.novelscraper.translation.v2.settings.V2DictSettings(
+                enabled = true,
+                providerId = "gemini",
+                model = "gemini-3.5-flash"
+            )
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(2, summary.completedFiles)
+        assertEquals("辞書再生成のためLLMを呼ばないこと", 0, dictCalls)
+        val kept = store.readText(store.findChild(folder.uri, "dictionary.json")!!.uri) ?: ""
+        assertTrue("旧辞書が上書きされず残ること", kept.contains("ユウシャ"))
+    }
 }

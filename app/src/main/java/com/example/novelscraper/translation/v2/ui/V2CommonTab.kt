@@ -53,6 +53,7 @@ class V2CommonTabState(
     val sizeRatioJaMinText: MutableState<String>,
     val sizeRatioJaMaxText: MutableState<String>,
     val dictEnabled: MutableState<Boolean>,
+    val profileMemoEnabled: MutableState<Boolean>,
     val dictProvider: MutableState<String>,
     val dictModel: MutableState<String>,
     val dictMergeModel: MutableState<String>,
@@ -80,6 +81,7 @@ class V2CommonTabState(
             openRouterEndpoint = openRouterEndpoint.value.trim().ifBlank { base.openRouterEndpoint },
             dict = base.dict.copy(
                 enabled = dictEnabled.value,
+                profileMemoEnabled = profileMemoEnabled.value,
                 providerId = dictProvider.value,
                 model = dictModel.value.trim(),
                 mergeModel = dictMergeModel.value.trim(),
@@ -167,6 +169,7 @@ class V2CommonTabState(
                 sizeRatioJaMinText = mutableStateOf(initial.sizeRatios.jaMin.toString()),
                 sizeRatioJaMaxText = mutableStateOf(initial.sizeRatios.jaMax.toString()),
                 dictEnabled = mutableStateOf(initial.dict.enabled),
+                profileMemoEnabled = mutableStateOf(initial.dict.profileMemoEnabled),
                 dictProvider = mutableStateOf(initial.dict.providerId),
                 dictModel = mutableStateOf(initial.dict.model),
                 dictMergeModel = mutableStateOf(initial.dict.mergeModel),
@@ -524,6 +527,10 @@ internal fun V2CommonTab(
     Row(verticalAlignment = Alignment.CenterVertically) {
         Checkbox(checked = state.dictEnabled.value, onCheckedChange = { state.dictEnabled.value = it })
         Text("辞書自動生成を有効にする", color = AppColors.textPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = state.profileMemoEnabled.value, onCheckedChange = { state.profileMemoEnabled.value = it })
+        Text("人物メモを翻訳時に添付する（辞書にメモがある場合）", color = AppColors.textPrimary, fontSize = 10.sp)
     }
 
     if (state.dictEnabled.value) {

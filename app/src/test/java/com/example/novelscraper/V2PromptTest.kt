@@ -146,5 +146,21 @@ class V2PromptTest {
         assertFalse(plain.contains("[確定訳語]"))
         assertFalse(plain.contains("[登場人物対応表]"))
     }
+
+    @Test
+    fun testBuildSystemPrompt_ProfileMemo() {
+        // メモあり：参考ブロックが付き、訳語確定の指示にはならないこと
+        val withMemo = buildSystemPrompt(
+            basePrompt = "ベースプロンプト",
+            profileMemo = "[登場人物メモ]\n- 李雲：落ち着いた宗主の少年"
+        )
+        assertTrue(withMemo.contains("[登場人物メモ]"))
+        assertTrue(withMemo.contains("- 李雲：落ち着いた宗主の少年"))
+        // メモなし・空：何も付かないこと（従来動作）
+        assertFalse(buildSystemPrompt(basePrompt = "ベースプロンプト").contains("[登場人物メモ]"))
+        assertFalse(
+            buildSystemPrompt(basePrompt = "ベースプロンプト", profileMemo = "   ").contains("[登場人物メモ]")
+        )
+    }
 }
 

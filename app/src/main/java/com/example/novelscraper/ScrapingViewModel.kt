@@ -369,6 +369,14 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         translationManager.addFolder(engine, uri, folderName)
     }
 
+    /** 自前ブラウザ確定結果の一括追加(加算のみ。既存単発追加は不変)。 */
+    fun addTranslationFolderItems(engine: TranslationEngine, items: List<FolderItem>) {
+        for (item in items) {
+            val uri = item.uri ?: continue
+            translationManager.addFolder(engine, uri, item.name)
+        }
+    }
+
     fun removeTranslationFolder(engine: TranslationEngine, index: Int) {
         translationManager.removeFolder(engine, index)
     }

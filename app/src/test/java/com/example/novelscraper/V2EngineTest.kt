@@ -157,6 +157,79 @@ class V2EngineTest {
     }
 
     @Test
+    fun testRotation_ProfileOverridesAffectRefineOnly() = kotlinx.coroutines.runBlocking {
+        // 上書き指定時はthinkingLevelが差し替わり、未指定時は原本のまま（推敲分離の回帰錠）
+        val pool = QuotaPool(listOf("k1"))
+        val p = geminiProfile("gemini-3.5-flash").copy(id = "p1", thinkingLevel = "low")
+        val seenLevels = mutableListOf<String?>()
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                seenLevels.add(request.options.thinkingLevel)
+                return LlmResult.Success("ok")
+            }
+        }
+        val rotation = Rotation(
+            workerId = 1,
+            profiles = listOf(p),
+            pool = pool,
+            keyIndex = 0,
+            key = "k1",
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR),
+            handlerFactory = { _, _ -> handler },
+            openRouterKey = "",
+            maxSameRetries = 0,
+            log = {}
+        )
+        assertTrue(rotation.execute(listOf("prompt"), "src") is LlmResult.Success)
+        assertEquals(listOf("low"), seenLevels)
+        val overrides = mapOf("p1" to p.copy(thinkingLevel = "high"))
+        assertTrue(
+            rotation.execute(listOf("prompt"), "src", profileOverrides = overrides) is LlmResult.Success
+        )
+        assertEquals(listOf("low", "high"), seenLevels)
+        // 未知idの上書きは無視して原本で送る
+        assertTrue(
+            rotation.execute(listOf("prompt"), "src", profileOverrides = mapOf("nope" to p.copy(thinkingLevel = "high"))) is LlmResult.Success
+        )
+        assertEquals(listOf("low", "high", "low"), seenLevels)
+    }
+
+    @Test
+    fun testUnmanagedRotation_ProfileOverridesReachHandler() = kotlinx.coroutines.runBlocking {
+        // OpenRouter経路：上書きがハンドラー生成まで届くこと（推敲effort分離の回帰錠）
+        val p = V2ModelProfile(id = "o1", providerId = "openrouter", model = "x/y", reasoningEffort = "low")
+        val seenEfforts = mutableListOf<String?>()
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult = LlmResult.Success("ok")
+        }
+        val rotation = UnmanagedRotation(
+            workerId = 1,
+            profiles = listOf(p),
+            key = "or",
+            descriptors = mapOf(ProviderId.GEMINI to GEMINI_DESCRIPTOR, ProviderId.OPENROUTER to OPENROUTER_DESCRIPTOR),
+            handlerFactory = { profile, _ ->
+                seenEfforts.add(profile.reasoningEffort)
+                handler
+            },
+            cooldownSec = 0,
+            maxSameRetries = 0,
+            log = {}
+        )
+        assertTrue(rotation.execute(listOf("prompt"), "src") is LlmResult.Success)
+        assertEquals(listOf("low"), seenEfforts)
+        val overrides = mapOf("o1" to p.copy(reasoningEffort = "high"))
+        assertTrue(
+            rotation.execute(listOf("prompt"), "src", profileOverrides = overrides) is LlmResult.Success
+        )
+        assertEquals(listOf("low", "high"), seenEfforts)
+        // 原本は不変（copy差分のため翻訳路に漏れない）
+        assertEquals("low", p.reasoningEffort)
+        // 解決則にも載る（送信直前の正規化と同一入力）
+        val resolved = com.example.novelscraper.translation.v2.domain.resolveOpenRouterParams(overrides.getValue("o1"))
+        assertEquals("high", resolved.reasoningEffort)
+    }
+
+    @Test
     fun testRotation_PairSkipAndExhaust() = kotlinx.coroutines.runBlocking {
         val pool = QuotaPool(listOf("k1"))
         pool.reportQuota(0, "gemini-3.5-flash", daily = true, cooldownSec = 15)

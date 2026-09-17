@@ -28,6 +28,7 @@ import com.example.novelscraper.translation.v2.pipeline.utf8Bytes
 import com.example.novelscraper.translation.v2.pipeline.writeFailed
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2Settings
+import com.example.novelscraper.translation.v2.settings.buildRefineProfileOverrides
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 
@@ -87,7 +88,10 @@ class WorkerRunner(
             profile.useJsonSchema &&
                 ProviderRegistry.capabilitiesForOrNull(profile.providerId, profile.model)?.structuredOutput == true
         }
-        fun bindCall(forBatch: Boolean): suspend (String, String, String) -> LlmResult {
+        fun bindCall(
+            forBatch: Boolean,
+            profileOverrides: Map<String, V2ModelProfile>? = null
+        ): suspend (String, String, String) -> LlmResult {
             return { promptOrDriver, prompt, source ->
                 val currentPromptNum = promptOrDriver.toIntOrNull() ?: primaryPromptNum
                 val profilePrompts = profiles.associate { profile ->
@@ -102,14 +106,20 @@ class WorkerRunner(
                         )
                     )
                 }
-                router.execute(listOf(prompt), source, profilePrompts, forBatch)
+                router.execute(listOf(prompt), source, profilePrompts, forBatch, profileOverrides)
             }
         }
         // 技術的根拠1行：磨き送り口は主経路の別名としてここで作り、番号解釈の抜け道を翻訳路に持ち込まない。
+        // 技術的根拠1行：推敲の思考上書きは口の差分引数に乗せ、巡回器の二重化（クォータ二重管理）を避ける。
         val batchCall = bindCall(true)
+        val refineOverrides = buildRefineProfileOverrides(profiles, settings.refine)
+            .ifEmpty { null }
         val refineCall: (suspend (String, String) -> LlmResult)? =
             if (settings.refine.enabled) {
-                { prompt, source -> bindCall(false)(primaryPromptNum.toString(), prompt, source) }
+                val refineSender = bindCall(forBatch = false, profileOverrides = refineOverrides)
+                val sender: suspend (String, String) -> LlmResult =
+                    { prompt, source -> refineSender(primaryPromptNum.toString(), prompt, source) }
+                sender
             } else null
         val ctx = TranslateContext(
             basePrompts = allBasePrompts,

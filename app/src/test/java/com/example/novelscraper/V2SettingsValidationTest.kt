@@ -5,8 +5,10 @@ import com.example.novelscraper.translation.v2.settings.V2DictSettings
 import com.example.novelscraper.translation.v2.settings.V2Limits
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2PrevContext
+import com.example.novelscraper.translation.v2.settings.V2RefineSettings
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import com.example.novelscraper.translation.v2.settings.V2SplitSettings
+import com.example.novelscraper.translation.v2.settings.buildRefineProfileOverrides
 import com.example.novelscraper.translation.v2.ui.coercedV2Settings
 import com.example.novelscraper.translation.v2.ui.validateV2Settings
 import org.junit.Assert.*
@@ -233,5 +235,85 @@ class V2SettingsValidationTest {
         val coerced = coercedV2Settings(settings)
         assertEquals(2000, coerced.profiles[0].maxOutputChars) // 2000に丸められる
         assertEquals(100000, coerced.profiles[1].maxOutputChars) // 100000に丸められる
+    }
+
+    @Test
+    fun testRefineOverride_DisabledEmitsNothing() {
+        // 推敲OFF時は上書き値があっても検証しない（従来動作）
+        val settings = base().copy(
+            refine = V2RefineSettings(
+                enabled = false, thinkingLevel = "high"
+            )
+        )
+        assertTrue(validateV2Settings(settings).none { it.message.startsWith("推敲(") })
+    }
+
+    @Test
+    fun testRefineOverride_UnsupportedWarnsOnly() {
+        // Gemma系に推敲highを指定しても警告のみ（保存は通す・原本 untouched）
+        val settings = base().copy(
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemma-4-31b-it")),
+            refine = V2RefineSettings(
+                enabled = true, thinkingLevel = "high"
+            )
+        )
+        val issues = validateV2Settings(settings)
+        assertFalse(issues.any { it.blocksSave })
+        assertTrue(issues.any { it.message.startsWith("推敲(") && it.message.contains("thinkingLevel") })
+    }
+
+    @Test
+    fun testRefineOverride_OpenRouterEffortWarnsOnly() {
+        val settings = base().copy(
+            profiles = listOf(V2ModelProfile(providerId = "openrouter", model = "x/y")),
+            refine = V2RefineSettings(
+                enabled = true, reasoningEffort = "ultra"
+            )
+        )
+        val issues = validateV2Settings(settings)
+        assertFalse(issues.any { it.blocksSave })
+        assertTrue(issues.any { it.message.startsWith("推敲(") && it.message.contains("reasoningEffort") })
+    }
+
+    @Test
+    fun testRefineOverrides_BuilderSemantics() {
+        val refineOff = V2RefineSettings(enabled = false, thinkingLevel = "high")
+        val p = V2ModelProfile(id = "p1", providerId = "gemini", model = "gemini-3.5-flash", thinkingLevel = "low")
+        // OFF時・全null時は空（継承＝原本利用）
+        assertTrue(buildRefineProfileOverrides(listOf(p), refineOff).isEmpty())
+        assertTrue(
+            buildRefineProfileOverrides(
+                listOf(p),
+                V2RefineSettings(enabled = true)
+            ).isEmpty()
+        )
+        // 指定分だけ上書きし、id・modelは保つ
+        val overridden = buildRefineProfileOverrides(
+            listOf(p),
+            V2RefineSettings(enabled = true, thinkingLevel = "high")
+        )
+        assertEquals("high", overridden.getValue("p1").thinkingLevel)
+        assertEquals("gemini-3.5-flash", overridden.getValue("p1").model)
+        assertEquals("p1", overridden.getValue("p1").id)
+    }
+
+    @Test
+    fun testRefineOverrides_SettingsJsonRoundTrip() {
+        // 保存形式の互換性：新4項目は往復し、旧JSON（キーなし）は全null継承になる
+        val json = com.example.novelscraper.translation.v2.settings.DataStoreSettingsRepository.v2Json
+        val withRefine = V2Settings(
+            refine = V2RefineSettings(
+                enabled = true, thinkingLevel = "high", thinkingBudget = 8000,
+                reasoningEffort = "medium", reasoningEnabled = true
+            )
+        )
+        val decoded = json.decodeFromString(V2Settings.serializer(), json.encodeToString(V2Settings.serializer(), withRefine))
+        assertEquals("high", decoded.refine.thinkingLevel)
+        assertEquals(8000, decoded.refine.thinkingBudget)
+        assertEquals("medium", decoded.refine.reasoningEffort)
+        assertEquals(true, decoded.refine.reasoningEnabled)
+        val legacy = json.decodeFromString(V2Settings.serializer(), "{}")
+        assertEquals(V2RefineSettings(), legacy.refine)
+        assertTrue(buildRefineProfileOverrides(listOf(V2ModelProfile(id = "p1")), legacy.refine).isEmpty())
     }
 }

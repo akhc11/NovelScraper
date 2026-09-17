@@ -133,7 +133,8 @@ class Rotation(
         prompts: List<String>,
         source: String,
         profilePrompts: Map<String, List<String>>?,
-        forBatch: Boolean
+        forBatch: Boolean,
+        profileOverrides: Map<String, V2ModelProfile>?
     ): LlmResult {
         if (profiles.isEmpty() || stopped() || exhausted) {
             return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "stopped"))
@@ -169,7 +170,8 @@ class Rotation(
                     while (true) {
                         if (stopped() || exhausted) break
                         attemptedAny = true
-                        when (val result = callOnce(profile, prompt, source, forBatch)) {
+                        // 技術的根拠1行：上書きは思考系4項目のみでmodel/id不変のため、巡回順・クォータ範囲は原本のまま送信用だけ差し替える。
+                        when (val result = callOnce(profileOverrides?.get(profile.id) ?: profile, prompt, source, forBatch)) {
                             is LlmResult.Success -> return result
                             is LlmResult.Failure -> {
                                 lastFailure = result

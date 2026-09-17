@@ -100,13 +100,44 @@ data class V2PrevContext(
 /**
  * 最終推敲（ポストエディット）設定。既定OFF（従来動作を変えない）。
  * prompt空・空白＝既定文（辞書プロンプトと同一約束）。
+ * 思考系4項目はすべてnull可・null＝翻訳プロファイルの値を継承（互換維持）。
  * 技術的根拠1行：on/offと文面を1箇所にし、作業者・単複路での扱い違いをなくす。
  */
 @Serializable
 data class V2RefineSettings(
     val enabled: Boolean = false,
-    val prompt: String = ""
+    val prompt: String = "",
+    /** Gemini直結用。null＝継承 */
+    val thinkingLevel: String? = null,
+    /** Gemini旧式（2.5系）用。null＝継承 */
+    val thinkingBudget: Int? = null,
+    /** OpenRouter用。null＝継承 */
+    val reasoningEffort: String? = null,
+    /** OpenRouter用。null＝継承 */
+    val reasoningEnabled: Boolean? = null
 )
+
+/**
+ * 推敲用のプロファイル上書き対応表を作る（pure）。
+ * 技術的根拠1行：上書き解決を純粋関数に寄せ、巡回器・UI・検証の三者で使い回して乖離をなくす。
+ */
+fun buildRefineProfileOverrides(
+    profiles: List<V2ModelProfile>,
+    refine: V2RefineSettings
+): Map<String, V2ModelProfile> {
+    if (!refine.enabled) return emptyMap()
+    if (refine.thinkingLevel == null && refine.thinkingBudget == null &&
+        refine.reasoningEffort == null && refine.reasoningEnabled == null
+    ) return emptyMap()
+    return profiles.filter { it.id.isNotBlank() }.associate { profile ->
+        profile.id to profile.copy(
+            thinkingLevel = refine.thinkingLevel ?: profile.thinkingLevel,
+            thinkingBudget = refine.thinkingBudget ?: profile.thinkingBudget,
+            reasoningEffort = refine.reasoningEffort ?: profile.reasoningEffort,
+            reasoningEnabled = refine.reasoningEnabled ?: profile.reasoningEnabled
+        )
+    }
+}
 
 /** Prompt selection. Auto stays OFF by default (parity with old default). */
 @Serializable

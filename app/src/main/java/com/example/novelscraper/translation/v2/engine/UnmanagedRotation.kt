@@ -42,7 +42,8 @@ class UnmanagedRotation(
         prompts: List<String>,
         source: String,
         profilePrompts: Map<String, List<String>>?,
-        forBatch: Boolean
+        forBatch: Boolean,
+        profileOverrides: Map<String, V2ModelProfile>?
     ): LlmResult {
         if (profiles.isEmpty() || stopped()) {
             return LlmResult.Failure(ClassifiedFailure(FailureKind.FATAL, note = "no-profiles-or-stopped"))
@@ -65,12 +66,14 @@ class UnmanagedRotation(
                     var sameLeft = maxSameRetries
                     while (true) {
                         if (stopped()) break
+                        // 技術的根拠1行：上書きは思考系4項目のみでmodel/id不変のため、巡回順は原本のまま送信用だけ差し替える。
+                        val active = profileOverrides?.get(profile.id) ?: profile
                         when (val result = executeLlmCall(
                             workerId,
                             sendGate,
                             sendGateIntervalMs,
-                            profile.providerId.toProviderId()?.let { descriptors[it] },
-                            profile,
+                            active.providerId.toProviderId()?.let { descriptors[it] },
+                            active,
                             prompt,
                             source,
                             forBatch,

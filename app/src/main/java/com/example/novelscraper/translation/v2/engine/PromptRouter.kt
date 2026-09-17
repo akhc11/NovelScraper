@@ -23,7 +23,12 @@ interface PromptRouter {
         prompts: List<String>,
         source: String,
         profilePrompts: Map<String, List<String>>? = null,
-        forBatch: Boolean = false
+        forBatch: Boolean = false,
+        /**
+         * 推敲用のプロファイル上書き（id→差し替え）。null/欠落＝保持プロファイルをそのまま使う。
+         * 技術的根拠1行：第二巡回器を作らず同一の巡回・待機・クォータ管理に乗せるため、差分だけをid指定で渡す。
+         */
+        profileOverrides: Map<String, V2ModelProfile>? = null
     ): LlmResult
 
     suspend fun release()

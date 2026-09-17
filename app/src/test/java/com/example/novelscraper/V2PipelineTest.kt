@@ -40,9 +40,15 @@ import com.example.novelscraper.translation.v2.pipeline.matchDictionaryMap
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import com.example.novelscraper.translation.v2.pipeline.mergeDecision
 import com.example.novelscraper.translation.v2.pipeline.parseBatchResponse
+import com.example.novelscraper.translation.v2.pipeline.profileMemoTerms
+import com.example.novelscraper.translation.v2.pipeline.buildProfileMemoBlock
+import com.example.novelscraper.translation.v2.pipeline.collectProfileHints
+import com.example.novelscraper.translation.v2.pipeline.selectHintsForTranslate
+import com.example.novelscraper.translation.v2.pipeline.transferShortHints
 import com.example.novelscraper.translation.v2.pipeline.parseBatchJsonResponse
 import com.example.novelscraper.translation.v2.pipeline.parseExtractedNames
 import com.example.novelscraper.translation.v2.pipeline.parseNovelDict
+import com.example.novelscraper.translation.v2.pipeline.parseNovelDictLenient
 import com.example.novelscraper.translation.v2.pipeline.sanitizeNovelDict
 import com.example.novelscraper.translation.v2.pipeline.selectSampleFiles
 import com.example.novelscraper.translation.v2.pipeline.selectTermAnnotation
@@ -50,6 +56,7 @@ import com.example.novelscraper.translation.v2.pipeline.sha256Hex
 import com.example.novelscraper.translation.v2.pipeline.sizeRatioOk
 import com.example.novelscraper.translation.v2.pipeline.splitIntoChunks
 import com.example.novelscraper.translation.v2.pipeline.stripFences
+import com.example.novelscraper.translation.v2.pipeline.stripTermAnnotations
 import com.example.novelscraper.translation.v2.pipeline.translateBatch
 import com.example.novelscraper.translation.v2.pipeline.writeFailed
 import com.example.novelscraper.translation.v2.pipeline.translateLarge
@@ -1048,7 +1055,7 @@ class V2PipelineTest {
 
         val dict = com.example.novelscraper.translation.v2.pipeline.NovelDict(
             characters = mapOf("山田" to "ヤマダ", "佐藤" to "サトウ"),
-            genders = mapOf("山田" to "男", "佐藤" to "女")
+            profiles = mapOf("山田" to "内気で控えめな小動物系少女")
         )
 
         val capturedPrompts = mutableListOf<String>()
@@ -1149,18 +1156,109 @@ class V2PipelineTest {
 
     @Test
     fun testDictSanitize() {
-        // 日本語見出しでない値は落とす（韓国語のままの採用を防ぐ）。性別表も連動して刈る。
+        // 日本語見出しでない値は落とす（韓国語のままの採用を防ぐ）。人物メモも連動して刈る。
         val dict = NovelDict(
             style = "カタカナ",
             characters = mapOf("山田" to "ヤマダ", "김민준" to "김민준", "John" to "ジョン", "李云" to "李雲"),
-            genders = mapOf("山田" to "男", "김민준" to "男", "John" to "不明")
+            profiles = mapOf(
+                "山田" to "内気で控えめな小動物系少女",
+                "김민준" to "용감한 소년",
+                "John" to "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろ",
+                "李云" to "落ち着いた宗主の少年",
+                "幽霊" to "登場しない人物のメモ"
+            )
         )
         val cleaned = sanitizeNovelDict(dict)
         assertEquals(mapOf("山田" to "ヤマダ", "John" to "ジョン", "李云" to "李雲"), cleaned.characters)
-        // 性別表は生存項目に連動（「不明」は使用時に除外されるため保持でよい）
-        assertEquals(mapOf("山田" to "男", "John" to "不明"), cleaned.genders)
+        // メモは生存項目に連動し、超過・非日本語はその人物分だけ落ちる
+        assertEquals(mapOf("山田" to "内気で控えめな小動物系少女", "李云" to "落ち着いた宗主の少年"), cleaned.profiles)
         assertNull(cleaned.characters["김민준"])
-        assertNull(cleaned.genders["김민준"])
+        assertNull(cleaned.profiles["김민준"])
+        assertNull(cleaned.profiles["John"])
+        assertNull(cleaned.profiles["幽霊"])
+    }
+
+    @Test
+    fun testProfileMemoTermsAndBlock() {
+        // 登場語の訳語を見出しに、未登録・空文は落とす。空は空文字。
+        val terms = mapOf("李云" to "李雲", "李云龙" to "李雲龍", "野良" to "野良")
+        val profiles = mapOf("李云" to "落ち着いた宗主の少年", "李云龙" to "", "幽霊" to "出ない人物")
+        assertEquals(mapOf("李雲" to "落ち着いた宗主の少年"), profileMemoTerms(terms, profiles))
+        assertTrue(profileMemoTerms(terms, emptyMap()).isEmpty())
+        assertEquals("", buildProfileMemoBlock(emptyMap()))
+        val block = buildProfileMemoBlock(mapOf("李雲" to "落ち着いた宗主の少年"))
+        assertTrue(block.contains("[登場人物メモ]"))
+        assertTrue(block.contains("参考情報"))
+        assertTrue(block.contains("- 李雲：落ち着いた宗主の少年"))
+    }
+
+    @Test
+    fun testTranslateSingle_ProfileMemoAttached() = kotlinx.coroutines.runBlocking {
+        // 登場人物のメモだけ添付し、未登場は送らない。OFF時は送らない。
+        val dict = NovelDict(
+            style = "漢字",
+            characters = mapOf("李云" to "李雲", "佐藤" to "サトウ"),
+            profiles = mapOf("李云" to "落ち着いた宗主の少年", "佐藤" to "内気で控えめな小動物系少女")
+        )
+        val prompts = mutableListOf<String>()
+        val ctx = looseCtx(
+            dictionary = dict,
+            call = { _, prompt, _ ->
+                synchronized(prompts) { prompts.add(prompt) }
+                ok("李雲が歩いた。")
+            }
+        )
+        val r = translateSingle("李云が歩いた。", ctx)
+        assertTrue(r is SingleResult.Translated)
+        assertEquals(1, prompts.size)
+        assertTrue(prompts[0].contains("[登場人物メモ]"))
+        assertTrue(prompts[0].contains("- 李雲：落ち着いた宗主の少年"))
+        assertFalse(prompts[0].contains("サトウ"))
+        val offPrompts = mutableListOf<String>()
+        val offCtx = looseCtx(dictionary = dict, call = { _, prompt, _ ->
+            synchronized(offPrompts) { offPrompts.add(prompt) }
+            ok("李雲が歩いた。")
+        }).copy(profileMemoEnabled = false)
+        assertTrue(translateSingle("李云が歩いた。", offCtx) is SingleResult.Translated)
+        assertFalse(offPrompts[0].contains("[登場人物メモ]"))
+    }
+
+    @Test
+    fun testTranslateBatch_ProfileMemoAttached() = kotlinx.coroutines.runBlocking {
+        // 束ね路でも登場分だけメモが付く（単品路と同一ヘルパーのため束ね固有則なし）。
+        val store = InMemoryFileStore()
+        val root = store.createRoot("batch_memo")
+        val items = listOf("c1.txt" to "李云が歩いた。", "c2.txt" to "風が吹いた。")
+        val batchPrompts = mutableListOf<String>()
+        val ctx = looseCtx(
+            dictionary = NovelDict(
+                style = "漢字",
+                characters = mapOf("李云" to "李雲"),
+                profiles = mapOf("李云" to "落ち着いた宗主の少年")
+            ),
+            call = { _, prompt, source ->
+                if (source.contains("<documents>")) {
+                    synchronized(batchPrompts) { batchPrompts.add(prompt) }
+                    ok("""
+                        <translations>
+                        <trans id="1">
+                        李雲が歩いた。
+                        </trans>
+                        <trans id="2">
+                        風が吹いた。
+                        </trans>
+                        </translations>
+                    """.trimIndent())
+                } else {
+                    ok(source)
+                }
+            }
+        )
+        val outcome = translateBatch(store, root.uri, items, ctx)
+        assertEquals(2, outcome.completed)
+        assertEquals(1, batchPrompts.size)
+        assertTrue(batchPrompts[0].contains("[登場人物メモ]"))
+        assertTrue(batchPrompts[0].contains("- 李雲：落ち着いた宗主の少年"))
     }
 
     @Test
@@ -1208,12 +1306,25 @@ class V2PipelineTest {
 
     @Test
     fun testDictParse_NestedFallback() {
-        // 入れ子形式 {"名前": {"name": "読み"}} も救済する（旧版の柔軟パーサー復活）
+        // 入れ子形式 {"名前": {"name": "読み"}} も救済する（旧版の柔軟パーサー復活）。旧genderキーは無視する。
         val nested = """{"style":"カタカナ","characters":{"김민준":{"name":"金","gender":"男"}}}"""
         val parsed = parseNovelDict(nested)
         assertNotNull(parsed)
         assertEquals("金", parsed!!.characters["김민준"])
-        assertEquals("男", parsed.genders["김민준"])
+        assertTrue(parsed.profiles.isEmpty())
+    }
+
+    @Test
+    fun testDictParse_ProfilesAndLegacyGenders() {
+        // 新形式のprofilesは読み、旧形式のgendersキーは無視する（後方互換）。
+        val withProfiles = parseNovelDictLenient(
+            """{"style":"漢字","characters":{"李云":"李雲"},"profiles":{"李云":"落ち着いた宗主の少年"},"genders":{"李云":"男"}}"""
+        )
+        assertNotNull(withProfiles)
+        assertEquals("落ち着いた宗主の少年", withProfiles!!.profiles["李云"])
+        val legacy = parseNovelDictLenient("""{"style":"漢字","characters":{"李云":"李雲"}}""")
+        assertNotNull(legacy)
+        assertTrue(legacy!!.profiles.isEmpty())
     }
 
     @Test
@@ -1749,6 +1860,109 @@ class V2PipelineTest {
         val broken = parseExtractedNames("""{"names":["李云龙"],"authors":"田隶"}""")!!
         assertEquals(listOf("李云龙"), broken.names)
         assertTrue(broken.authors.isEmpty())
+        assertTrue(broken.hints.isEmpty())
+    }
+
+    @Test
+    fun testExtractedNames_HintsParsed() {
+        // 配列形式・文字列形式の両方を受理し、旧形式（キーなし）は空扱い。
+        val arrayForm = parseExtractedNames(
+            """{"names":["李云龙"],"hints":{"李云龙":["落ち着いた宗主の少年","冷静な青年"]}}"""
+        )!!
+        assertEquals(listOf("落ち着いた宗主の少年", "冷静な青年"), arrayForm.hints["李云龙"])
+        val stringForm = parseExtractedNames(
+            """{"names":["李云龙"],"hints":{"李云龙":"落ち着いた宗主の少年"}}"""
+        )!!
+        assertEquals(listOf("落ち着いた宗主の少年"), stringForm.hints["李云龙"])
+        val legacy = parseExtractedNames("""{"names":["李云龙"],"authors":[]}""")!!
+        assertTrue(legacy.hints.isEmpty())
+    }
+
+    @Test
+    fun testCollectProfileHints() {
+        // 同名束ね・空除外・名簿外除外・上限切りを検証。
+        val batches = listOf(
+            com.example.novelscraper.translation.v2.pipeline.ExtractedNames(
+                names = listOf("李云", "江思"),
+                hints = mapOf("李云" to listOf("落ち着いた宗主", "冷静な青年"), "幽霊" to listOf("出ない人物"), "江思" to listOf("  "))
+            ),
+            com.example.novelscraper.translation.v2.pipeline.ExtractedNames(
+                names = listOf("李云"),
+                hints = mapOf("李云" to listOf("冷静な青年", "h4", "h5"))
+            )
+        )
+        val table = collectProfileHints(batches, maxPerName = 3)
+        assertEquals(listOf("落ち着いた宗主", "冷静な青年", "h4"), table["李云"])
+        assertNull(table["幽霊"])
+        assertNull(table["江思"])
+        // 既定上限は1名5件。
+        val many = collectProfileHints(
+            listOf(
+                com.example.novelscraper.translation.v2.pipeline.ExtractedNames(
+                    names = listOf("甲"),
+                    hints = mapOf("甲" to (1..7).map { "素$it" })
+                )
+            )
+        )
+        assertEquals(5, many["甲"]!!.size)
+    }
+
+    @Test
+    fun testTransferShortHints() {
+        // ·式短形の落選分だけフルネーム側へ畳み、非·式の落選は捨てる。
+        val table = mapOf(
+            "李维" to listOf("参謀少女"),
+            "太郎" to listOf("別人メモ"),
+            "李维·史奈克" to listOf("フル側メモ")
+        )
+        val out = transferShortHints(
+            survivors = setOf("李维·史奈克", "太郎"),
+            dropped = listOf("李维", "田中"),
+            table = table
+        )
+        assertEquals(listOf("フル側メモ", "参謀少女"), out["李维·史奈克"])
+        assertEquals(listOf("別人メモ"), out["太郎"])
+        assertFalse(out.containsKey("田中"))
+        // 原本は不変（pure）。
+        assertEquals(listOf("参謀少女"), table["李维"])
+    }
+
+    @Test
+    fun testSelectHintsForTranslate_BudgetCap() {
+        // 総量超過分は後方切り捨て。前方は全保持。
+        val table = mapOf("a" to listOf("12345"), "b" to listOf("12345"), "c" to listOf("12345"))
+        assertEquals(setOf("a", "b"), selectHintsForTranslate(listOf("a", "b", "c"), table, maxTotalChars = 10).keys)
+        assertEquals(setOf("a", "b", "c"), selectHintsForTranslate(listOf("a", "b", "c"), table).keys)
+        assertTrue(selectHintsForTranslate(listOf("a"), emptyMap()).isEmpty())
+    }
+
+    @Test
+    fun testDictionary_HintsFlowToProfiles() = kotlinx.coroutines.runBlocking {
+        // 抽出の素→束ね→命名合成→確定辞書のprofilesまで一気通貫すること。
+        val store = InMemoryFileStore()
+        val root = store.createRoot("d-hints")
+        val defaults = com.example.novelscraper.translation.v2.pipeline.DictPrompts()
+        var translateInput = ""
+        val files = listOf("a.txt" to "李云和江思来了。", "b.txt" to "李云又来了。")
+        val byName = files.toMap()
+        val dict = generateDictionary(
+            store, root.uri, files.map { it.first },
+            readText = { byName[it] },
+            call = { _, prompt, text ->
+                if (prompt == defaults.batch) {
+                    ok("""{"names":["李云","江思"],"hints":{"李云":["落ち着いた宗主の少年"]}}""")
+                } else if (prompt == defaults.merge) {
+                    ok(text)
+                } else {
+                    translateInput = text
+                    ok("""{"style":"漢字","characters":{"李云":"李雲","江思":"江思"},"profiles":{"李云":"落ち着いた宗主の少年"}}""")
+                }
+            },
+            DictOptions(maxBatchBytes = 25, maxRetriesPerBatch = 0, parallelism = 2)
+        )
+        assertNotNull(dict)
+        assertEquals("落ち着いた宗主の少年", dict!!.profiles["李云"])
+        assertTrue(translateInput.contains("落ち着いた宗主の少年"))
     }
 
     @Test
@@ -1862,6 +2076,26 @@ class V2PipelineTest {
         assertEquals("⦃", fallback!!.open)
         assertEquals("本文", com.example.novelscraper.translation.v2.pipeline.annotateSourceTerms("本文", emptyMap(), ann))
         assertEquals(mapOf("李云" to "李雲", "李云龙" to "李雲龍"), com.example.novelscraper.translation.v2.pipeline.matchDictionaryMap("李云龙が叫んだ", terms + ("不存在" to "X")))
+    }
+
+    @Test
+    fun testTermAnnotation_CollapseDuplicatedTerms() {
+        val strip = ::stripTermAnnotations
+        val ann = com.example.novelscraper.translation.v2.pipeline.selectTermAnnotation("本文")!!
+        val terms = mapOf("冰糖" to "氷糖", "银莲" to "銀蓮", "李云" to "李雲", "李云龙" to "李雲龍")
+        // 注釈エコー（訳⟦訳⟧）は畳まれて1つになる
+        assertEquals("氷糖を分ける", strip("氷糖⟦氷糖⟧を分ける", terms, ann))
+        // 直書きの二重・三重も畳まれる
+        assertEquals("銀蓮が来た", strip("銀蓮銀蓮が来た", terms, ann))
+        assertEquals("銀蓮が来た", strip("銀蓮銀蓮銀蓮が来た", terms, ann))
+        assertEquals("李雲龍が来た", strip("李雲龍李雲龍が来た", terms, ann))
+        // 区切り挟み・単発・辞書外・1字値は触らない
+        assertEquals("李雲、李雲が来た", strip("李雲、李雲が来た", terms, ann))
+        assertEquals("李雲が来た", strip("李雲が来た", terms, ann))
+        assertEquals("ダメダメだ", strip("ダメダメだ", terms, ann))
+        assertEquals("AA来た", strip("AA来た", mapOf("甲" to "A"), ann))
+        // 通常の注釈剥離は従来通り
+        assertEquals("氷糖を分ける", strip("冰糖⟦氷糖⟧を分ける", terms, ann))
     }
 
     @Test

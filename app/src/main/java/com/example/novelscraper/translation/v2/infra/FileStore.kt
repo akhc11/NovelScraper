@@ -20,6 +20,13 @@ data class VDoc(
  */
 interface FileStore {
     suspend fun children(dirUri: String): List<VDoc>
+    /**
+     * 読取可否の軽量探査。children()は空フォルダとI/O失敗を区別しないため、
+     * 許可検証用に可否だけを返す口を別に用意する。既定なし(明示実装を強制する)。
+     * 技術的根拠1行：空と失敗の区別は検証責務であり、一覧取得の戻り値契約を変えずに分離する。
+     * 既定trueを置かない理由：未対応実装が常に健全と誤認するfail-openを防ぐ。
+     */
+    suspend fun probe(dirUri: String): Boolean
     suspend fun openInputStream(fileUri: String): java.io.InputStream?
     suspend fun readText(fileUri: String): String?
     /**

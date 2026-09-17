@@ -32,15 +32,15 @@ object DictionaryStage {
         if (!settings.dict.enabled) {
             return DictResolveResult.Ready(null)
         }
-        // 技術的根拠1行：文面変更時の古い辞書の使い回しを防ぐため、確定物の版が現行文面と違えば作り直す。
+        // 技術的根拠1行：文面変更時の作り直しは無駄打ちになるため、読める既存辞書は常に再利用する。作り直す場合は dictionary.json を削除して再実行する。
         val currentPromptsHash = dictPromptsHash(resolveDictPrompts(settings.dict.dictPrompts))
         val existingDict = store.findChild(folderUri, "dictionary.json")
         val dictJson = existingDict?.let { store.readText(it.uri) } ?: ""
         val parsed = DictionaryBuilder.parseDictJson(dictJson)
         if (parsed != null && parsed.promptsHash != currentPromptsHash) {
-            onLog("📖 辞書文面が変わったため作り直します")
+            onLog("📖 辞書文面の変更を検出しましたが既存辞書を再利用します（作り直す場合は dictionary.json を削除して再実行）")
         }
-        var novelDict = parsed?.takeIf { it.promptsHash == currentPromptsHash }
+        var novelDict = parsed
         if (novelDict == null) {
             novelDict = DictionaryBuilder(
                 store = store,

@@ -46,7 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.documentfile.provider.DocumentFile
+import com.example.novelscraper.translation.picker.treeDisplayName
 import com.example.novelscraper.ui.theme.AppColors
 
 /**
@@ -54,7 +54,11 @@ import com.example.novelscraper.ui.theme.AppColors
  * 本判定はViewModel/Engine側でも重ねて行う。
  */
 @Composable
-fun V2TranslationPanel(viewModel: V2TranslationViewModel) {
+fun V2TranslationPanel(
+    viewModel: V2TranslationViewModel,
+    // 自前ブラウザ接続(加算のみ。null時は従来UIのまま)。
+    onBrowseClick: (() -> Unit)? = null
+) {
     val settings by viewModel.settings.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val engineState by viewModel.engineState.collectAsState()
@@ -77,8 +81,7 @@ fun V2TranslationPanel(viewModel: V2TranslationViewModel) {
                 // 技術的根拠1行：無言化せずLogcatに残すがフォルダ追加の流れは変えない（外部振る舞い不変）。
                 android.util.Log.w("V2TranslationPanel", "takePersistable failed", e)
             }
-            val doc = DocumentFile.fromTreeUri(context, treeUri)
-            val folderName = doc?.name ?: treeUri.lastPathSegment ?: "選択フォルダ"
+            val folderName = treeDisplayName(context, treeUri)
             viewModel.addFolder(treeUri, folderName)
         }
     }
@@ -211,6 +214,19 @@ fun V2TranslationPanel(viewModel: V2TranslationViewModel) {
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp)
             ) {
                 Text(if (folders.isEmpty()) "選択" else "＋ 追加", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        if (onBrowseClick != null) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Button(
+                onClick = onBrowseClick,
+                enabled = !engineState.isRunning,
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceMedium),
+                shape = RoundedCornerShape(4.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("🔍 ブラウザ選択 (複数フォルダ一括)", color = AppColors.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
 

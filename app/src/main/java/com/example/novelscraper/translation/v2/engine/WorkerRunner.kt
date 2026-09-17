@@ -132,6 +132,7 @@ class WorkerRunner(
             call = bindCall(false),
             callBatch = batchCall,
             batchJsonFormat = useJsonBatch,
+            profileMemoEnabled = settings.dict.profileMemoEnabled,
             prevContextLines = settings.prevContext.lines,
             prevContextEnabled = settings.prevContext.enabled,
             maxSameRetries = 0,

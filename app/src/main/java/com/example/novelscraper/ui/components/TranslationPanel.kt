@@ -52,7 +52,9 @@ fun TranslationPanel(
     onUpdateInputEncoding: ((String) -> Unit)? = null,
     onCloseClick: () -> Unit,
     isV2Translating: Boolean = false,
-    v2Content: @Composable ColumnScope.() -> Unit = {}
+    v2Content: @Composable ColumnScope.() -> Unit = {},
+    // 自前ブラウザ接続(加算のみ。null時は従来UIのまま)。
+    onBrowseClick: (() -> Unit)? = null
 ) {
     val activeEngine = uiState.activeTranslationEngine
     val engineState = uiState.currentEngineState
@@ -246,6 +248,22 @@ fun TranslationPanel(
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                     ) {
                         Text(if (folderList.isEmpty()) "選択" else "＋ 追加", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                if (onBrowseClick != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    onBrowseClick.let { browse ->
+                        Button(
+                            onClick = browse,
+                            enabled = !engineState.isTranslating,
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceMedium),
+                            shape = RoundedCornerShape(4.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("🔍 ブラウザ選択", color = AppColors.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
 

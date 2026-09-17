@@ -37,6 +37,7 @@ internal object PrefKeys {
     val WEB_SPLIT_ENABLED = stringPreferencesKey("web_split_enabled")
     val WEB_SPLIT_SIZE_CHARS = stringPreferencesKey("web_split_size_chars")
     val INPUT_ENCODING = stringPreferencesKey("input_encoding")
+    val PICKER_ROOTS = stringPreferencesKey("picker_roots_json_v1")
 }
 
 internal val dataStoreJson = Json {

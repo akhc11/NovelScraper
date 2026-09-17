@@ -107,8 +107,7 @@ class SafFileStore(private val context: Context) : FileStore {
         return findChild(parentUri, requestedName)
     }
 
-    override suspend fun children(dirUri: String): List<VDoc> = withContext(Dispatchers.IO) {
-        try {
+    override suspend fun children(dirUri: String): List<VDoc> = withContext(Dispatchers.IO) {        try {
             val parsed = safeParseUri(dirUri) ?: return@withContext emptyList()
             if (!isTreeUri(parsed)) return@withContext emptyList()
             val docId = extractDocumentId(parsed) ?: return@withContext emptyList()
@@ -150,8 +149,30 @@ class SafFileStore(private val context: Context) : FileStore {
         }
     }
 
-    override suspend fun openInputStream(fileUri: String): java.io.InputStream? = withContext(Dispatchers.IO) {
+    /**
+     * 許可検証用の軽量探査。存在・可読なら空フォルダでもtrue、権限喪失・移動・削除ならfalse。
+     * 技術的根拠1行：先頭ウィンドウの有無だけ見るため全件Cursor展開が起きず、検証コストを1クエリに抑える。
+     */
+    override suspend fun probe(dirUri: String): Boolean = withContext(Dispatchers.IO) {
         try {
+            val parsed = safeParseUri(dirUri) ?: return@withContext false
+            if (!isTreeUri(parsed)) return@withContext false
+            val docId = extractDocumentId(parsed) ?: return@withContext false
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(parsed, docId)
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID),
+                null,
+                null,
+                null
+            )?.use { true } ?: false
+        } catch (e: Exception) {
+            android.util.Log.w("SafFileStore", "probe failed: $dirUri", e)
+            false
+        }
+    }
+
+    override suspend fun openInputStream(fileUri: String): java.io.InputStream? = withContext(Dispatchers.IO) {        try {
             val parsed = safeParseUri(fileUri) ?: return@withContext null
             context.contentResolver.openInputStream(parsed)
         } catch (e: Exception) {

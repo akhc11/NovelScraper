@@ -60,6 +60,8 @@ data class V2DictSettings(
     val model: String = "",
     val mergeModel: String = "",
     val thinkingLevel: String? = null,
+    /** 人物メモの翻訳時添付可否。偽＝辞書にメモがあっても送らない。既定ON（従来の訳語添付は不変）。 */
+    val profileMemoEnabled: Boolean = true,
     val providerOrder: List<String> = emptyList(),
     val providerAllowFallbacks: Boolean? = null,
     val workerCount: Int = 6,

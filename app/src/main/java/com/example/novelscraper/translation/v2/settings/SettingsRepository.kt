@@ -228,7 +228,10 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
                     TranslationLimits.WORKER_COUNT_RANGE.last
                 ),
                 requestDelaySec = root.intOr("requestDelaySec", 10).coerceAtLeast(0),
-                filesPerFolder = root.intOr("filesPerFolder", 0).coerceAtLeast(0),
+                filesPerFolder = root.intOr("filesPerFolder", 0).coerceIn(
+                    TranslationLimits.TRIAL_FILES_RANGE.first,
+                    TranslationLimits.TRIAL_FILES_RANGE.last
+                ),
                 outputSubDir = root.stringOr("outputSubDir", "翻訳完了_LLM").ifBlank { "翻訳完了_LLM" }
             )
         }

@@ -19,6 +19,8 @@ object TranslationLimits {
     val PROMPT_NUMBER_RANGE = 1..7
     val SIZE_RATIO_RANGE = 10..1000
     val OUTPUT_CHARS_RANGE = 2000..100000
+    /** 試し読み上限（小説あたり件数）。0＝無制限。技術的根拠1行：上限値の二重定義は乖離するため範囲はここだけに置く。 */
+    val TRIAL_FILES_RANGE = 0..1000
     const val COOLDOWN_MIN_SEC = 5
     const val COOLDOWN_MAX_SEC = 300
     const val RETRY_AFTER_MIN_SEC = 1L
@@ -29,6 +31,12 @@ object TranslationLimits {
     const val MAX_DICT_PROMPT_CHARS = 20000
     /** 本文1件あたりの辞書照合上限（完全一致・別名で共有）。 */
     const val DICT_MATCH_LIMIT = 500
+    /** 人物メモ1件あたりの上限文字数。超過分は辞書確定時に切り落とさず、その人物のメモだけ落とす。 */
+    const val MAX_PROFILE_CHARS = 40
+    /** 命名合成に渡す人物メモ候補の1名あたり上限。超過分は先勝ちで切り捨てる（入力肥大防止）。 */
+    const val MAX_HINTS_PER_NAME = 5
+    /** 命名入力に載せる人物メモ素の総文字数上限。超過分は後方から切り捨てる（小規模モデルの入力圧迫防止）。 */
+    const val MAX_TRANSLATE_HINTS_CHARS = 40000
 }
 
 /**

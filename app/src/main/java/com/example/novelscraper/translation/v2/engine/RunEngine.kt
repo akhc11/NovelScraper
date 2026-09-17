@@ -344,28 +344,50 @@ class RunEngine(
         }
         if (zeroBytes > 0) addLog("ℹ️ 0バイトの既存ファイルを再翻訳対象に含めます: ${zeroBytes}件")
 
+        // 試し読み上限（小説あたり先頭N件）。0＝無制限（従来通り完走）。
+        // 技術的根拠1行：完走強制の無駄打ちを排するため判定はこの単一箇所に寄せ、束計画・作業者への二重分岐は作らない。
+        val trialLimit = settings.limits.filesPerFolder.coerceIn(
+            TranslationLimits.TRIAL_FILES_RANGE.first,
+            TranslationLimits.TRIAL_FILES_RANGE.last
+        )
+        val scopedFiles = if (trialLimit > 0) files.take(trialLimit) else files
+        if (trialLimit > 0 && scopedFiles.size < files.size) {
+            addLog("試し読み上限: 先頭${scopedFiles.size}/${files.size}件まで翻訳し残りは次へ ($folderName)")
+        }
+
         val total = files.size
+        val scopeTotal = scopedFiles.size
         var preCompleted = 0
-        for (f in files) {
+        for (f in scopedFiles) {
             val hasWork = existing.contains(".parts_${f.name}")
             if (!hasWork && (existing.contains(f.name) || existing.contains("${f.name}.failed"))) {
                 preCompleted++
             }
         }
-        if (preCompleted >= total) {
+        if (preCompleted >= scopeTotal && scopeTotal > 0) {
+            if (scopeTotal < total) {
+                _state.update { it.copy(progress = preCompleted to total, statusText = "試し読み上限内で全件済み: $folderName ($scopeTotal/$total 件)→次へ") }
+                addLog("試し読み上限内で全件済みのため次へ: $folderName ($scopeTotal/$total 件)")
+                return preCompleted to total
+            }
             _state.update { it.copy(progress = total to total, statusText = "✅ 全件翻訳済み: $folderName") }
             addLog("✅ 全件翻訳済みのためスキップ: $folderName ($total/$total 件)")
             return total to total
         }
 
         // 辞書ステージ
-        if (settings.dict.enabled) {
-            _state.update { it.copy(statusText = "📖 登場人物辞書を生成中: $folderName") }
+        // 技術的根拠1行：辞書中は翻訳進捗が止まるため、前小説の残留値（試し読み40/40等）で固まって見えるのを新小説の基準値で上書きする。
+        _state.update {
+            it.copy(
+                statusText = if (settings.dict.enabled) "📖 登場人物辞書を生成中: $folderName" else it.statusText,
+                progress = preCompleted to total
+            )
         }
         val dictResult = DictionaryStage.resolveDictionary(
             store = store,
             folderUri = folderUri,
             folderName = folderName,
+            // 技術的根拠1行：辞書は再開時に作り直されない確定物(同一文面ハッシュは再利用)のため、試し読み時も全件対象で作り、41件目以降の人名欠落を防ぐ。節約は本文側の絞りで担う。
             files = files,
             settings = settings,
             pool = pool,
@@ -424,7 +446,7 @@ class RunEngine(
         addLog("capacity: limit=${optimalInputBytes}B, chunk=${chunkSizeBytes}B, batch=${batchMaxBytes}B (source=${effectiveLang.name}, maxOutput=${plan.targetOutputChars} chars)")
 
         val contextTracker = SourceContextTracker(
-            files = files,
+            files = scopedFiles,
             store = store,
             contextLines = settings.prevContext.lines,
             enabled = settings.prevContext.enabled
@@ -432,7 +454,7 @@ class RunEngine(
         // 技術的根拠1行：束ね決定権は計画＋プールに一本化し、作業者は束単位で受け取る（奪い合いなし・連番維持）。
         val bundlePool = BundlePool(
             planBundles(
-                files = files,
+                files = scopedFiles,
                 isSkipped = { f -> existing.contains(f.name) || existing.contains("${f.name}.failed") },
                 forceSingle = { f -> existing.contains(".parts_${f.name}") },
                 batchMaxFiles = options.batchMaxFiles,
@@ -464,7 +486,7 @@ class RunEngine(
                             if (stopFlag.get()) return@launch
                         }
                         runWorker(
-                            wId, files, outputDir.uri, existing, bundlePool,
+                            wId, scopedFiles, outputDir.uri, existing, bundlePool,
                             settings, router, novelDict,
                             completed, total,
                             splitThresholdBytes, chunkSizeBytes,

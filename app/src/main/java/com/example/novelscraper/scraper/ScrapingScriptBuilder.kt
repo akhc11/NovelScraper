@@ -163,6 +163,27 @@ object ScrapingScriptBuilder {
                     var result = { title: "", content: "", nextUrl: "", chapter: "", folderName: "", debugLines: null };
                     function clean(t) { return t ? t.trim() : ""; }
 
+                    // --- Regex パイプラインエンジン（>> 区切りで抽出・削除を自由に連結） ---
+                    function applyRegexPipeline(text, rxSrc) {
+                        if (!text || !rxSrc) return text;
+                        var steps = rxSrc.split('>>');
+                        var cur = text;
+                        for (var si = 0; si < steps.length; si++) {
+                            var step = steps[si].trim();
+                            if (!step) continue;
+                            try {
+                                if (/^(?:del|delete|remove):/i.test(step)) {
+                                    var pat = step.replace(/^(?:del|delete|remove):/i, '').trim();
+                                    if (pat) cur = cur.replace(new RegExp(pat, 'g'), '');
+                                } else {
+                                    var m = cur.match(new RegExp(step));
+                                    if (m) cur = (m[1] !== undefined && m[1] !== null) ? m[1] : m[0];
+                                }
+                            } catch(e){}
+                        }
+                        return cur;
+                    }
+
                     // --- CSS セレクタ取得ユーティリティ（共通スニペット） ---
                     ${JS_UNIQUE_SELECTOR}
 
@@ -199,18 +220,8 @@ object ScrapingScriptBuilder {
                         f = document.title || "";
                     }
 
-                    // 作品名 Regex (config.regex) による抽出・加工
-                    if (f && config.regex) {
-                        try {
-                            if (/^(?:del|delete|remove):/i.test(config.regex)) {
-                                var pat = config.regex.replace(/^(?:del|delete|remove):/i, '').trim();
-                                f = f.replace(new RegExp(pat, 'g'), '');
-                            } else {
-                                var m = f.match(new RegExp(config.regex));
-                                if (m) f = (m[1] !== undefined && m[1] !== null) ? m[1] : m[0];
-                            }
-                        } catch(e){}
-                    }
+                    // 作品名 Regex (config.regex) によるパイプライン加工
+                    f = applyRegexPipeline(f, (config.regex || "").trim());
                     result.folderName = clean(f);
 
                     var t = config.title ? document.querySelector(config.title) : null;
@@ -218,18 +229,8 @@ object ScrapingScriptBuilder {
                     result.title = t ? clean(t.innerText || t.textContent || "") : "";
                     if (!result.title) result.title = meta.headline || clean(document.title);
 
-                    // タイトル Regex (config.fileRegex) による抽出・加工
-                    if (result.title && config.fileRegex) {
-                        try {
-                            if (/^(?:del|delete|remove):/i.test(config.fileRegex)) {
-                                var pat = config.fileRegex.replace(/^(?:del|delete|remove):/i, '').trim();
-                                result.title = clean(result.title.replace(new RegExp(pat, 'g'), ''));
-                            } else {
-                                var m = result.title.match(new RegExp(config.fileRegex));
-                                if (m) result.title = clean((m[1] !== undefined && m[1] !== null) ? m[1] : m[0]);
-                            }
-                        } catch(e){}
-                    }
+                    // タイトル Regex (config.fileRegex) によるパイプライン加工
+                    result.title = clean(applyRegexPipeline(result.title, (config.fileRegex || "").trim()));
 
                     // --- チャプター番号抽出（@URLバグ修正 & ハイブリッド対応） ---
                     var c = "";
@@ -247,7 +248,8 @@ object ScrapingScriptBuilder {
                             var text = el ? (el.innerText || el.textContent || "") : "";
                             if (text) {
                                 if (config.chapterRegex) {
-                                    try { var m = text.match(new RegExp(config.chapterRegex)); if(m) c = m[1] || m[0]; } catch(e){}
+                                    var cr = applyRegexPipeline(text, (config.chapterRegex || "").trim());
+                                    if (cr && cr !== text) c = cr;
                                 }
                                 if (!c) { var m = text.match(/(\d+)/); if(m) c = m[1]; }
                             }

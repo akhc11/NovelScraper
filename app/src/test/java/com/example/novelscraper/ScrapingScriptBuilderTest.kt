@@ -130,12 +130,13 @@ class ScrapingScriptBuilderTest {
         assertTrue("titleタグのdocument.title参照が含まれていること", script.contains("document.title || el.textContent"))
         assertTrue("targetSel.toLowerCase() === 'title' の分岐が含まれていること", script.contains("targetSel.toLowerCase() === 'title'"))
 
-        // 作品名 Regex (config.regex) 処理が含まれていること
-        assertTrue("作品名Regexのmatch処理が含まれていること", script.contains("f.match(new RegExp(config.regex))"))
-        assertTrue("キャプチャグループのフォールバックが含まれていること", script.contains("m[1] !== undefined && m[1] !== null"))
+        // パイプラインエンジンが含まれていること
+        assertTrue("applyRegexPipeline関数が定義されていること", script.contains("function applyRegexPipeline(text, rxSrc)"))
+        assertTrue("作品名Regexのtrim正規化が含まれていること", script.contains("(config.regex || \"\").trim()"))
+        assertTrue("タイトルRegexのtrim正規化が含まれていること", script.contains("(config.fileRegex || \"\").trim()"))
 
-        // タイトル Regex (config.fileRegex) 処理が含まれていること
-        assertTrue("タイトルRegexのmatch処理が含まれていること", script.contains("result.title.match(new RegExp(config.fileRegex))"))
+        // パイプライン関数内にキャプチャグループのフォールバックが含まれていること
+        assertTrue("キャプチャグループのフォールバックが含まれていること", script.contains("m[1] !== undefined && m[1] !== null"))
     }
 
     @Test
@@ -148,10 +149,23 @@ class ScrapingScriptBuilderTest {
         )
         val script = ScrapingScriptBuilder.buildScrapingScript(config, useImages = false, isDebug = false)
 
-        // del: 置換削除処理が含まれていること
+        // パイプラインエンジン内にdel: 判定・置換ロジックが含まれていること
         assertTrue("del: 判定正規表現が含まれていること", script.contains("/^(?:del|delete|remove):/i"))
-        assertTrue("作品名del置換ロジックが含まれていること", script.contains("f.replace(new RegExp(pat, 'g'), '')"))
-        assertTrue("タイトルdel置換ロジックが含まれていること", script.contains("result.title.replace(new RegExp(pat, 'g'), '')"))
+        assertTrue("del置換ロジックが含まれていること", script.contains("cur.replace(new RegExp(pat, 'g'), '')"))
+    }
+
+    @Test
+    fun testBuildScrapingScript_regexPipelineSplitsByDoubleArrow() {
+        val config = ScraperConfig(
+            folder = "title",
+            regex = "del:カクヨム >> _(.*)$"
+        )
+        val script = ScrapingScriptBuilder.buildScrapingScript(config, useImages = false, isDebug = false)
+
+        // パイプラインの >> 分割ロジックが含まれていること
+        assertTrue(">> による分割が含まれていること", script.contains("rxSrc.split('>>')"))
+        // ステップループが含まれていること
+        assertTrue("ステップループが含まれていること", script.contains("for (var si = 0; si < steps.length; si++)"))
     }
 
     @Test

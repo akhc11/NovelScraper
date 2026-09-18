@@ -216,6 +216,8 @@ private fun buildAttempts(
     for (driver in ctx.driverNames) {
         for (promptNum in ctx.promptOrder.ifEmpty { listOf(1, 1) }) {
             val spec = factory(promptNum)
+            // 技術的根拠1行：版の特定を再生デバッグに載せるため、単品路と同一形式で短縮ハッシュを残す。
+            ctx.log("spec:${promptSpecHash(spec).take(7)} #$promptNum")
             val source = appendMarker(sourceForMarker, ctx.verify.markerEnabled)
             attempts.add(Attempt(driver, assemblePrompt(spec), source) { invoke(driver, spec, source) })
         }

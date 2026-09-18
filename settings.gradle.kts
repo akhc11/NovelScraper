@@ -21,3 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "NovelScraper"
 include(":app")
+include(":core-translation")

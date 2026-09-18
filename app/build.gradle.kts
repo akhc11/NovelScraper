@@ -59,6 +59,9 @@ android {
 }
 
 dependencies {
+    // 技術的根拠1行：翻訳中核（domain/pipeline/engine等）は純Kotlin分離し、層境界をビルドで強制する。
+    implementation(project(":core-translation"))
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)

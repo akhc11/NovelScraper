@@ -1,12 +1,15 @@
 package com.example.novelscraper
 
+import com.example.novelscraper.translation.v2.pipeline.GLOSSARY_SLOT
 import com.example.novelscraper.translation.v2.pipeline.SourceLang
 import com.example.novelscraper.translation.v2.pipeline.TermAnnotation
+import com.example.novelscraper.translation.v2.pipeline.assemblePrompt
 import com.example.novelscraper.translation.v2.pipeline.buildBatchFormat
-import com.example.novelscraper.translation.v2.pipeline.buildProfilePrompt
+import com.example.novelscraper.translation.v2.pipeline.buildSpec
 import com.example.novelscraper.translation.v2.pipeline.buildSystemPrompt
 import com.example.novelscraper.translation.v2.pipeline.getV2PromptByNumber
 import com.example.novelscraper.translation.v2.pipeline.lineCountOk
+import com.example.novelscraper.translation.v2.pipeline.requireHeadText
 import com.example.novelscraper.translation.v2.pipeline.resolvePromptOrder
 import org.junit.Assert.*
 import org.junit.Test
@@ -58,30 +61,27 @@ class V2PromptTest {
     }
 
     @Test
-    fun testBuildProfilePrompt_Replacement() {
+    fun testPromptSpec_RetargetPreservesAttachments() {
         val base1 = getV2PromptByNumber(1)
         val base7 = getV2PromptByNumber(7)
         val basePrompts = mapOf(1 to base1, 7 to base7)
 
-        val originalPrompt = buildSystemPrompt(
-            basePrompt = base1,
+        val spec1 = buildSpec(
+            headNum = 1,
+            headText = requireHeadText(basePrompts, 1),
             previousTranslatedTail = "前の訳文",
             previousSourceTail = "前の原文",
             batchFormat = "\n\nBATCH FORMAT..."
         )
-        assertTrue(originalPrompt.startsWith(base1))
+        val originalPrompt = assemblePrompt(spec1)
         assertTrue(originalPrompt.contains("前の訳文"))
         // 重ね注入はしない（訳文末尾がある場合は原文末尾を落とす）
         assertFalse(originalPrompt.contains("前の原文"))
         assertTrue(originalPrompt.contains("BATCH FORMAT..."))
 
-        // 1番から7番へ安全に差し替え
-        val profile7Prompt = buildProfilePrompt(
-            originalPrompt = originalPrompt,
-            basePrompts = basePrompts,
-            originalPromptNum = 1,
-            targetPromptNum = 7
-        )
+        // 1番から7番へは Spec 複写＋再描画で差し替え（文字列手術なし）
+        val spec7 = spec1.copy(headNum = 7, headText = requireHeadText(basePrompts, 7))
+        val profile7Prompt = assemblePrompt(spec7)
         assertTrue(profile7Prompt.startsWith(base7))
         assertFalse(profile7Prompt.startsWith(base1))
         // 付帯指示（文脈やバッチ枠）が完全に保持されていること
@@ -90,11 +90,27 @@ class V2PromptTest {
         assertTrue(profile7Prompt.contains("BATCH FORMAT..."))
 
         // 訳文末尾がない場合は原文末尾を注入する
-        val srcOnly = buildSystemPrompt(basePrompt = base1, previousSourceTail = "前の原文")
+        val srcOnly = assemblePrompt(
+            buildSpec(headNum = 1, headText = base1, previousSourceTail = "前の原文")
+        )
         assertTrue(srcOnly.contains("前の原文"))
 
-        // 同一番号なら同一インスタンス
-        assertEquals(originalPrompt, buildProfilePrompt(originalPrompt, basePrompts, 1, 1))
+        // 全番号×最小付帯の描画一致（slot 除去を考慮）
+        for (n in 1..7) {
+            val head = getV2PromptByNumber(n)
+            val spec = buildSpec(
+                headNum = n, headText = head,
+                previousTranslatedTail = "前の訳文",
+                batchFormat = "\n\nBATCH FORMAT..."
+            )
+            val rendered = assemblePrompt(spec)
+            assertTrue("head $n keeps attachments", rendered.contains("前の訳文"))
+            assertTrue("head $n keeps attachments", rendered.contains("BATCH FORMAT..."))
+            assertFalse("head $n slot resolved", rendered.contains(GLOSSARY_SLOT))
+        }
+
+        // 同一 Spec の再描画は同一文
+        assertEquals(originalPrompt, assemblePrompt(spec1))
     }
 
     @Test

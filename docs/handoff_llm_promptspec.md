@@ -80,3 +80,10 @@ fun buildSpec(headNum: Int, headText: String, prevTranslatedTail: String?, prevS
 * 三性評価：堅牢性○（文字列推論の消滅＋早期失敗＋版ログで無言劣化クラスが消える）、保守性○（条件付き。snapshot toil と二重路を §5 で縛れば現行より明確に良い）、拡張性○（加除は部品単位になり番号差し替え路の再学習が不要）。
 * 将来リスクは snapshot toil と二重路の2点に集約され、本改訂の1行追記で塞ぐ。残るはモデル側（指示衝突）のみで非目標化が正しい。
 * リポジトリ規約遵守：`AGENTS.md` 必読（編集前に関連 sub-rule も確認）、日本語 UTF-8（BOM なし）、技術的根拠1行コメント、focused → フル、失敗テストの無断削除禁止。
+
+## 9. 実施記録
+
+* 実装：Phase 1（`PromptSpec.kt` 新規＋`buildSystemPrompt` 薄 wrapper 化＋`V2PromptSpecTest`）→ Phase 2（一括移行）を実施。
+* 設計微調整：`TranslateContext.call/callBatch` を `(driverName, spec: PromptSpec, source)` に変更し、`bindCall` が Spec 複写＋再描画で派生させる方式にした（factory フィールドの二重路を作らないため）。`buildProfilePrompt`・`primaryPromptNum`・`values.firstOrNull` 沈黙フォールバックを削除し、`requireHeadText` の fail-fast に一本化。推敲文は `headNum=-1` 固定文として派生対象外にし、従来予備路の混入も消滅。`buildSystemPrompt` はテスト互換の wrapper として残置（正本は `buildSpec`＋`assemblePrompt`）。
+* 検証：フル `:app:testDebugUnitTest` green（27 suites・約396件・failures/errors 0）。`buildProfilePrompt` 参照は本書（計画記録）のみ。基底文 #1〜#7 無改変。
+* ロールバック：事前 checkpoint `f8a6e8b`（`chore: checkpoint before PromptSpec implementation`）に `git reset --hard` で戻れる。

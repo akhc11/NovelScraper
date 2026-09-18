@@ -16,7 +16,9 @@ import com.example.novelscraper.translation.v2.pipeline.SingleResult
 import com.example.novelscraper.translation.v2.pipeline.SourceLang
 import com.example.novelscraper.translation.v2.pipeline.TranslateContext
 import com.example.novelscraper.translation.v2.pipeline.VerifyOptions
-import com.example.novelscraper.translation.v2.pipeline.buildProfilePrompt
+import com.example.novelscraper.translation.v2.pipeline.PromptSpec
+import com.example.novelscraper.translation.v2.pipeline.assemblePrompt
+import com.example.novelscraper.translation.v2.pipeline.requireHeadText
 import com.example.novelscraper.translation.v2.pipeline.cleanseBasic
 import com.example.novelscraper.translation.v2.pipeline.RefineConfig
 import com.example.novelscraper.translation.v2.pipeline.resolveRefinePrompt
@@ -81,7 +83,6 @@ class WorkerRunner(
             residual = ResidualOptions(sourceLang)
         )
         val allBasePrompts = options.basePrompts + settings.customPrompts
-        val primaryPromptNum = promptOrder.firstOrNull() ?: 1
         // 技術的根拠: 構造化出力の適用範囲をバッチ枠に限定するため、枠種別で送信bindingを使い分ける
         val useJsonBatch = profiles.any { profile ->
             // 技術的根拠1行：能力判定を登録簿に一本化し、未知プロバイダーは非対応扱いにする（従来のnull->falseと同一）。
@@ -91,22 +92,29 @@ class WorkerRunner(
         fun bindCall(
             forBatch: Boolean,
             profileOverrides: Map<String, V2ModelProfile>? = null
-        ): suspend (String, String, String) -> LlmResult {
-            return { promptOrDriver, prompt, source ->
-                val currentPromptNum = promptOrDriver.toIntOrNull() ?: primaryPromptNum
+        ): suspend (String, PromptSpec, String) -> LlmResult {
+            return { _, spec, source ->
+                // 技術的根拠1行：番号差し替えを文字列手術にしないため、Spec 複写＋再描画に寄せる（Router 型は不変）。
+                val primaryPrompt = assemblePrompt(spec)
                 val profilePrompts = profiles.associate { profile ->
-                    val order = profilePromptOrders[profile.id] ?: promptOrder
-                    val targetPromptNum = if (order.contains(currentPromptNum)) currentPromptNum else order.firstOrNull() ?: currentPromptNum
-                    profile.id to listOf(
-                        buildProfilePrompt(
-                            originalPrompt = prompt,
-                            basePrompts = allBasePrompts,
-                            originalPromptNum = currentPromptNum,
-                            targetPromptNum = targetPromptNum
-                        )
-                    )
+                    if (spec.headNum < 0) {
+                        // 技術的根拠1行：推敲等の固定文は頭差し替えの対象外とし、全プロファイル同一文にする（従来の予備路による混入をなくす）。
+                        profile.id to listOf(primaryPrompt)
+                    } else {
+                        val order = profilePromptOrders[profile.id] ?: promptOrder
+                        val targetPromptNum = if (order.contains(spec.headNum)) spec.headNum else order.firstOrNull() ?: spec.headNum
+                        val targeted = if (targetPromptNum == spec.headNum) {
+                            spec
+                        } else {
+                            spec.copy(
+                                headNum = targetPromptNum,
+                                headText = requireHeadText(allBasePrompts, targetPromptNum)
+                            )
+                        }
+                        profile.id to listOf(assemblePrompt(targeted))
+                    }
                 }
-                router.execute(listOf(prompt), source, profilePrompts, forBatch, profileOverrides)
+                router.execute(listOf(primaryPrompt), source, profilePrompts, forBatch, profileOverrides)
             }
         }
         // 技術的根拠1行：磨き送り口は主経路の別名としてここで作り、番号解釈の抜け道を翻訳路に持ち込まない。
@@ -118,7 +126,10 @@ class WorkerRunner(
             if (settings.refine.enabled) {
                 val refineSender = bindCall(forBatch = false, profileOverrides = refineOverrides)
                 val sender: suspend (String, String) -> LlmResult =
-                    { prompt, source -> refineSender(primaryPromptNum.toString(), prompt, source) }
+                    { prompt, source ->
+                        // 技術的根拠1行：推敲文は頭差し替え対象外のため、固定文番(-1)の Spec で送る。
+                        refineSender("w$workerId", PromptSpec(headNum = -1, headText = prompt, blocks = emptyList()), source)
+                    }
                 sender
             } else null
         val ctx = TranslateContext(

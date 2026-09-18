@@ -22,7 +22,9 @@ import com.example.novelscraper.translation.v2.pipeline.SingleResult
 import com.example.novelscraper.translation.v2.pipeline.SourceLang
 import com.example.novelscraper.translation.v2.pipeline.TranslateContext
 import com.example.novelscraper.translation.v2.pipeline.VerifyOptions
+import com.example.novelscraper.translation.v2.pipeline.PromptSpec
 import com.example.novelscraper.translation.v2.pipeline.appendMarker
+import com.example.novelscraper.translation.v2.pipeline.assemblePrompt
 import com.example.novelscraper.translation.v2.pipeline.attemptDrivers
 import com.example.novelscraper.translation.v2.pipeline.buildBatchFormat
 import com.example.novelscraper.translation.v2.pipeline.buildBatchInput
@@ -82,7 +84,7 @@ class V2PipelineTest {
     private fun fail(kind: FailureKind) =
         LlmResult.Failure(ClassifiedFailure(kind))
 
-    private fun looseCtx(        call: suspend (String, String, String) -> LlmResult,
+    private fun looseCtx(        call: suspend (String, PromptSpec, String) -> LlmResult,
         drivers: List<String> = listOf("d1"),
         dictionary: com.example.novelscraper.translation.v2.pipeline.NovelDict? = null
     ) = TranslateContext(
@@ -411,9 +413,9 @@ class V2PipelineTest {
             promptOrder = listOf(3, 7),
             driverNames = listOf("d1"),
             verify = VerifyOptions(markerEnabled = true, sizeMinPct = 10, sizeMaxPct = 300, kanaFloor = 0.2),
-            call = { promptNum, _, _ ->
+            call = { _, spec, _ ->
                 attemptCount++
-                if (promptNum == "3") {
+                if (spec.headNum == 3) {
                     // 1回目：マーカーなし（品質不合格）
                     ok("これはテストの訳文です。")
                 } else {
@@ -668,7 +670,7 @@ class V2PipelineTest {
                     </translations>
                 """.trimIndent())
             } else {
-                capturedPrompts.add(prompt)
+                capturedPrompts.add(assemblePrompt(prompt))
                 ok("第2話の単訳です。")
             }
         })
@@ -1062,7 +1064,7 @@ class V2PipelineTest {
         val ctx = looseCtx(
             dictionary = dict,
             call = { _, prompt, source ->
-                capturedPrompts.add(prompt)
+                capturedPrompts.add(assemblePrompt(prompt))
                 ok("訳文\n$source")
             }
         )
@@ -1204,7 +1206,7 @@ class V2PipelineTest {
         val ctx = looseCtx(
             dictionary = dict,
             call = { _, prompt, _ ->
-                synchronized(prompts) { prompts.add(prompt) }
+                synchronized(prompts) { prompts.add(assemblePrompt(prompt)) }
                 ok("李雲が歩いた。")
             }
         )
@@ -1216,7 +1218,7 @@ class V2PipelineTest {
         assertFalse(prompts[0].contains("サトウ"))
         val offPrompts = mutableListOf<String>()
         val offCtx = looseCtx(dictionary = dict, call = { _, prompt, _ ->
-            synchronized(offPrompts) { offPrompts.add(prompt) }
+            synchronized(offPrompts) { offPrompts.add(assemblePrompt(prompt)) }
             ok("李雲が歩いた。")
         }).copy(profileMemoEnabled = false)
         assertTrue(translateSingle("李云が歩いた。", offCtx) is SingleResult.Translated)
@@ -1238,7 +1240,7 @@ class V2PipelineTest {
             ),
             call = { _, prompt, source ->
                 if (source.contains("<documents>")) {
-                    synchronized(batchPrompts) { batchPrompts.add(prompt) }
+                    synchronized(batchPrompts) { batchPrompts.add(assemblePrompt(prompt)) }
                     ok("""
                         <translations>
                         <trans id="1">
@@ -1292,7 +1294,7 @@ class V2PipelineTest {
             dictionary = NovelDict(style = "カタカナ", characters = mapOf("山田" to "ヤマダ")),
             verify = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false),
             call = { _, prompt, _ ->
-                synchronized(prompts) { prompts.add(prompt) }
+                synchronized(prompts) { prompts.add(assemblePrompt(prompt)) }
                 ok("訳文")
             }
         )
@@ -1513,7 +1515,7 @@ class V2PipelineTest {
 
         var capturedPrompt: String? = null
         val ctx = looseCtx(call = { _, prompt, _ ->
-            capturedPrompt = prompt
+            capturedPrompt = assemblePrompt(prompt)
             ok("風が吹き抜ける静かな森の中、鳥たちがさえずっていた。\n[SRC_END]")
         }).copy(dictionary = dict)
 
@@ -1555,7 +1557,7 @@ class V2PipelineTest {
             driverNames = listOf("d1"),
             verify = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false),
             call = { _, prompt, _ ->
-                synchronized(prompts) { prompts.add(prompt) }
+                synchronized(prompts) { prompts.add(assemblePrompt(prompt)) }
                 ok("<translations><trans id=\"1\">訳文一</trans><trans id=\"2\">訳文二</trans></translations>")
             }
         )
@@ -1581,7 +1583,7 @@ class V2PipelineTest {
             driverNames = listOf("d1"),
             verify = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false),
             call = { _, prompt, _ ->
-                synchronized(prompts) { prompts.add(prompt) }
+                synchronized(prompts) { prompts.add(assemblePrompt(prompt)) }
                 ok("<translations><trans id=\"1\">前話の末尾文です。これは第一話の訳文です。</trans><trans id=\"2\">これは第二話の訳文です。</trans></translations>")
             }
         )
@@ -1608,7 +1610,7 @@ class V2PipelineTest {
             driverNames = listOf("d1"),
             verify = VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = true),
             call = { _, prompt, source ->
-                synchronized(prompts) { prompts.add(prompt) }
+                synchronized(prompts) { prompts.add(assemblePrompt(prompt)) }
                 ok(source.trimEnd().removeSuffix("[SRC_END]").trimEnd() + "\n[SRC_END]")
             }
         )
@@ -2237,7 +2239,7 @@ class V2PipelineTest {
         var capturedSource: String? = null
         var capturedPrompt: String? = null
         val ctx = looseCtx(call = { _, prompt, source ->
-            capturedPrompt = prompt
+            capturedPrompt = assemblePrompt(prompt)
             capturedSource = source
             ok("李雲龍が叫んだ。")
         }).copy(dictionary = dict)

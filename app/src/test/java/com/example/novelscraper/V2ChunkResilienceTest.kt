@@ -8,6 +8,7 @@ import com.example.novelscraper.translation.v2.pipeline.ChunkEntry
 import com.example.novelscraper.translation.v2.pipeline.ChunkManifest
 import com.example.novelscraper.translation.v2.pipeline.LargeOptions
 import com.example.novelscraper.translation.v2.pipeline.LargeOutcome
+import com.example.novelscraper.translation.v2.pipeline.PromptSpec
 import com.example.novelscraper.translation.v2.pipeline.TranslateContext
 import com.example.novelscraper.translation.v2.pipeline.VerifyOptions
 import com.example.novelscraper.translation.v2.pipeline.prepareChunkSession
@@ -36,7 +37,7 @@ class V2ChunkResilienceTest {
     private fun ok(text: String) = LlmResult.Success(text = text)
 
     private fun strictCtx(
-        call: suspend (String, String, String) -> LlmResult,
+        call: suspend (String, PromptSpec, String) -> LlmResult,
         stopped: () -> Boolean = { false }
     ) = TranslateContext(
         basePrompts = mapOf(1 to "base"),

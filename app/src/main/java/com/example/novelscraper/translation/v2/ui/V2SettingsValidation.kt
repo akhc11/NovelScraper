@@ -58,8 +58,10 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
         if (profile.useJsonSchema && !caps.structuredOutput) {
             issues.add(V2SettingsIssue("$label: 構造化出力は未対応のため送られません", false))
         }
-        if (profile.maxOutputTokens != null &&
-            (profile.maxOutputTokens < TranslationLimits.MIN_OUTPUT_TOKENS || profile.maxOutputTokens > caps.maxOutputTokens)
+        // 技術的根拠1行：別モジュールの public var には smart cast が効かないため局所 val に写して判定する。
+        val maxOutputTokens = profile.maxOutputTokens
+        if (maxOutputTokens != null &&
+            (maxOutputTokens < TranslationLimits.MIN_OUTPUT_TOKENS || maxOutputTokens > caps.maxOutputTokens)
         ) {
             issues.add(
                 V2SettingsIssue(
@@ -244,7 +246,10 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
         )
     }
     val cost = settings.cost
-    if ((cost.maxTokens != null && cost.maxTokens < 0) || (cost.maxCost != null && cost.maxCost < 0)) {
+    // 技術的根拠1行：別モジュールの public var には smart cast が効かないため局所 val に写して判定する。
+    val maxTokens = cost.maxTokens
+    val maxCost = cost.maxCost
+    if ((maxTokens != null && maxTokens < 0) || (maxCost != null && maxCost < 0)) {
         issues.add(V2SettingsIssue("コスト上限は0以上で指定してください", true))
     }
     val ratios = settings.sizeRatios

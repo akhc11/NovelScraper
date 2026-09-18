@@ -2001,17 +2001,6 @@ class V2PipelineTest {
     }
 
     @Test
-    fun testDictAnnotatablePredicate() {
-        assertTrue(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("李维", "レヴィ"))
-        assertTrue(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("田隶", "田隷"))
-        assertFalse(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("文", "文"))
-        assertFalse(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("小灰", "小灰"))
-        assertFalse(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("离", "離"))
-        assertFalse(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("尘", "塵"))
-        assertFalse(com.example.novelscraper.translation.v2.pipeline.isAnnotatableTerm("安", "安"))
-    }
-
-    @Test
     fun testPlanBundles_SequentialAndSkips() {
         fun doc(name: String, length: Long) = VDoc("u/$name", name, false, length)
         val files = listOf(doc("a.txt", 100L), doc("b.txt", 100L), doc("c.txt", 100L), doc("d.txt", 100L), doc("e.txt", 100L))

@@ -166,10 +166,10 @@ data class TranslateContext(
     val sourceLang: SourceLang = SourceLang.ZH,
     /** 最終推敲の設定ひとまとまり。null＝推敲なし（既定・従来動作） */
     val refine: RefineConfig? = null,
-    /** ドライバー名・プロンプト・入力を受けて送信する（巡回適用済み binding） */
-    val call: suspend (driverName: String, prompt: String, source: String) -> LlmResult,
+    /** ドライバー名・構造化指示・入力を受けて送信する（巡回適用済み binding。描画は受信側の責務） */
+    val call: suspend (driverName: String, spec: PromptSpec, source: String) -> LlmResult,
     /** バッチ枠専用の送信 binding（構造化出力の適用範囲をバッチに限定する）。null時はcallを使う */
-    val callBatch: (suspend (driverName: String, prompt: String, source: String) -> LlmResult)? = null,
+    val callBatch: (suspend (driverName: String, spec: PromptSpec, source: String) -> LlmResult)? = null,
     /** バッチ枠をJSON形式で組み立てる（callBatch側のスキーマ指定と対にする） */
     val batchJsonFormat: Boolean = false,
     /** 人物メモの添付可否。偽＝辞書にメモがあっても送らない（設定連動） */
@@ -199,21 +199,25 @@ private fun buildAttempts(
     val attempts = mutableListOf<Attempt>()
     // 技術的根拠1行：構造化出力の適用範囲をバッチ枠に限定するため、枠種別で送信bindingを使い分ける
     val invoke = if (batchFormat != null) (ctx.callBatch ?: ctx.call) else ctx.call
+    // 技術的根拠1行：頭差し替えを文字列手術にしないため、部品 capture の factory に寄せ、描画は受信側に委ねる。
+    val factory = { promptNum: Int ->
+        buildSpec(
+            headNum = promptNum,
+            headText = requireHeadText(ctx.basePrompts, promptNum),
+            previousTranslatedTail = prevTranslatedTail,
+            previousSourceTail = prevSourceTail,
+            termAnnotation = termAnnotation,
+            glossary = glossary,
+            batchFormat = batchFormat,
+            profileMemo = profileMemo,
+            enableCompletionMarker = ctx.verify.markerEnabled
+        )
+    }
     for (driver in ctx.driverNames) {
         for (promptNum in ctx.promptOrder.ifEmpty { listOf(1, 1) }) {
-            val base = ctx.basePrompts[promptNum] ?: ctx.basePrompts.values.firstOrNull() ?: ""
-            val prompt = buildSystemPrompt(
-                basePrompt = base,
-                previousTranslatedTail = prevTranslatedTail,
-                previousSourceTail = prevSourceTail,
-                termAnnotation = termAnnotation,
-                glossary = glossary,
-                enableCompletionMarker = ctx.verify.markerEnabled,
-                batchFormat = batchFormat,
-                profileMemo = profileMemo
-            )
+            val spec = factory(promptNum)
             val source = appendMarker(sourceForMarker, ctx.verify.markerEnabled)
-            attempts.add(Attempt(driver, prompt, source) { invoke(driver, prompt, source) })
+            attempts.add(Attempt(driver, assemblePrompt(spec), source) { invoke(driver, spec, source) })
         }
     }
     return attempts
@@ -321,27 +325,33 @@ suspend fun translateSingle(
 
     val tally = AttemptTally()
 
+    // 技術的根拠1行：頭差し替えを文字列手術にしないため、部品 capture の factory に寄せ、描画は受信側に委ねる。
+    val specFactory = { promptNum: Int ->
+        buildSpec(
+            headNum = promptNum,
+            headText = requireHeadText(ctx.basePrompts, promptNum),
+            previousTranslatedTail = prevTranslatedTail,
+            previousSourceTail = prevSourceTail,
+            termAnnotation = prepared.annotation,
+            glossary = prepared.glossary,
+            batchFormat = null,
+            profileMemo = profileMemo,
+            enableCompletionMarker = verify.markerEnabled
+        )
+    }
+
     for (driver in drivers) {
         for ((promptIdx, promptNum) in promptOrder.withIndex()) {
             if (ctx.stopped()) return SingleResult.Stopped
 
-            val base = ctx.basePrompts[promptNum] ?: ctx.basePrompts.values.firstOrNull() ?: ""
-            val prompt = buildSystemPrompt(
-                basePrompt = base,
-                previousTranslatedTail = prevTranslatedTail,
-                previousSourceTail = prevSourceTail,
-                termAnnotation = prepared.annotation,
-                glossary = prepared.glossary,
-                enableCompletionMarker = verify.markerEnabled,
-                batchFormat = null,
-                profileMemo = profileMemo
-            )
+            val spec = specFactory(promptNum)
+            // 技術的根拠1行：版の特定を再生デバッグに載せるため、試行ごとに短縮ハッシュを残す。
+            ctx.log("spec:${promptSpecHash(spec).take(7)} #$promptNum")
 
             val budget = RetryBudget()
             // 技術的根拠1行：再試行の mechanics は骨格カーネルに一任し、ここでは指示文単位の予算所有と品質検査の合否仕分けだけを行う。
-            // 技術的根拠: 第1引数に promptNum.toString() を渡し、bindCall側で試行中のプロンプト番号を正しく識別可能にする
             when (val settled = callWithRetry(
-                { ctx.call(promptNum.toString(), prompt, source) },
+                { ctx.call(driver, spec, source) },
                 budget, ctx.maxSameRetries, DefaultRetryPolicy::delayForAttempt,
                 ctx.stopped, ctx.meter, ctx.log
             )) {
@@ -754,7 +764,7 @@ sealed interface LargeOutcome {
  * 1. 先頭の未処理チャンク: 前の話（前ファイル）の【原文末尾（呼出側の設定行数）】（prevSourceTail）を注入。
  * 2. 後続チャンク: 同一エピソード内の文脈接続を維持するため、
  *    直前チャンクの【翻訳後の確定訳文末尾（tailLines行）】（prevTranslatedTail）を数珠つなぎで注入。
- *    （訳文末尾と原文末尾の重ね注入はしない。buildSystemPrompt側で単一化する）
+ *    （訳文末尾と原文末尾の重ね注入はしない。buildSpec側で単一化する）
  */
 suspend fun translateLarge(
     store: FileStore,

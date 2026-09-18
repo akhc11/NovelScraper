@@ -196,66 +196,20 @@ fun buildSystemPrompt(
     /** 人物メモ方式。非null・非blank時は参考情報ブロックを付ける（方式を問わず併用可） */
     profileMemo: String? = null
 ): String {
-    val sb = StringBuilder(basePrompt)
-
-    if (!previousTranslatedTail.isNullOrBlank()) {
-        sb.append("\n\n=== PREVIOUS CONTEXT (maintain consistency — do NOT translate or repeat this) ===\n")
-        sb.append("...").append(previousTranslatedTail).append("\n")
-        sb.append("================================================================================\n")
-    }
-
-    // 訳文末尾がある場合は原文末尾を重ねない（トークン浪費・重複翻訳の防止）
-    val effectiveSourceTail = if (previousTranslatedTail.isNullOrBlank()) previousSourceTail else null
-    if (!effectiveSourceTail.isNullOrBlank()) {
-        sb.append("\n\n=== PREVIOUS TEXT (context only — do NOT translate or repeat this) ===\n")
-        sb.append("...").append(effectiveSourceTail).append("\n")
-        sb.append("================================================================\n")
-    }
-
-    if (termAnnotation != null) {
-        // 技術的根拠1行：適用保証をモデルの遵守から機械的な写し作業に移すため、対応確定の1行にする（括弧除去は剥離の責務のため指示しない）。
-        sb.append("\n\n[確定訳語]\n※本文中の ${termAnnotation.open}…${termAnnotation.close} 内は確定訳語。そのまま使うこと。言い換え・修正は厳禁。\n")
-    }
-
-    if (!glossary.isNullOrEmpty()) {
-        val block = buildGlossaryBlock(glossary)
-        val at = sb.indexOf(GLOSSARY_SLOT)
-        if (at >= 0) {
-            sb.replace(at, at + GLOSSARY_SLOT.length, block)
-        } else {
-            sb.append("\n\n")
-            sb.append(block)
-            sb.append("\n")
-        }
-    } else {
-        // 技術的根拠1行：表なし時に指定行を残すと宙ぶらりんの指示になるため消す（前後の空行は害がないため残す）。
-        var at = sb.indexOf(GLOSSARY_SLOT)
-        while (at >= 0) {
-            sb.replace(at, at + GLOSSARY_SLOT.length, "")
-            at = sb.indexOf(GLOSSARY_SLOT)
-        }
-    }
-
-    if (batchFormat != null) {
-        sb.append(batchFormat)
-    }
-
-    if (!profileMemo.isNullOrBlank()) {
-        // 技術的根拠1行：基底文の指定行置換は prefix 照合（buildProfilePrompt）を壊すため末尾付加に固定する。末尾は recency 側で注意も引く。
-        sb.append("\n\n")
-        sb.append(profileMemo.trim())
-        sb.append("\n")
-    }
-
-    if (enableCompletionMarker) {
-        sb.append("\n\nNOTE: The text to translate below ends with the marker ")
-        sb.append(COMPLETION_MARKER)
-        sb.append(" appended after the actual source content.\n")
-        sb.append("THIS MARKER IS A STRUCTURAL DELIMITER, NOT TEXT TO TRANSLATE.\n")
-        sb.append("You MUST copy it into your output exactly as written, as the very last line, immediately after your translation.")
-    }
-
-    return sb.toString()
+    // 技術的根拠1行：組立の正本を Spec 側に寄せ、本関数は旧引数列の互換 wrapper に留める（新規呼出しは buildSpec に寄せる）。
+    return assemblePrompt(
+        buildSpec(
+            headNum = -1,
+            headText = basePrompt,
+            previousTranslatedTail = previousTranslatedTail,
+            previousSourceTail = previousSourceTail,
+            termAnnotation = termAnnotation,
+            glossary = glossary,
+            batchFormat = batchFormat,
+            profileMemo = profileMemo,
+            enableCompletionMarker = enableCompletionMarker
+        )
+    )
 }
 
 /**
@@ -619,38 +573,6 @@ fun stripTermAnnotations(text: String, terms: Map<String, String>, annotation: T
     return t
 }
 
-
-/**
- * プロファイル固有のプロンプトを組み立てる（純粋関数）。
- * 渡されたプロンプト（文脈・辞書・バッチ枠・マーカー等の付帯指示込み）の先頭が基底プロンプトに一致すれば
- * ターゲットのプロンプト番号（例: 7番 RETRY）の基底文に差し替える。
- * 一致しない場合（カスタム上書き等）は最初の空行以降を付帯指示とみなして結合するため、
- * 基底文内に空行がある構成では切り分け位置がずれることがある。
- */
-fun buildProfilePrompt(
-    originalPrompt: String,
-    basePrompts: Map<Int, String>,
-    originalPromptNum: Int,
-    targetPromptNum: Int
-): String {
-    if (targetPromptNum == originalPromptNum) return originalPrompt
-    val originalBase = basePrompts[originalPromptNum]
-        ?: basePrompts.values.firstOrNull()
-        ?: getV2PromptByNumber(originalPromptNum)
-    val targetBase = basePrompts[targetPromptNum]
-        ?: getV2PromptByNumber(targetPromptNum)
-
-    return if (originalBase.isNotBlank() && originalPrompt.startsWith(originalBase)) {
-        targetBase + originalPrompt.substring(originalBase.length)
-    } else {
-        val separatorIndex = originalPrompt.indexOf("\n\n")
-        if (separatorIndex != -1) {
-            targetBase + originalPrompt.substring(separatorIndex)
-        } else {
-            targetBase
-        }
-    }
-}
 
 /** 対応表検査で必須にする見出しの最小文字数。短い見出しは一般語と同形で誤爆するため警告止まりにする。 */
 const val GLOSSARY_STRICT_MIN_LEN = 3

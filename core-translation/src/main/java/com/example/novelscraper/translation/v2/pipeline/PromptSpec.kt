@@ -86,7 +86,7 @@ fun assemblePrompt(spec: PromptSpec): String {
                 sb.append("================================================================\n")
             }
             is PromptBlock.TermFix -> {
-                sb.append("\n\n[確定訳語]\n※本文中の ${block.annotation.open}…${block.annotation.close} 内は確定訳語。そのまま使うこと。言い換え・修正は厳禁。\n")
+                sb.append("\n\n[確定訳語]\n※本文中の ${block.annotation.open}…${block.annotation.close} 内は確定訳語。必ず訳文中に残し、そのまま使うこと。削除・省略・言い換え・修正は厳禁。注釈付きの語を落とさないこと。\n")
             }
             is PromptBlock.Glossary -> {
                 if (block.terms.isNotEmpty()) {

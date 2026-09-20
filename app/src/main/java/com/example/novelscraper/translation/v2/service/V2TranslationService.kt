@@ -88,6 +88,7 @@ class V2TranslationService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        TranslationDiagnostics.appendLine(this, "lifecycle", "service created")
         ensureChannels(this)
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NovelScraper::TranslationWakelock")
@@ -152,6 +153,7 @@ class V2TranslationService : Service() {
      */
     override fun onTimeout(startId: Int, fgsType: Int) {
         super.onTimeout(startId, fgsType)
+        TranslationDiagnostics.appendLine(this, "lifecycle", "dataSync timeout (startId=$startId type=$fgsType): stopping gracefully")
         android.util.Log.w("V2TranslationService", "dataSync timeout (startId=$startId type=$fgsType): stopping gracefully")
         try {
             onStopRequested?.invoke()
@@ -167,7 +169,19 @@ class V2TranslationService : Service() {
         stopSelf()
     }
 
+    /**
+     * メモリ圧迫の前兆記録。プロセスキル自体にコールバックはないため、
+     * 直前のTRIM_MEMORY水準をファイルに残し死因切り分けの材料にする。
+     * 技術的根拠1行：キルは無通知のため前兆だけでも永続化し、OOM adj推定の代用にする。
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        TranslationDiagnostics.appendLine(this, "memory", "onTrimMemory level=$level")
+    }
+
     override fun onDestroy() {
+        TranslationDiagnostics.appendLine(this, "lifecycle", "service destroyed")
+        TranslationDiagnostics.markRunning(this, false)
         if (wakeLock?.isHeld == true) {
             try {
                 wakeLock?.release()

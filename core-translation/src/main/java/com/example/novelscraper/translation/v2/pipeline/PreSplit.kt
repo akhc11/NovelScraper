@@ -14,7 +14,8 @@ import kotlinx.serialization.json.Json
  * Physical pre-splitter (v2).
  *
  * External contract (same as the frozen spec):
- * - Reuse only verified splits: manifest (count + hashes) must match, else rebuild scoped to split files.
+ * - Reuse verified splits: manifest parts list + source size must match.
+ *   Split-size setting changes do NOT trigger rebuild (Web parity: keep existing parts).
  * - Drop incomplete work on failure/stop, return null.
  * - An empty file yields one empty part.
  * - Ingested text is verified UTF-8; only parts are written back as UTF-8 (source file is never overwritten).
@@ -146,7 +147,7 @@ private suspend fun adoptPreSplitManifest(
     log: (String) -> Unit
 ): PreSplitManifest? {
     val manifest = readPreSplitManifest(store, novelDirUri) ?: return null
-    if (manifest.splitSizeChars != splitSizeChars) return null
+    // 技術的根拠1行：分割サイズ設定の変更では作り直さず既存維持(Web parity)とし、原典寸法の不一致のみ作り直す。
     if (sourceSizeBytes >= 0 && manifest.sourceSizeBytes >= 0 &&
         manifest.sourceSizeBytes != sourceSizeBytes
     ) return null
@@ -215,10 +216,14 @@ suspend fun splitSingleTextFile(
 
     val existing = store.findChild(splitRootUri, novelBase)
     if (existing != null && existing.isDirectory) {
-        // 技術的根拠1行：宣言書（名簿＋寸法）で完成を検証する。部分残骸・設定変更は作り直す。
+        // 技術的根拠1行：宣言書（名簿＋原典寸法）で完成を検証する。部分残骸・原典変更のみ作り直し、分割サイズ変更は既存維持する。
         val adopted = adoptPreSplitManifest(store, existing.uri, sourceSizeBytes, size, log)
         if (adopted != null) {
-            log("ℹ️ すでに分割完了済みです ($novelBase: ${adopted.parts.size}パート - already split)")
+            if (adopted.splitSizeChars != size) {
+                log("ℹ️ 分割サイズ設定の変更を検出しましたが既存を維持します ($novelBase: ${adopted.parts.size}パート, 設定${adopted.splitSizeChars}→${size})")
+            } else {
+                log("ℹ️ すでに分割完了済みです ($novelBase: ${adopted.parts.size}パート - already split)")
+            }
             val sample = store.findChild(existing.uri, adopted.parts.first())?.takeIf { !it.isDirectory }?.let {
                 store.readText(it.uri)
             } ?: ""

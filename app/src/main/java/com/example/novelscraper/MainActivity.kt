@@ -19,10 +19,12 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.novelscraper.scraper.*
+import com.example.novelscraper.translation.v2.service.TranslationDiagnostics
 import com.example.novelscraper.translation.web.*
 import com.example.novelscraper.ui.MainScreen
 import com.example.novelscraper.ui.MainScreenCallbacks
 import com.example.novelscraper.ui.theme.NovelScraperTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 
@@ -76,6 +78,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 技術的根拠1行：プロセス死は通知なしのため、起動時に前回実行マーカーと突合して中断検知する（重い読込はIOに寄せる）。
+        lifecycleScope.launch(Dispatchers.IO) {
+            val interrupted = TranslationDiagnostics.checkInterrupted(this@MainActivity)
+            if (interrupted != null) {
+                android.util.Log.w(TAG, "previous translation run was interrupted (likely OS kill): $interrupted")
+            }
+        }
         viewModel = ViewModelProvider(this)[ScrapingViewModel::class.java]
         val shortToast: (String) -> Unit =
             { msg -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
@@ -83,7 +92,16 @@ class MainActivity : ComponentActivity() {
         inspectorController = InspectorController(webViewHolder) { viewModel.uiState.value.currentConfig }
         liveTranslateController = LiveTranslateController(webViewHolder, shortToast)
         probeController = ProbeController(webViewHolder, viewModel, isAlive, shortToast)
-        bridgeFactory = ScraperBridgeFactory(viewModel, mainHandler, this, isAlive, shortToast)
+        bridgeFactory = ScraperBridgeFactory(
+            viewModel, mainHandler, this, isAlive, shortToast,
+            // 単一フロー：原文復元でInspector DOMが消えるため探査中のみ再注入する。
+            // 技術的根拠1行：innerHTML復元は注入ノードも消すがoverlay状態は残るため、状態駆動で修復する。
+            onRestored = {
+                if (isAlive() && viewModel.uiState.value.overlay is Overlay.InspectMode) {
+                    inspectorController.inject(webViewHolder.current)
+                }
+            }
+        )
         setupSystemUI()
         checkNotificationPermission()
         WebView.setWebContentsDebuggingEnabled(true)

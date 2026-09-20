@@ -6,8 +6,9 @@ import com.example.novelscraper.translation.v2.domain.TranslationLimits
  * Base prompt texts 1-7 (ported content, frozen spec).
  * The mechanism around them (resolution order, validation, tests) is v2 design.
  */
-const val V2_PROMPT_1_ZH = """以下の中国語小説を自然な日本語に翻訳してください。前後の文脈や組織・属性から話者の性別を特定してください。
-入力された文章を最初から最後まで省略・中略せずに全て翻訳して出力してください。
+const val V2_PROMPT_1_ZH = """以下の文章を、日本のライトノベル調で自然な日本語に意訳してください。
+本文中の⟦…⟧内は確定訳語のためそのまま使うこと。削除禁止です。
+Do NOT delete or omit anything inside ⟦...⟧. Every annotated term MUST appear in your translation exactly as written.
 
 【翻訳の基準（例文）】
 入力：
@@ -64,7 +65,8 @@ const val V2_PROMPT_3_KO = """以下の韓国語小説を、原文の文脈や�
    - 会話文は直訳調を排し、登場人物の感情や人間関係が伝わる自然な話し言葉にすること。
    - 韓国特有のスラング、若者言葉、慣用句、言葉遊びは、直訳せず日本の自然な口語・俗語に的確にローカライズすること。
 3. 表記の統一と人名ルール:
-   - [人物対応表]がある場合はその日本語をそのまま使うこと（カタカナ・漢字の書き換え、言い換えは厳禁）。表にない人名はカタカナを既定とし、漢字語（Hanja origin）ルーツが明確で日本語として自然な場合のみ漢字可。迷う場合はカタカナにすること。
+   - [人物対応表]がある場合はその日本語を必ず訳文中に残し、そのまま使うこと（削除・省略・書き換え・言い換えは厳禁）。表にない人名はカタカナを既定とし、漢字語（Hanja origin）ルーツが明確で日本語として自然な場合のみ漢字可。迷う場合はカタカナにすること。
+   - Every glossary term that appears in the source MUST appear in your translation with the exact given Japanese form. Do NOT delete or omit them.
     - 助詞・文法部品を人名と混同しないこと（例：「물이나」の「이나」は文法なので人名にしない）。
 [人物対応表挿入位置]
 4. 特殊レイアウト・ステータス画面の保持:
@@ -366,7 +368,7 @@ fun matchDictionaryMapEn(
 fun buildGlossaryBlock(terms: Map<String, String>): String {
     if (terms.isEmpty()) return ""
     val sb = StringBuilder("[人物対応表]\n")
-    sb.append("※本文中に登場する人物だけ下表の日本語を使うこと。言い換え・修正は厳禁。\n")
+    sb.append("※本文中に登場する人物だけ下表の日本語を必ず残し、そのまま使うこと。削除・省略・言い換え・修正は厳禁。\n")
     sb.append("※表にない名前・表の人物が出ていない文は通常通り訳すこと。文法・一般語を人物にしないこと。\n")
     for ((src, dst) in terms) {
         sb.append("- ").append(src).append(" → ").append(dst).append("\n")

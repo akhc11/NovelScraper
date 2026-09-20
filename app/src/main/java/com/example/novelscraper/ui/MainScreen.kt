@@ -321,7 +321,10 @@ fun MainScreen(
                                     url?.let {
                                         if (it.isNotEmpty() && !it.startsWith("javascript:") && !it.startsWith("data:")) {
                                             viewModel.setCurrentUrl(it)
-                                            WebViewHelper.clearGoogleTranslateCookies(it)
+                                            // LiveTranslateのgoogtransクッキーをここで消さない。
+                                            // JSが翻訳トリガに設定した直後のページで消すと競合し、
+                                            // 次ページ遷移時の自動継続も阻害するため、明示的な
+                                            // startScraping時のみWebViewHelper.clearGoogleTranslateCookiesする。
                                         }
                                     }
                                     view?.evaluateJavascript(WebViewHelper.buildDesktopViewportJs(uiState.isDesktopMode), null)

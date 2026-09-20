@@ -50,7 +50,7 @@ class InspectorController(
     }
 }
 
-/** ライブ翻訳トグルを担当（500msデバウンス維持）。 */
+/** ライブ翻訳トグルを担当（単一フロー入口：事前ガード→JS実行→状態通知）。 */
 class LiveTranslateController(
     private val holder: WebViewHolder,
     private val toast: (String) -> Unit
@@ -61,6 +61,7 @@ class LiveTranslateController(
         val now = System.currentTimeMillis()
         if (now - lastToggleTime < 500L) {
             Log.d(TAG, "toggleLiveTranslation: Debounced rapid toggle click")
+            toast("処理中です")
             return
         }
         lastToggleTime = now
@@ -69,6 +70,17 @@ class LiveTranslateController(
         if (v == null) {
             Log.e(TAG, "toggleLiveTranslation: WebView is null")
             toast("WebViewの初期化待ちです")
+            return
+        }
+        // 非対応スキームはJSに回さず確定させる（単一フローの事前ガード）。
+        val currentUrl = v.url.orEmpty()
+        if (currentUrl.isBlank() ||
+            currentUrl.startsWith("javascript:") ||
+            currentUrl.startsWith("data:") ||
+            currentUrl.startsWith("about:")
+        ) {
+            Log.w(TAG, "toggleLiveTranslation: unsupported url=$currentUrl")
+            toast("このページでは翻訳できません")
             return
         }
         Log.d(TAG, "toggleLiveTranslation: Evaluating script on WebView url=${v.url}")
@@ -121,7 +133,8 @@ class ScraperBridgeFactory(
     private val mainHandler: Handler,
     private val context: Context,
     private val isAlive: () -> Boolean,
-    private val toast: (String) -> Unit
+    private val toast: (String) -> Unit,
+    private val onRestored: (() -> Unit)? = null
 ) {
     fun attach(view: WebView, holder: WebViewHolder) {
         holder.current = view
@@ -174,12 +187,15 @@ class ScraperBridgeFactory(
                     if (isAlive()) {
                         Log.d(TAG, "onLiveTranslateStatus: $status")
                         viewModel.handleLiveTranslateStatus(status)
+                        // 単一フロー通知：成功系のみここでToast。ERRORはViewModelのnotifyに集約し二重通知しない。
+                        // START/BUSYは進行表示のみで通知しない。
                         if (status == "SUCCESS") {
                             toast("ページを翻訳しました")
                         } else if (status == "RESTORED") {
                             toast("原文に復元しました")
-                        } else if (status.startsWith("ERROR")) {
-                            toast("翻訳エラー: $status")
+                            onRestored?.invoke()
+                        } else if (status == "ALREADY_JA") {
+                            toast("既に日本語のページです")
                         }
                     }
                 }

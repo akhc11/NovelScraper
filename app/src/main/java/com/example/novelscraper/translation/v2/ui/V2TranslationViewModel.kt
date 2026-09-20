@@ -16,6 +16,7 @@ import com.example.novelscraper.translation.v2.engine.RunSummary
 import com.example.novelscraper.translation.v2.engine.defaultHandlerFor
 import com.example.novelscraper.translation.v2.infra.SafFileStore
 import com.example.novelscraper.translation.picker.FALLBACK_FOLDER_NAME
+import com.example.novelscraper.translation.v2.service.TranslationDiagnostics
 import com.example.novelscraper.translation.v2.service.V2TranslationService
 import com.example.novelscraper.translation.v2.service.V2TranslationServiceController
 import com.example.novelscraper.translation.v2.settings.DataStoreSettingsRepository
@@ -151,6 +152,9 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
         notifyJob?.cancel()
         lastNotifyEmit = 0L
         lastNotifySig = ""
+        // 技術的根拠1行：実行マーカーは開始確定後にだけ立て、検証脱落時は中断誤検知を作らない。
+        TranslationDiagnostics.markRunning(getApplication(), true, "folders=${items.size}")
+        TranslationDiagnostics.appendLine(getApplication(), "lifecycle", "run started (folders=${items.size})")
         // 即時フォアグラウンド昇格（startForegroundService後の10秒ANR制限内にstartForegroundさせる）
         serviceController.updateNotification(NOTIFICATION_TITLE, "開始準備中...", 0, 0)
         notifyJob = processScope.launch {
@@ -186,6 +190,8 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
     }
 
     fun stop() {
+        TranslationDiagnostics.markRunning(getApplication(), false)
+        TranslationDiagnostics.appendLine(getApplication(), "lifecycle", "run stopped by user")
         requestGlobalStop(serviceController)
     }
 
@@ -198,6 +204,11 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
     }
 
     private fun finishNotification(summary: RunSummary?) {
+        TranslationDiagnostics.markRunning(getApplication(), false)
+        TranslationDiagnostics.appendLine(
+            getApplication(), "lifecycle",
+            "run finished (completed=${summary?.completedFiles}/${summary?.totalFiles} aborted=${summary?.aborted})"
+        )
         if (summary != null && !summary.aborted) {
             serviceController.showComplete(
                 "LLM翻訳完了",

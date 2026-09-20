@@ -44,61 +44,30 @@ data class ExtractedNames(
 data class DictBuildManifest(val version: Int = 1, val batches: Map<String, String> = emptyMap(), val model: String = "", val promptsHash: String = "")
 
 data class DictPrompts(
-    val batch: String = "Extract person names (pure character names) from the novel text below.\n" +
-        "Output ONLY valid JSON matching this exact schema: {\"names\":[\"Name1\",\"Name2\"],\"authors\":[\"Author1\"],\"hints\":{\"Name1\":[\"人物メモ\"]}}.\n\n" +
-        "【厳格な抽出ルール】\n" +
-        "1. 抽出対象 (純粋な人名・固有名詞のみ):\n" +
-        "   - 〇 抽出する: 登場人物のフルネーム、姓、名、愛称、ファーストネーム (原文表記のまま)\n" +
-        "   - ✕ 抽出禁止 (厳禁): 役職・肩書 (隊長、長老、宗主、社長、師兄、ハンター等)、代名詞 (彼、彼女、黒衣人、老人、少年等)、一般名詞 (システム、精霊、魔獣、スキル名、アイテム等)、地名・組織名・ギルド名・門派名\n" +
-        "   - 作者署名・作者注記・宣伝文の中の名前はnamesに入れずauthorsに入れること (例: 作者：○○→authors。物語本文中の登場人物は通常通りnamesへ。両方に出る名前はnamesを優先する)。\n" +
-        "   - 1字だけの名前は抽出しないこと (2文字以上のみ。1字は一般語と区別できないため)。\n" +
-        "   - 韓国語は助詞・語尾を剥がして素形で抽出すること (例: 「사재혁이」→「사재혁」。文法部品は人名にしない。例: 「물이나」の「이나」は文法なので抽出しない)。\n" +
-        "2. 日本語訳は絶対に含めないこと:\n" +
-        "   - 原文テキストに登場する表記そのままで配列に格納してください (訳語・読み仮名の付与は厳禁)。\n" +
-        "3. 類似名・同姓同名の厳格な分離:\n" +
-        "   - 「李云」「李云龙」「李云天」のように似ていても、それぞれ別人であるため、絶対に1つに統合せず別々の名前として漏れなく抽出してください。\n" +
-        "4. 出力フォーマット:\n" +
-        "   - 解説・挨拶・マークダウン記号は一切不要。純粋なJSONのみを出力してください。\n\n" +
-        "5. 人物メモの素（hints）:\n" +
-        "   - namesに挙げた人物のうち、この断片から読み取れる性格・変わらない身分だけを20字以内で書くこと（例: 「落ち着いた少年宗主」）。\n" +
-        "   - 変わる役職・所属・関係・あらすじは書かないこと。本文に証拠がない人物は省略し、憶測で書かないこと。\n\n" +
-        "Example: {\"names\":[\"克莱恩\",\"周明瑞\",\"李云龙\",\"Arthur\",\"사재혁\",\"목진우\"],\"authors\":[],\"hints\":{\"李云龙\":[\"落ち着いた少年宗主\"]}}",
+    val batch: String = "Extract person names from the novel text below.\n" +
+        "Output ONLY valid JSON: {\"names\":[\"Name1\"],\"authors\":[\"Author1\"],\"hints\":{\"Name1\":[\"memo\"]}}.\n" +
+        "- names: characters only, original script, 2+ chars. Exclude titles, pronouns, common nouns, places, organizations.\n" +
+        "- authors: names from author notes/ads only. If in both, keep in names.\n" +
+        "- No Japanese translation.\n" +
+        "- hints: listed names only, immutable trait/identity within 20 chars from this excerpt. Omit if no evidence, no guessing.\n" +
+        "Example: {\"names\":[\"克莱恩\",\"李云龙\",\"Arthur\"],\"authors\":[],\"hints\":{\"李云龙\":[\"落ち着いた少年\"]}}",
 
-    val merge: String = "Merge the dictionary names below into one clean JSON list. The input is already deduplicated by exact match.\n" +
-        "Output ONLY valid JSON matching this exact schema: {\"names\":[\"Name1\",\"Name2\"]}.\n\n" +
-        "【厳格な名寄せ・重複排除ルール】\n" +
-        "1. 重複排除 & 短形の保持:\n" +
-        "   - 完全一致の重複は1つにまとめる。\n" +
-        "   - 「·」区切りのフルネームとその構成要素の短形（例: 「李维·史奈克」と「李维」）は【フルネーム】に統一する（短形の訳は適用時に部品から復元するため、ここでは落としてよい）。\n" +
-        "   - 「·」区切りのないペア（例: 「太郎」と「田中太郎」、「李云」と「李云龙」）は別人である可能性があるため、絶対に統合せず両方とも維持する。\n" +
-        "   - 1字の名前は登録しないこと（2文字以上のみ）。\n" +
-        "2. ノイズの徹底削除:\n" +
-        "   - 誤って混入した一般名詞・肩書・役職（隊長、長老、宗主、社長、システム等）、地名・組織名があれば完全に削除する。\n" +
-        "3. 日本語訳は絶対に含めないこと:\n" +
-        "   - 必ず原文表記の配列として出力してください。\n" +
-        "4. 出力フォーマット:\n" +
-        "   - 出力は指定のJSON形式のみ (前後の解説・マークダウン記号は一切不要)。\n\n" +
-        "Example: {\"names\":[\"克莱恩\",\"周明瑞\",\"李云龙\",\"Arthur\"]}",
+    val merge: String = "Merge the dictionary names below into one clean JSON list.\n" +
+        "Output ONLY valid JSON: {\"names\":[\"Name1\"]}.\n" +
+        "- Keep full forms with ·, drop their short parts. Without ·, keep both (may be different people).\n" +
+        "- Drop 1-char names, titles, common nouns, places, organizations. Original script only, no Japanese.\n" +
+        "Example: {\"names\":[\"克莱恩\",\"李云龙\",\"Arthur\"]}\n" +
+        "Example: [\"李维·史奈克\",\"李维\"] -> {\"names\":[\"李维·史奈克\"]}; [\"李云\",\"李云龙\"] -> {\"names\":[\"李云\",\"李云龙\"]}",
 
-    val translate: String = "Review the merged character names below and create a complete Japanese translation dictionary.\n" +
-        "Output ONLY valid JSON matching this exact schema (no markdown, no explanations): " +
-        "{\"style\":\"カタカナ|漢字|ハイブリッド\",\"characters\":{\"OriginalName\":\"JapaneseName\"},\"profiles\":{\"OriginalName\":\"人物メモ（40字以内）\"}}.\n\n" +
-        "【厳格な命名・翻訳ルール】（言語別基準：中国語＝漢字優先、韓国語＝カタカナ既定）\n" +
-        "1. 表記スタイルの自動判定 & 作品全体での統一:\n" +
-        "   中国語名は語源で判定し、迷う場合は漢字表記を優先すること。明らかな西洋音訳名のみカタカナに音訳し（克莱恩→クライン等）、中華名・意味の取れる複合名（黑山→黒山等）は日本の常用漢字・新字体に復元すること（李云→李雲等）。西洋と断定できない中国語名は漢字にすること。\n" +
-        "   韓国語名はカタカナを既定とし（사재혁→サ・ジェヒョク等）、漢字ルーツが明確で日本語として自然な場合のみ漢字可。迷う場合はカタカナにすること。\n" +
-        "2. 1対1の正確な対応（名前の取り違え・混同は厳禁）:\n" +
-        "   - 入力されたすべての原文名をキーとし、それぞれに正確に対応する自然な日本語訳を値として設定してください。\n" +
-        "   - 似た名前同士（例: 「李云」と「李云龙」）で訳語が入れ替わったり混ざったりしないよう、厳密に対応させてください。\n" +
-        "3. 最終ノイズ除去:\n" +
-        "   - 地名、組織名、役職、一般名詞が残っている場合は除外（キーに含めない）してください。\n" +
-        "4. すべての値は自然な日本語（カタカナまたは漢字）であること。\n" +
-        "5. 人物メモ（profiles）は入力のhintsを根拠に40字以内で合成すること（例: 「落ち着いた宗主の少年」）。\n" +
-        "   性格と変わらない身分だけを書き、変わる役職・所属・関係・あらすじは書かないこと。\n" +
-        "   hintsがない人物は空文字にし、憶測で書かないこと。\n" +
-        "6. 出力フォーマット:\n" +
-        "   - 純粋なJSONのみを出力すること (解説・挨拶・コードブロック記号は一切不要)。\n\n" +
-        "Example: {\"style\":\"ハイブリッド\",\"characters\":{\"克莱恩\":\"クライン\",\"奥黛丽\":\"オードリー\",\"李云\":\"李雲\",\"李云龙\":\"李雲龍\",\"黑山\":\"黒山\",\"김민준\":\"キム・ミンジュン\",\"사재혁\":\"サ・ジェヒョク\"},\"profiles\":{\"李云\":\"落ち着いた宗主の少年\"}}",
+    val translate: String = "Review the merged character names below and create a Japanese dictionary.\n" +
+        "Output ONLY valid JSON: {\"style\":\"カタカナ|漢字|ハイブリッド\",\"characters\":{\"Original\":\"Japanese\"},\"profiles\":{\"Original\":\"memo\"}}.\n" +
+        "- Every input name needs exactly one Japanese value. Do not swap similar names.\n" +
+        "- Chinese: kanji first, katakana only for clear Western transliterations. Korean: katakana by default, kanji only if clearly natural. Keep one style per work.\n" +
+        "- Drop places, organizations, titles, common nouns. Values must be natural Japanese.\n" +
+        "- profiles: 40 chars max from hints only, immutable traits. Empty if no hints, no guessing.\n" +
+        "Example: {\"style\":\"漢字\",\"characters\":{\"李云\":\"李雲\"},\"profiles\":{\"李云\":\"落ち着いた少年\"}}\n" +
+        "Example: {\"style\":\"カタカナ\",\"characters\":{\"克莱恩\":\"クライン\"},\"profiles\":{}}\n" +
+        "Example: {\"style\":\"カタカナ\",\"characters\":{\"사재혁\":\"サ・ジェヒョク\"},\"profiles\":{}}",
 
     // 後方互換用エイリアス
     val review: String = translate
@@ -712,7 +681,8 @@ suspend fun generateDictionary(
                 is LlmResult.Success -> {
                     val parsed = parseExtractedNames(r.text)
                     if (parsed != null && parsed.names.isNotEmpty()) {
-                        namesFromLlm = parsed.names
+                        // 技術的根拠1行：完全一致の重複はプログラム側で保証し、AIの表記ゆれには触れない。
+                        namesFromLlm = parsed.names.distinct()
                         break
                     }
                 }

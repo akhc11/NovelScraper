@@ -244,12 +244,16 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
         // 同一URLの重複更新を抑止（WebViewClientの3コールバックが同URLで連呼するため）。
         // ナビゲーション発火（LaunchedEffect）は正規化比較で同一URLを無視するので、ここでの早期復帰と整合する。
         if (_uiState.value.currentUrl == url) return
+        // フラグメント移動（#以降のみ変化）は同一文書のため翻訳状態を維持する。
+        // 技術的根拠1行：JSコンテキスト・googtrans・DOMが存続するのに旗だけ落とすと表示と実態が乖離するため。
+        val fragmentOnlyChange =
+            _uiState.value.currentUrl.substringBefore("#") == url.substringBefore("#")
         _uiState.update { 
             it.copy(
                 currentUrl = url, 
                 inputUrl = url,
-                isLiveTranslating = false,
-                isLiveTranslated = false
+                isLiveTranslating = if (fragmentOnlyChange) it.isLiveTranslating else false,
+                isLiveTranslated = if (fragmentOnlyChange) it.isLiveTranslated else false
             ) 
         }
         viewModelScope.launch {
@@ -301,15 +305,25 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     }
 
     // ---- ライブ翻訳（Webページ即時翻訳）の状態ハンドリング ----
+    // 単一フロー: START/BUSY/SUCCESS/RESTORED/ALREADY_JA/ERROR の全端末状態をここで一元処理する。
+    // Toastは成功系のみScraperBridgeFactory側、ERRORのみここのnotifyに集約し二重通知しない。
     fun handleLiveTranslateStatus(status: String) {
         when {
             status == "START" -> {
+                _uiState.update { it.copy(isLiveTranslating = true) }
+            }
+            status == "BUSY" -> {
+                // JS側ロック中の連打。スピナー維持のみで状態は変えない。
                 _uiState.update { it.copy(isLiveTranslating = true) }
             }
             status == "SUCCESS" -> {
                 _uiState.update { it.copy(isLiveTranslating = false, isLiveTranslated = true) }
             }
             status == "RESTORED" -> {
+                _uiState.update { it.copy(isLiveTranslating = false, isLiveTranslated = false) }
+            }
+            status == "ALREADY_JA" -> {
+                // 既に日本語の頁。未翻訳のまま待機に戻す。
                 _uiState.update { it.copy(isLiveTranslating = false, isLiveTranslated = false) }
             }
             status.startsWith("ERROR:") -> {

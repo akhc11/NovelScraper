@@ -13,10 +13,14 @@ import com.example.novelscraper.translation.common.ingest.LanguageModels
  *   the output holds kana, they are treated as headings/names, not residue.
  *   (Industry practice for mixed-script documents: short ambiguous blocks
  *   must not get their own label.)
- *   Blocks containing simplified chars never inherit and are always residue.
+ *   Blocks containing a simplified run (>=5 Han) never inherit and are always residue;
+ *   isolated simplified chars without a 5-run inherit as noise.
  * - Latin-only segments are ignored, except EN-source accumulation
  *   (>= minLatinResidueChars) which is flagged as residue.
  * - ZH/KO/EN sources are checked; JA skips.
+ * - ZH simplified trigger requires a consecutive Han run (>= minSimplifiedRunChars,
+ *   default 5) containing a pure simplified char: isolated single-kanji noise
+ *   in Japanese sentences is ignored, sentence-level leaks are kept.
  * - Thresholds are options, except the long-Han rule (inheritChars * 3, fixed),
  *   so behavior can be tuned without touching the algorithm.
  *
@@ -36,7 +40,9 @@ data class ResidualOptions(
     /** Han-only blocks below this size inherit the surrounding kana text. */
     val inheritChars: Int = 10,
     /** Latin-only blocks above this size trigger residue for EN source (prevents proper noun false-positives). */
-    val minLatinResidueChars: Int = 60
+    val minLatinResidueChars: Int = 60,
+    /** Simplified trigger requires this length of consecutive Han containing pure simplified. */
+    val minSimplifiedRunChars: Int = 5
 )
 
 private fun isKana(code: Int): Boolean = ScriptKinds.isKana(code)
@@ -82,16 +88,40 @@ fun residualFailure(translatedText: String, options: ResidualOptions): String? {
         var c = 0
         var s = 0
         var l = 0
+        // 技術的根拠1行：単字では日中共通漢字を切れないため、計数と同時に簡体字入り漢字連続を見て散発ノイズと文漏れを分離する。
+        var run = 0
+        var runHasSimplified = false
+        var hasSimplifiedRun = false
         for (ch in seg) {
             val code = ch.code
             when {
-                isKana(code) -> k++
-                isHangul(code) -> h++
+                isKana(code) -> {
+                    k++
+                    run = 0
+                    runHasSimplified = false
+                }
+                isHangul(code) -> {
+                    h++
+                    run = 0
+                    runHasSimplified = false
+                }
                 isHan(code) -> {
                     c++
-                    if (LanguageModels.PURE_SIMPLIFIED_CHARS.contains(ch)) s++
+                    val pure = LanguageModels.PURE_SIMPLIFIED_CHARS.contains(ch)
+                    if (pure) s++
+                    run++
+                    if (pure) runHasSimplified = true
+                    if (run >= options.minSimplifiedRunChars && runHasSimplified) hasSimplifiedRun = true
                 }
-                isLatin(code) -> l++
+                isLatin(code) -> {
+                    l++
+                    run = 0
+                    runHasSimplified = false
+                }
+                else -> {
+                    run = 0
+                    runHasSimplified = false
+                }
             }
         }
         if (k + h + c + l < options.minSegmentChars) return
@@ -118,23 +148,21 @@ fun residualFailure(translatedText: String, options: ResidualOptions): String? {
         }
 
         // 中国語ソース:
-        // 1. 純粋簡体字が存在する場合: かなが文中に混ざっていても中国語残留として検知。
+        // 1. 簡体字入り漢字5連続がある場合: かなが混ざっていても残留として検知。
         // 技術的根拠1行：簡体字数は漢字数に含まれるため二重計上せず、しきい値の意味を保つ。
-        if (s > 0) {
+        if (hasSimplifiedRun) {
             residue += c
             if (residueKind.isEmpty()) residueKind = "han"
             return
         }
-
-        // 2. ハングル混入も検知
+        // 2. ハングル混入も検知（散発簡体字があっても見逃さない）。
         if (h > 0) {
             residue += h + c
             if (residueKind.isEmpty()) residueKind = "hangul"
             return
         }
-
-        // 3. かなを含む文で純粋簡体字がなければ、正当な日本語文として合格
-        if (k > 0) return
+        // 3. 散発簡体字のみ・かな文は日本語として合格（単漢字ノイズの無視）。
+        if (s > 0 || k > 0) return
 
         // 4. 漢字のみのセグメント:
         // 周囲にかなが存在し（kanaTotal > 0）、純粋簡体字がない場合は日本の章見出しや技名等として許容。

@@ -128,13 +128,24 @@ class ScrapingTask(
                 is ScrapingStateMachine.Action.LoadUrl -> {
                     isPageError = false
                     navigationJob?.cancel()
-                    webView.loadUrl(action.url)
+                    // 技術的根拠1行：破棄競合でのloadUrl例外をここで握り潰さず有限リトライに寄せ、停滞死骸化を防ぐ。
+                    try {
+                        webView.loadUrl(action.url)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "loadUrl failed, routing to bounded retry", e)
+                        executeActions(stateMachine.onViewError())
+                    }
                 }
                 is ScrapingStateMachine.Action.EvaluateJs -> {
-                    webView.evaluateJavascript(action.js) { result ->
-                        if (!isRunning) return@evaluateJavascript
-                        val followUpActions = stateMachine.onJsResult(action.purpose, result ?: "null")
-                        executeActions(followUpActions)
+                    try {
+                        webView.evaluateJavascript(action.js) { result ->
+                            if (!isRunning) return@evaluateJavascript
+                            val followUpActions = stateMachine.onJsResult(action.purpose, result ?: "null")
+                            executeActions(followUpActions)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "evaluateJavascript failed, routing to bounded retry", e)
+                        executeActions(stateMachine.onViewError())
                     }
                 }
                 is ScrapingStateMachine.Action.SaveAndContinue -> {

@@ -48,6 +48,15 @@ interface FileStore {
      */
     suspend fun renameFile(dirUri: String, fileUri: String, newName: String): VDoc? = null
     suspend fun deleteRecursively(dirUri: String): Boolean
+    /**
+     * ディレクトリの一括削除（プロバイダ側の再帰削除に委ねる単発操作）。
+     * 再帰性はプロバイダ実装依存のため契約化しない。失敗・非対応時はfalseを返し、
+     * 呼出側は[deleteRecursively]に退行すること。消えたことの検証も呼出側の責務。
+     * 技術的根拠1行：子300件の個別削除はSAFの1操作固定コスト×件数で数分掛かるため、
+     * 新規作成分（中身が自成果物のみと確定できる場合）に限り単発削除を試す。
+     * 利用者ファイルが混在し得る場所には絶対に使わないこと。
+     */
+    suspend fun deleteDirectory(dirUri: String): Boolean
     suspend fun deleteFile(fileUri: String): Boolean
 }
 

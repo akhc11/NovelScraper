@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.example.novelscraper.translation.v2.settings.V2DictPrompts
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
+import com.example.novelscraper.translation.v2.settings.V2PresetIndexEntry
 import com.example.novelscraper.translation.v2.settings.V2PromptPreset
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import com.example.novelscraper.translation.v2.settings.defaultV2PromptPresets
@@ -25,7 +26,8 @@ import com.example.novelscraper.ui.theme.AppColors
 private enum class V2SettingsTab(val title: String) {
     MODELS("モデル設定"),
     COMMON("共通・APIキー"),
-    PROMPTS("プロンプト編集")
+    PROMPTS("プロンプト編集"),
+    PRESETS("全設定プリセット")
 }
 
 internal fun parsePromptList(text: String, default: List<Int>): List<Int> {
@@ -40,14 +42,19 @@ fun V2SettingsDialog(
     onDismiss: () -> Unit,
     onTestConnection: (suspend (V2ModelProfile) -> String)? = null,
     onImportLegacy: ((String) -> Unit)? = null,
-    importWarnings: List<String> = emptyList()
+    importWarnings: List<String> = emptyList(),
+    presetIndex: List<V2PresetIndexEntry> = emptyList(),
+    presetMessage: String = "",
+    onSavePreset: ((String, V2Settings) -> Unit)? = null,
+    onApplyPreset: ((String) -> Unit)? = null,
+    onDeletePreset: ((String) -> Unit)? = null
 ) {
     var selectedTab by remember { mutableStateOf(V2SettingsTab.MODELS) }
     var showHelp by remember { mutableStateOf(false) }
 
     // モデル個別プロファイルリスト
     val profiles = remember { mutableStateListOf<V2ModelProfile>().apply { addAll(initial.profiles) } }
-    var modelSelectionTarget by remember { mutableStateOf<String?>(null) } // "WORKER_LIST", "DICT_EXTRACT", "DICT_MERGE"
+    var modelSelectionTarget by remember { mutableStateOf<String?>(null) } // "WORKER_LIST", "DICT_EXTRACT", "DICT_MERGE", "REFINE"
 
     // プロンプト順序プリセット一覧
     val promptPresets = remember {
@@ -61,6 +68,10 @@ fun V2SettingsDialog(
     var showAddPresetDialog by remember { mutableStateOf(false) }
     var presetOrderToSave by remember { mutableStateOf("1, 1") }
     var presetToDelete by remember { mutableStateOf<V2PromptPreset?>(null) }
+
+    // 全設定プリセット用
+    var fullPresetLabel by remember { mutableStateOf("") }
+    var fullPresetToDelete by remember { mutableStateOf<V2PresetIndexEntry?>(null) }
 
     // 言語連動プロンプト順序
     var autoPromptEnabled by remember { mutableStateOf(initial.promptSelection.autoEnabled) }
@@ -213,6 +224,7 @@ fun V2SettingsDialog(
                                 state = commonState,
                                 onSelectDictModel = { modelSelectionTarget = "DICT_EXTRACT" },
                                 onSelectDictMergeModel = { modelSelectionTarget = "DICT_MERGE" },
+                                onSelectRefineModel = { modelSelectionTarget = "REFINE" },
                                 onImportLegacy = onImportLegacy,
                                 importWarnings = importWarnings
                             )
@@ -223,6 +235,64 @@ fun V2SettingsDialog(
                                 customPromptsMap = customPromptsMap,
                                 dictPromptsMap = dictPromptsMap
                             )
+                        }
+
+                        V2SettingsTab.PRESETS -> {
+                            // 全設定プリセット（鍵除く丸ごとsnapshot。言語連動の量比・自動順序も含む）
+                            Text(
+                                "現在の全設定（鍵以外）を名前付きで保存・適用します",
+                                color = AppColors.textSecondary,
+                                fontSize = 11.sp
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text("プリセット名 (例: 中文flash・辞書ON・分割ON):", color = AppColors.textSecondary, fontSize = 10.sp)
+                            V2InputArea(value = fullPresetLabel, onValueChange = { fullPresetLabel = it })
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Button(
+                                onClick = {
+                                    onSavePreset?.invoke(fullPresetLabel, coercedV2Settings(draft))
+                                    fullPresetLabel = ""
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
+                                shape = RoundedCornerShape(4.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("現在の内容を保存", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (presetMessage.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(presetMessage, color = AppColors.accentTealLight, fontSize = 10.sp)
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            if (presetIndex.isEmpty()) {
+                                Text("未登録", color = AppColors.textTertiary, fontSize = 11.sp)
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    presetIndex.forEach { entry ->
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(Color(0xFF1B2F2C), RoundedCornerShape(4.dp))
+                                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                entry.label,
+                                                color = AppColors.textPrimary,
+                                                fontSize = 12.sp,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            TextButton(onClick = { onApplyPreset?.invoke(entry.id) }) {
+                                                Text("適用", color = AppColors.accentTealLight, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                            TextButton(onClick = { fullPresetToDelete = entry }) {
+                                                Text("削除", color = Color(0xFFE57373), fontSize = 11.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -360,6 +430,46 @@ fun V2SettingsDialog(
         }
     }
 
+    // 全設定プリセット削除確認ダイアログ
+    fullPresetToDelete?.let { entry ->
+        Dialog(onDismissRequest = { fullPresetToDelete = null }) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = AppColors.surfaceDark,
+                tonalElevation = 8.dp,
+                modifier = Modifier.fillMaxWidth(0.85f)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("プリセット削除確認", color = AppColors.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("全設定プリセット「${entry.label}」を削除しますか？", color = AppColors.textSecondary, fontSize = 11.sp)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = { fullPresetToDelete = null },
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceMedium),
+                            shape = RoundedCornerShape(4.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("キャンセル", color = AppColors.textPrimary, fontSize = 11.sp)
+                        }
+                        Button(
+                            onClick = {
+                                onDeletePreset?.invoke(entry.id)
+                                fullPresetToDelete = null
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F)),
+                            shape = RoundedCornerShape(4.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("削除", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // モデル追加モーダルダイアログ
     if (modelSelectionTarget != null) {
         V2AddModelSelectionDialog(
@@ -376,6 +486,10 @@ fun V2SettingsDialog(
                     }
                     "DICT_MERGE" -> {
                         commonState.dictMergeModel.value = selectedProfile.model
+                    }
+                    "REFINE" -> {
+                        commonState.refineProvider.value = selectedProfile.providerId
+                        commonState.refineModel.value = selectedProfile.model
                     }
                 }
                 modelSelectionTarget = null

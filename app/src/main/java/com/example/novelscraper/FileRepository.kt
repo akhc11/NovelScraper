@@ -21,30 +21,33 @@ class FileRepository(private val context: Context) {
 
     /**
      * チャプターをDownloadsフォルダに保存する。
+     * 保存先は Downloads/<saveDir>/<作品名>/（saveDir空欄時は従来のNovelScraper）。
      * Android Q以降は MediaStore、それ以前は直接ファイル書き込み。
      */
-    suspend fun saveChapter(folderName: String, title: String, content: String, chapterNum: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun saveChapter(folderName: String, title: String, content: String, chapterNum: String, saveDir: String = ""): Boolean = withContext(Dispatchers.IO) {
         var fileName = title.replace(sanitizeRegex, "").trim()
         if (chapterNum.isNotEmpty()) fileName = "${chapterNum}_${fileName}"
         fileName += ".txt"
         val safeFolderName = folderName.replace(sanitizeRegex, "").trim()
             .ifEmpty { DEFAULT_FOLDER_NAME }
+        val safeRootName = saveDir.replace(sanitizeRegex, "").trim()
+            .ifEmpty { ROOT_FOLDER_NAME }
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                saveWithMediaStore(safeFolderName, fileName, content)
+                saveWithMediaStore(safeRootName, safeFolderName, fileName, content)
             } else {
-                saveWithLegacyFile(safeFolderName, fileName, content)
+                saveWithLegacyFile(safeRootName, safeFolderName, fileName, content)
             }
             true
         } catch (e: Exception) {
-            Log.e("FileRepository", "Failed to save chapter file [fileName=$fileName, folderName=$safeFolderName]", e)
+            Log.e("FileRepository", "Failed to save chapter file [fileName=$fileName, rootName=$safeRootName, folderName=$safeFolderName]", e)
             false
         }
     }
 
-    private fun saveWithMediaStore(folderName: String, fileName: String, content: String) {
-        val path = Environment.DIRECTORY_DOWNLOADS + "/$ROOT_FOLDER_NAME/$folderName/"
+    private fun saveWithMediaStore(rootName: String, folderName: String, fileName: String, content: String) {
+        val path = Environment.DIRECTORY_DOWNLOADS + "/$rootName/$folderName/"
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
@@ -70,10 +73,10 @@ class FileRepository(private val context: Context) {
         }
     }
 
-    private fun saveWithLegacyFile(folderName: String, fileName: String, content: String) {
+    private fun saveWithLegacyFile(rootName: String, folderName: String, fileName: String, content: String) {
         val dir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            "$ROOT_FOLDER_NAME/$folderName"
+            "$rootName/$folderName"
         )
         if (!dir.exists() && !dir.mkdirs()) {
             throw IOException("Failed to create directory: ${dir.absolutePath}")

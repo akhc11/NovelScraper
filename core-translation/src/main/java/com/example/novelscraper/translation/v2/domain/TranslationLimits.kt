@@ -33,10 +33,18 @@ object TranslationLimits {
     const val DICT_MATCH_LIMIT = 500
     /** 人物メモ1件あたりの上限文字数。超過分は辞書確定時に切り落とさず、その人物のメモだけ落とす。 */
     const val MAX_PROFILE_CHARS = 40
-    /** 命名合成に渡す人物メモ候補の1名あたり上限。超過分は先勝ちで切り捨てる（入力肥大防止）。 */
-    const val MAX_HINTS_PER_NAME = 5
+    /** 命名合成に渡す人物メモ候補の1名あたり上限。超過分は先勝ちで切り捨てる（入力肥大防止）。素は根拠の質が要で量ではないため3に絞る。 */
+    const val MAX_HINTS_PER_NAME = 3
     /** 命名入力に載せる人物メモ素の総文字数上限。超過分は後方から切り捨てる（小規模モデルの入力圧迫防止）。 */
     const val MAX_TRANSLATE_HINTS_CHARS = 40000
+    /** 命名・翻訳1回あたりの名前数上限。弱いモデルでも完走できる分量に割る（性能依存の切り離し）。 */
+    const val DICT_TRANSLATE_CHUNK_NAMES = 40
+    /** 全設定プリセットの上限件数。技術的根拠1行：DataStoreは全文書換・常駐キャッシュのため件数上限で常駐量を縛る（20件×十数KBで数百KB止まり）。 */
+    const val PRESET_MAX_COUNT = 20
+    /** プリセット名の上限文字数。 */
+    const val PRESET_LABEL_MAX_CHARS = 40
+    /** 同時実行の上限。技術的根拠1行：FGS 6h枠・電池・メモリを共有するため並列数はここで縛る。 */
+    const val MAX_CONCURRENT_RUNS = 2
 }
 
 /**

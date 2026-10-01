@@ -226,23 +226,42 @@ private fun buildAttempts(
 }
 
 /**
+ * 最終推敲の単一入口の結果。単品・束ねの両路が共有する。
+ * 技術的根拠1行：不採用時の初回訳温存保存をやめ未完了保留にするため、採用／保留／停止を型で分ける。
+ */
+sealed interface PolishResult {
+    /** 採用（磨き文 or 推敲なしの初回訳）。呼び元は保存してよい。 */
+    data class Adopted(val text: String) : PolishResult
+    /** 不採用（磨き失敗・検証不合格）。呼び元は保存せず未完了保留にすること。 */
+    data class Held(val kind: FailureKind, val note: String = "") : PolishResult
+    data object Stopped : PolishResult
+}
+
+/**
  * 最終推敲の単一入口。単品・束ねの両路が共有する。
- * 初回訳文を原文＋対応表付きで磨き直し、同一検査に通れば採用、不合格・制限・停止時は初回訳文をそのまま返す。
+ * 初回訳文を原文＋対応表＋人物メモ付きで磨き直し、同一検査に通れば採用する。
+ * 不採用時（磨き失敗・検証不合格・停止時）は初回訳文を返さず、保留または停止で返す。
  * 技術的根拠1行：磨き直しの成否判定を1箇所にし、路ごとの悪化（改悪採用・無限再送）を構造的に不可能にする。
- * 動作例：初回「軍人やイナ、ベテラン」→推敲「軍人やベテラン」で採用、推敲が崩れたら初回を採用する。
+ * 動作例：初回「軍人やイナ、ベテラン」→推敲「軍人やベテラン」で採用、推敲が崩れたら未完了保留にする。
  */
 suspend fun polishTranslation(
     content: String,
     first: String,
     ctx: TranslateContext,
     verify: VerifyOptions
-): String {
+): PolishResult {
     val refine = ctx.refine
-    if (refine == null || refine.prompt.isBlank() || ctx.stopped()) return first
+    // 技術的根拠1行：推敲なしは磨き対象外のため初回訳のまま採用し、停止時は保存せず停止で返す。
+    if (refine == null || refine.prompt.isBlank()) return PolishResult.Adopted(first)
+    if (ctx.stopped()) return PolishResult.Stopped
     val terms = verify.dictCheck?.terms ?: emptyMap()
-    val input = buildRefineInput(content, first, terms)
+    // 技術的根拠1行：性別・口調の判定材料を本翻訳と一致させるため、登場語だけの人物メモを推敲入力にも添付する（未登録・無効時は空送付）。
+    val memo = if (ctx.profileMemoEnabled && ctx.dictionary != null) {
+        profileMemoTerms(terms, ctx.dictionary.profiles)
+    } else emptyMap()
+    val input = buildRefineInput(content, first, terms, memo)
     val budget = RetryBudget()
-    // 技術的根拠1行：再試行の数え方・待機・停止検査は骨格カーネルに一任し、ここでは初回採用への倒し方だけを決める（待機再送なしの1回勝負）。
+    // 技術的根拠1行：再試行の数え方・待機・停止検査は骨格カーネルに一任し、ここでは採用／保留の仕分けだけを決める（待機再送なしの1回勝負）。
     return when (val settled = callWithRetry(
         { refine.call(refine.prompt, input) },
         budget, 0, DefaultRetryPolicy::delayForAttempt,
@@ -250,19 +269,23 @@ suspend fun polishTranslation(
     )) {
         is CallSettled.Ok -> {
             // 技術的根拠1行：磨き文に完走栞はないため栞検査だけ外し、人物・量・かな率の物差しは初回と同一にする。
-            val refined = verifyTranslation(content, settled.result.text, verify.copy(markerEnabled = false))
-            if (refined != null) {
+            // 技術的根拠1行：合否と理由を1回の判定で両取りし、不採用理由の再計算（二重処理）を作らない。
+            val receipt = assessCompletion(content, settled.result.text, verify.copy(markerEnabled = false))
+            if (receipt.complete) {
                 ctx.log("✨ 推敲で更新しました")
-                refined
+                PolishResult.Adopted(receipt.cleaned)
             } else {
-                ctx.log("推敲結果を破棄し初回訳を採用します")
-                first
+                // 技術的根拠1行：磨き不合格の初回訳温存は磨きなし確定を作るため、保存せず未完了保留にする（確定旗を立てない固定文言で持つ）。
+                // 技術的根拠1行：不採用理由は切り分け材料のため記録に残す（保持判定は固定文言で行い確定旗に触れさせない）。
+                ctx.log("⚠️ 推敲不採用のため未完了として保留します (${receipt.note}・次回再試行)")
+                PolishResult.Held(FailureKind.FATAL, "polish-rejected")
             }
         }
-        is CallSettled.Terminal -> first.also {
-            ctx.log("推敲を素通しします (${settled.failure.kind})")
+        is CallSettled.Terminal -> {
+            ctx.log("⚠️ 推敲不採用のため未完了として保留します (${settled.failure.kind})")
+            PolishResult.Held(settled.failure.kind, settled.failure.note)
         }
-        is CallSettled.Stopped -> first
+        is CallSettled.Stopped -> PolishResult.Stopped
     }
 }
 
@@ -364,7 +387,13 @@ suspend fun translateSingle(
                         if (promptIdx > 0) {
                             ctx.log("✨ プロンプト#$promptNum でのリトライに成功しました")
                         }
-                        return SingleResult.Translated(polishTranslation(content, verified, ctx, verify))
+                        // 技術的根拠1行：推敲不採用時は初回訳の温存保存をせず未完了保留にする（磨きなし確定を作らない）。
+                        return when (val polished = polishTranslation(content, verified, ctx, verify)) {
+                            is PolishResult.Adopted -> SingleResult.Translated(polished.text)
+                            is PolishResult.Stopped -> SingleResult.Stopped
+                            is PolishResult.Held ->
+                                SingleResult.Failed(polished.kind, polished.note, isDeterministic = false)
+                        }
                     }
 
                     // 品質チェック不合格
@@ -524,13 +553,22 @@ suspend fun translateBatch(
         val verified = validation.verified[idx] ?: continue
         // 技術的根拠1行：磨き直しは単品路と同一口に寄せ、束ね独自の再送・保存手順を作らない。
         val vo = validation.vos[idx] ?: ctx.verify.copy(markerEnabled = false)
-        val final = polishTranslation(item.second, verified, ctx, vo)
-        if (saveOutputText(store, outputDirUri, fileName, final, log = ctx.log) != null) {
-            completed++
-            settled++
-            done[idx] = true
-            saved.add(fileName)
-            ctx.log("batch saved: $fileName")
+        when (val polished = polishTranslation(item.second, verified, ctx, vo)) {
+            is PolishResult.Adopted -> {
+                if (saveOutputText(store, outputDirUri, fileName, polished.text, log = ctx.log) != null) {
+                    completed++
+                    settled++
+                    done[idx] = true
+                    saved.add(fileName)
+                    ctx.log("batch saved: $fileName")
+                }
+            }
+            is PolishResult.Stopped -> break
+            is PolishResult.Held -> {
+                // 技術的根拠1行：磨き不採用の束ね品は単体再送でも磨き直すだけの無駄になるため、再送せず未完了保留にする。
+                done[idx] = true
+                ctx.log("⚠️ 推敲不採用のため未完了として保留します: $fileName (${polished.kind} ${polished.note})".trim())
+            }
         }
     }
 

@@ -217,4 +217,69 @@ class StateLogicTest {
         assertEquals(".widget-episodeBody", currentConfig.body)
         assertFalse(isConfigManuallyEdited)
     }
+
+    // --- 5. resolvePresetMatch（本物の判定関数）のテスト：冷起動共有の追補適用 ---
+    private val presetFixtures = mapOf(
+        "なろう" to ScraperConfig(body = "#novel_honbun", autoUrl = "syosetu.com"),
+        "カクヨム" to ScraperConfig(body = ".widget-episodeBody", autoUrl = "kakuyomu.jp")
+    )
+
+    @Test
+    fun testResolvePresetMatch_coldStartApplies() {
+        // 冷起動共有：プリセット到着が遅れても追補入口から同一判定で適用されること。
+        val matched = resolvePresetMatch(
+            url = "https://ncode.syosetu.com/n12345/1/",
+            presets = presetFixtures,
+            lastAppliedAutoUrlDomain = "",
+            currentPresetName = "",
+            isConfigManuallyEdited = false
+        )
+        assertNotNull(matched)
+        assertEquals("なろう", matched!!.first)
+        assertEquals("#novel_honbun", matched.second.body)
+    }
+
+    @Test
+    fun testResolvePresetMatch_manualEditProtected() {
+        // 同一サイト巡回中の手動編集は追補適用でも上書きされないこと。
+        assertNull(
+            resolvePresetMatch(
+                url = "https://ncode.syosetu.com/n12345/2/",
+                presets = presetFixtures,
+                lastAppliedAutoUrlDomain = "syosetu.com",
+                currentPresetName = "なろう",
+                isConfigManuallyEdited = true
+            )
+        )
+    }
+
+    @Test
+    fun testResolvePresetMatch_domainSwitchApplies() {
+        // 別ドメインへ移動した時は手動編集状態に関わらず切り替わること。
+        val matched = resolvePresetMatch(
+            url = "https://kakuyomu.jp/works/123456",
+            presets = presetFixtures,
+            lastAppliedAutoUrlDomain = "syosetu.com",
+            currentPresetName = "なろう",
+            isConfigManuallyEdited = true
+        )
+        assertNotNull(matched)
+        assertEquals("カクヨム", matched!!.first)
+    }
+
+    @Test
+    fun testResolvePresetMatch_noMatchOrEmpty() {
+        // 検索・ホーム等では適用しないこと。空入力・空マップでも null であること。
+        assertNull(
+            resolvePresetMatch(
+                url = "https://www.google.com/search?q=novel",
+                presets = presetFixtures,
+                lastAppliedAutoUrlDomain = "syosetu.com",
+                currentPresetName = "なろう",
+                isConfigManuallyEdited = false
+            )
+        )
+        assertNull(resolvePresetMatch("", presetFixtures, "", "", false))
+        assertNull(resolvePresetMatch("https://ncode.syosetu.com/", emptyMap(), "", "", false))
+    }
 }

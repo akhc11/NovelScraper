@@ -38,9 +38,9 @@ class PickerTargetAdapterTest {
     }
 
     @Test
-    fun web_keepsRootFolderFile() {
-        // FILEの親が投入済みフォルダに含まれない場合は維持される。
-        val lone = file().copy(parentDocUri = "doc://other")
+    fun web_foldsLoneFileToParentFolder() {
+        // WEB実行系はフォルダ列挙前提のため、ファイル単体は親フォルダに畳み、ファイルURIは残さない。
+        val lone = file().copy(parentDocUri = "doc://other", relPath = "Other/a1.txt")
         val items = PickerTargetAdapter.toWebFolderItems(listOf(root(), folder(), lone))
         assertEquals(3, items.size)
         assertEquals("tree://root", items[0].path)
@@ -49,10 +49,10 @@ class PickerTargetAdapterTest {
         assertEquals("doc://a", items[1].path)
         assertEquals("A", items[1].name)
         assertUriEquals("doc://a", items[1].uri)
-        // ファイル単体は親ツリーをpathに維持する(既存web分割フローと同形)。
-        assertEquals("tree://root", items[2].path)
-        assertEquals("a1.txt", items[2].name)
-        assertUriEquals("doc://a1", items[2].uri)
+        // 親フォルダに畳まれる(FOLDER品目と同形)。
+        assertEquals("doc://other", items[2].path)
+        assertEquals("Other", items[2].name)
+        assertUriEquals("doc://other", items[2].uri)
     }
 
     @Test
@@ -61,6 +61,29 @@ class PickerTargetAdapterTest {
         val items = PickerTargetAdapter.toWebFolderItems(listOf(folder(), file()))
         assertEquals(1, items.size)
         assertEquals("doc://a", items.single().path)
+    }
+
+    @Test
+    fun web_dropsOrphanFile() {
+        // 親不明FILEは投入不能のため落とす。
+        val orphan = file().copy(parentDocUri = "")
+        assertTrue(PickerTargetAdapter.toWebFolderItems(listOf(orphan)).isEmpty())
+    }
+
+    @Test
+    fun web_foldsNestedFileToSubfolder() {
+        // チェック済みフォルダF + 孫FILE(親=sub): subフォルダ品目になり、ファイルURIは残らない。
+        val nested = file().copy(
+            docUri = "doc://s1",
+            parentDocUri = "doc://sub",
+            relPath = "A/Sub/s1.txt",
+            displayName = "s1.txt"
+        )
+        val items = PickerTargetAdapter.toWebFolderItems(listOf(folder(), nested))
+        assertEquals(2, items.size)
+        assertEquals("doc://a", items[0].path)
+        assertEquals("doc://sub", items[1].path)
+        assertEquals("Sub", items[1].name)
     }
 
     @Test
@@ -100,6 +123,40 @@ class PickerTargetAdapterTest {
             listOf(folder(), folder(), PickerTarget(PickerKind.FOLDER, "", "tree://root"))
         )
         assertEquals(1, entries.size)
+    }
+
+    @Test
+    fun v2Targets_singleFileKeepsAllowList() {
+        // ファイル1件選択→親に畳むがfileUrisに1件保持し、同胞巻き込みを防ぐ。
+        val targets = PickerTargetAdapter.toV2FolderTargets(listOf(file()))
+        assertEquals(1, targets.size)
+        assertEquals("doc://a", targets[0].folderUri)
+        assertEquals(setOf("doc://a1"), targets[0].fileUris)
+    }
+
+    @Test
+    fun v2Targets_folderAloneMeansAll() {
+        // FOLDER単体(子FILEなし)は空集合=全件扱い(従来動作)。
+        val targets = PickerTargetAdapter.toV2FolderTargets(listOf(folder()))
+        assertEquals(1, targets.size)
+        assertTrue(targets[0].fileUris.isEmpty())
+    }
+
+    @Test
+    fun v2Targets_groupsByParent() {
+        // A直下2件+B配下1件→親ごとにグルーピングし、親フォルダ自体は増やさない。
+        val bFile = file().copy(
+            docUri = "doc://b1",
+            parentDocUri = "doc://b",
+            relPath = "A/B/b1.txt",
+            displayName = "b1.txt"
+        )
+        val a2 = file().copy(docUri = "doc://a2", relPath = "A/a2.txt", displayName = "a2.txt")
+        val targets = PickerTargetAdapter.toV2FolderTargets(listOf(file(), a2, bFile))
+        assertEquals(2, targets.size)
+        val byUri = targets.associateBy { it.folderUri }
+        assertEquals(setOf("doc://a1", "doc://a2"), byUri["doc://a"]!!.fileUris)
+        assertEquals(setOf("doc://b1"), byUri["doc://b"]!!.fileUris)
     }
 
     // ---- 実URI形でのツリー契約検証 ----
@@ -173,8 +230,8 @@ class PickerTargetAdapterTest {
         val lone = realFile().copy(parentDocUri = realFolderDoc.replace("novel", "other"))
         val items2 = PickerTargetAdapter.toWebFolderItems(listOf(lone))
         assertEquals(1, items2.size)
-        // 親は所属ツリー起点のツリー形(分割出力先の解決用)
-        assertEquals(realFolderTreeChild.replace("novel", "other"), items2[0].path)
+        // 親フォルダに畳む(FOLDER品目と同形: pathは文書URI)。
+        assertEquals(realFolderDoc.replace("novel", "other"), items2[0].path)
     }
 
     @Test

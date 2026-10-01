@@ -40,6 +40,8 @@ class V2CommonTabState(
     val prevLines: MutableState<String>,
     val refineEnabled: MutableState<Boolean>,
     val refinePrompt: MutableState<String>,
+    val refineProvider: MutableState<String>,
+    val refineModel: MutableState<String>,
     val refineThinking: MutableState<String?>,
     val refineThinkingBudget: MutableState<String>,
     val refineReasoningEffort: MutableState<String?>,
@@ -114,6 +116,8 @@ class V2CommonTabState(
             refine = base.refine.copy(
                 enabled = refineEnabled.value,
                 prompt = refinePrompt.value,
+                providerId = refineProvider.value,
+                model = refineModel.value.trim(),
                 thinkingLevel = refineThinking.value?.ifBlank { null },
                 thinkingBudget = refineThinkingBudget.value.ifBlank { null }?.toIntOrNull(),
                 reasoningEffort = refineReasoningEffort.value?.ifBlank { null },
@@ -156,6 +160,8 @@ class V2CommonTabState(
                 prevLines = mutableStateOf(initial.prevContext.lines.toString()),
                 refineEnabled = mutableStateOf(initial.refine.enabled),
                 refinePrompt = mutableStateOf(initial.refine.prompt),
+                refineProvider = mutableStateOf(initial.refine.providerId),
+                refineModel = mutableStateOf(initial.refine.model),
                 refineThinking = mutableStateOf(initial.refine.thinkingLevel),
                 refineThinkingBudget = mutableStateOf(initial.refine.thinkingBudget?.toString() ?: ""),
                 refineReasoningEffort = mutableStateOf(initial.refine.reasoningEffort),
@@ -196,6 +202,7 @@ internal fun V2CommonTab(
     state: V2CommonTabState,
     onSelectDictModel: () -> Unit,
     onSelectDictMergeModel: () -> Unit,
+    onSelectRefineModel: () -> Unit,
     onImportLegacy: ((String) -> Unit)?,
     importWarnings: List<String>
 ) {
@@ -406,7 +413,7 @@ internal fun V2CommonTab(
     }
     if (state.refineEnabled.value) {
         Spacer(modifier = Modifier.height(2.dp))
-        Text("※ 空欄で既定文を使用。不合格時は初回訳文を採用します", color = AppColors.textTertiary, fontSize = 9.sp)
+        Text("※ 空欄で既定文を使用。磨き不採用時は保存せず次回に回します", color = AppColors.textTertiary, fontSize = 9.sp)
         Spacer(modifier = Modifier.height(4.dp))
         V2InputArea(
             value = state.refinePrompt.value,
@@ -417,6 +424,38 @@ internal fun V2CommonTab(
         Spacer(modifier = Modifier.height(4.dp))
         Text("▼ 既定文（参考・このままでは送信されません）", color = AppColors.textTertiary, fontSize = 9.sp)
         Text(DEFAULT_REFINE_PROMPT, color = AppColors.textSecondary, fontSize = 9.sp)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text("推敲専用モデル（空＝翻訳と同じ・指定時のみ別経路）:", color = AppColors.textSecondary, fontSize = 9.sp)
+        Spacer(modifier = Modifier.height(2.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            listOf("gemini" to "Gemini", "openrouter" to "OpenRouter").forEach { (v, label) ->
+                SelectBox(
+                    label = label,
+                    selected = (state.refineProvider.value.ifBlank { "gemini" } == v),
+                    onClick = { state.refineProvider.value = v },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(2.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(modifier = Modifier.weight(1f)) {
+                V2InputArea(value = state.refineModel.value, onValueChange = { state.refineModel.value = it }, singleLine = true)
+            }
+            Button(
+                onClick = onSelectRefineModel,
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
+                shape = RoundedCornerShape(4.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                modifier = Modifier.height(36.dp)
+            ) {
+                Text("モデル選択", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+        }
         Spacer(modifier = Modifier.height(4.dp))
         // 技術的根拠1行：推敲は複数プロファイルを束ねるため能力表で絞らず、送信直前の解決則に可否を一任する（表示＝候補、反映＝解決則）。
         Text("推敲の思考レベル（空・継承＝翻訳と同じ）:", color = AppColors.textSecondary, fontSize = 9.sp)

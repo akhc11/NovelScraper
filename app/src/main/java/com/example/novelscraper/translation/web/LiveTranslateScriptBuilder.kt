@@ -10,7 +10,8 @@ object LiveTranslateScriptBuilder {
      * - 多重実行・ゾンビ再翻訳の遮断
      * - マウスホバー時のテキスト強調・バルーンツールチップの抑制
      * - element.js読込失敗時のロック固着防止 (onerror + watchdog + stale回復)
-     * - .goog-te-combo出現ポーリングで誤SUCCESSを防止
+     * - .goog-te-comboへchange配送後は翻訳済みマーカー検証を経てSUCCESSする (配送即SUCCESSの誤報告を防止)
+     * - 失敗時はgoogtrans残留を掃除し次頁の無断自動翻訳を防ぐ (成功時の自動継続は維持)
      */
     fun buildToggleLiveTranslateScript(): String {
         return """
@@ -22,8 +23,44 @@ object LiveTranslateScriptBuilder {
                             if (window.__gtWatchdog) { clearTimeout(window.__gtWatchdog); window.__gtWatchdog = null; }
                         } catch(e) {}
                     }
+                    function __gtClearGoogTransCookie() {
+                        try {
+                            var domains = ['', '.' + document.domain, document.domain, location.hostname, '.' + location.hostname];
+                            var paths = ['/', '', location.pathname];
+                            for (var d = 0; d < domains.length; d++) {
+                                for (var p = 0; p < paths.length; p++) {
+                                    var cookieStr = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC;";
+                                    if (domains[d]) cookieStr += " domain=" + domains[d] + ";";
+                                    if (paths[p]) cookieStr += " path=" + paths[p] + ";";
+                                    document.cookie = cookieStr;
+                                }
+                            }
+                            document.cookie = "googtrans=/auto/null; path=/;";
+                        } catch(e) {}
+                    }
+                    function __gtCleanGoogleDom() {
+                        // 技術的根拠1行：Undoと強制復元で除去対象がずれるとゾンビiframeが残るため同IIFE内は単一関数に集約する。
+                        try {
+                            var s = document.getElementById('__gt_script');
+                            if (s) s.remove();
+                            var gtElem = document.getElementById('google_translate_element');
+                            if (gtElem) gtElem.remove();
+                            var gtStyle = document.getElementById('__gt_custom_style');
+                            if (gtStyle) gtStyle.remove();
+                            var frames = document.querySelectorAll('.goog-te-banner-frame, .goog-te-menu-frame, iframe[id*=":1."], .skiptranslate, #goog-gt-tt, .goog-te-balloon-frame');
+                            for (var i = 0; i < frames.length; i++) {
+                                try { frames[i].remove(); } catch(e) {}
+                            }
+                            if (document.documentElement && document.documentElement.classList) {
+                                document.documentElement.classList.remove('translated-ltr', 'translated-rtl');
+                            }
+                            if (document.body && document.body.style) { document.body.style.top = ''; }
+                        } catch(e) {}
+                    }
                     function __gtFail(msg) {
                         __gtClearTimers();
+                        // 技術的根拠1行：失敗残留cookieは次頁の無断自動翻訳で原文バックアップを汚すため即時掃除する。
+                        __gtClearGoogTransCookie();
                         window.__liveTranslateActive = false;
                         window.__liveTranslateInProgress = false;
                         window.__liveTranslateStartTime = 0;
@@ -48,9 +85,11 @@ object LiveTranslateScriptBuilder {
                             window.AndroidBridge.onLiveTranslateStatus('ALREADY_JA');
                         }
                     }
-                    // URL変化検知を最初に (SPA遷移中の旧タイマーは破棄)
+                    // URL変化検知を最初に (SPA遷移中の旧タイマーは破棄。#断片のみはViewModelと揃えて無視)
+                    // 技術的根拠1行：断片遷移でbackupを捨てると同文書の復元が不能になるため基部比較にする。
                     var currentHref = window.location.href;
-                    if (window.__liveTranslateLastUrl !== currentHref) {
+                    var __gtBase = function(u) { var i = (u || '').indexOf('#'); return i < 0 ? (u || '') : (u || '').substring(0, i); };
+                    if (__gtBase(window.__liveTranslateLastUrl || '') !== __gtBase(currentHref)) {
                         __gtClearTimers();
                         window.__originalBodyHtml = null;
                         window.__liveTranslateActive = false;
@@ -95,33 +134,10 @@ object LiveTranslateScriptBuilder {
                             __gtClearTimers();
                             window.__liveTranslateStartTime = 0;
 
-                            // Cookie の完全無効化
-                            function clearGoogTrans() {
-                                var domains = ['', '.' + document.domain, document.domain, location.hostname, '.' + location.hostname];
-                                var paths = ['/', '', location.pathname];
-                                for (var d = 0; d < domains.length; d++) {
-                                    for (var p = 0; p < paths.length; p++) {
-                                        var cookieStr = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC;";
-                                        if (domains[d]) cookieStr += " domain=" + domains[d] + ";";
-                                        if (paths[p]) cookieStr += " path=" + paths[p] + ";";
-                                        document.cookie = cookieStr;
-                                    }
-                                }
-                                document.cookie = "googtrans=/auto/null; path=/;";
-                            }
-                            clearGoogTrans();
-
-                            // Google Translate 要素・iframe・スタイルの完全クリーンアップ
-                            var s = document.getElementById('__gt_script');
-                            if (s) s.remove();
-                            var gtElem = document.getElementById('google_translate_element');
-                            if (gtElem) gtElem.remove();
-                            var gtStyle = document.getElementById('__gt_custom_style');
-                            if (gtStyle) gtStyle.remove();
-                            var frames = document.querySelectorAll('.goog-te-banner-frame, iframe[id*=":1."], .skiptranslate, #goog-gt-tt, .goog-te-balloon-frame');
-                            for (var i = 0; i < frames.length; i++) {
-                                try { frames[i].remove(); } catch(e) {}
-                            }
+                            __gtClearGoogTransCookie();
+                            __gtCleanGoogleDom();
+                            window.__gtAttemptCombo = null;
+                            window.__gtLoadIdx = null;
 
                             // Google ランタイム変数の破棄 (ゾンビ自動監視の停止)
                             window.google = null;
@@ -210,13 +226,15 @@ object LiveTranslateScriptBuilder {
                         (document.body || document.documentElement).appendChild(container);
                     }
 
-                    // .goog-te-combo出現ポーリング (固定250msの誤SUCCESSを防止)
+                    // .goog-te-comboへchange配送後は翻訳済みマーカー検証を経てSUCCESSする (配送即SUCCESSの誤報告を防止)
                     // ローカル別名で世代を固定し、旧世代タイマーの混入を防ぐ。
+                    // 技術的根拠1行：comboへのchange配送は翻訳要求であり完了ではないため、translated-ltr/rtlまたはhighlightの出現で検証してからSUCCESSする。
+                    var __gtDispatched = false;
                     var __gtPoll = window.__gtAttemptCombo = function(left) {
                         if (__gtMyGen !== window.__gtGen) return;
                         if (!window.__liveTranslateActive) return;
                         var combo = document.querySelector('.goog-te-combo');
-                        if (combo) {
+                        if (combo && !__gtDispatched) {
                             try {
                                 combo.value = 'ja';
                                 combo.dispatchEvent(new Event('change', { bubbles: true }));
@@ -229,11 +247,26 @@ object LiveTranslateScriptBuilder {
                                 __gtFail('COMBO_DISPATCH_FAILED: ' + e.message);
                                 return;
                             }
-                            __gtSuccess();
-                            return;
+                            __gtDispatched = true;
+                            // 技術的根拠1行：配送直後はバックエンド適用前のためSUCCESSせず、下の翻訳済みマーカー検証に落とす。
                         }
+                        try {
+                            var de = document.documentElement;
+                            var cls = (de && de.className) || '';
+                            var translatedCls = (de && de.classList && (de.classList.contains('translated-ltr') || de.classList.contains('translated-rtl'))) || (cls.indexOf('translated') >= 0);
+                            var highlighted = document.querySelector('.goog-text-highlight, font.goog-text-highlight');
+                            var gadget = document.querySelector('.goog-te-gadget-simple, .goog-te-menu-frame, .goog-te-gadget');
+                            if ((translatedCls || highlighted) && (gadget || window.google)) {
+                                __gtSuccess();
+                                return;
+                            }
+                        } catch(e3) {}
                         if (left <= 0) {
-                            __gtFail('COMBO_NOT_FOUND: 翻訳UIの初期化に失敗 (CSPブロック/通信障害の可能性)');
+                            if (__gtDispatched) {
+                                __gtFail('TRANSLATE_NOT_APPLIED: 翻訳要求後に本文が置換されず (通信遮断/CSP/対象外言語の可能性)');
+                            } else {
+                                __gtFail('COMBO_NOT_FOUND: 翻訳UIの初期化に失敗 (CSPブロック/通信障害の可能性)');
+                            }
                             return;
                         }
                         window.__gtTimer = setTimeout(function() {
@@ -245,10 +278,10 @@ object LiveTranslateScriptBuilder {
                     window.googleTranslateElementInit = function() {
                         if (__gtMyGen !== window.__gtGen) return;
                         try {
+                            // 技術的根拠1行：SIMPLEはgadget-simple分岐に入りcomboを生成しないためlayout省略でdefault(comboあり)に戻す。
                             new google.translate.TranslateElement({
                                 pageLanguage: 'auto',
                                 includedLanguages: 'ja',
-                                layout: google.translate.TranslateElement.InlineLayout.SIMPLE,
                                 autoDisplay: false,
                                 multilanguagePage: true
                             }, 'google_translate_element');
@@ -317,6 +350,7 @@ object LiveTranslateScriptBuilder {
 
     /**
      * 強制的に原文へ復元するスクリプト
+     * 技術的根拠1行：IIFE毎にwindowスコープが切れるためトグル側ヘルパーは使えず同等の掃除を内包する。
      */
     fun buildRestoreScript(): String {
         return """
@@ -352,10 +386,16 @@ object LiveTranslateScriptBuilder {
                     if (gtElem) gtElem.remove();
                     var gtStyle = document.getElementById('__gt_custom_style');
                     if (gtStyle) gtStyle.remove();
-                    var frames = document.querySelectorAll('.goog-te-banner-frame, iframe[id*=":1."], .skiptranslate, #goog-gt-tt, .goog-te-balloon-frame');
+                    var frames = document.querySelectorAll('.goog-te-banner-frame, .goog-te-menu-frame, iframe[id*=":1."], .skiptranslate, #goog-gt-tt, .goog-te-balloon-frame');
                     for (var i = 0; i < frames.length; i++) {
                         try { frames[i].remove(); } catch(e) {}
                     }
+                    try {
+                        if (document.documentElement && document.documentElement.classList) {
+                            document.documentElement.classList.remove('translated-ltr', 'translated-rtl');
+                        }
+                        if (document.body && document.body.style) { document.body.style.top = ''; }
+                    } catch(e) {}
                     window.google = null;
                     window.googleTranslateElementInit = null;
 

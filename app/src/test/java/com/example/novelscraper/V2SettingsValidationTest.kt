@@ -8,6 +8,7 @@ import com.example.novelscraper.translation.v2.settings.V2PrevContext
 import com.example.novelscraper.translation.v2.settings.V2RefineSettings
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import com.example.novelscraper.translation.v2.settings.V2SplitSettings
+import com.example.novelscraper.translation.v2.settings.buildRefineProfile
 import com.example.novelscraper.translation.v2.settings.buildRefineProfileOverrides
 import com.example.novelscraper.translation.v2.ui.coercedV2Settings
 import com.example.novelscraper.translation.v2.ui.validateV2Settings
@@ -327,5 +328,65 @@ class V2SettingsValidationTest {
         val legacy = json.decodeFromString(V2Settings.serializer(), "{}")
         assertEquals(V2RefineSettings(), legacy.refine)
         assertTrue(buildRefineProfileOverrides(listOf(V2ModelProfile(id = "p1")), legacy.refine).isEmpty())
+    }
+
+    @Test
+    fun testRefineDedicatedModel_MissingKeysBlocks() {
+        // 専用モデル指定時は対応する鍵が必須（provider空＝gemini既定）。
+        val geminiMissing = validateV2Settings(
+            base().copy(
+                geminiKeys = emptyList(),
+                profiles = listOf(V2ModelProfile(providerId = "openrouter", model = "x/y")),
+                refine = V2RefineSettings(enabled = true, model = "gemini-2.5-pro")
+            )
+        )
+        assertTrue(geminiMissing.any { it.blocksSave && it.message.contains("Gemini") })
+        val orMissing = validateV2Settings(
+            base().copy(
+                openRouterKey = "",
+                refine = V2RefineSettings(enabled = true, providerId = "openrouter", model = "x/y")
+            )
+        )
+        assertTrue(orMissing.any { it.blocksSave && it.message.contains("OpenRouter") })
+    }
+
+    @Test
+    fun testRefineDedicatedModel_ThinkingCheckedAgainstDedicated() {
+        // 思考可否は翻訳群ではなく専用モデルで判定すること。
+        val settings = base().copy(
+            refine = V2RefineSettings(enabled = true, model = "gemma-4-31b-it", thinkingLevel = "high")
+        )
+        val issues = validateV2Settings(settings)
+        assertFalse(issues.any { it.blocksSave })
+        assertTrue(issues.any { it.message.startsWith("推敲(専用モデル)") && it.message.contains("thinkingLevel") })
+        assertTrue(issues.none { it.message.startsWith("推敲(モデル") })
+    }
+
+    @Test
+    fun testRefineDedicatedModel_UnknownProviderWarns() {
+        // 未知プロバイダーは送信層でOpenRouter扱いに倒れるため、警告に残す（保存は通す）。
+        val issues = validateV2Settings(
+            base().copy(
+                refine = V2RefineSettings(enabled = true, providerId = "mystery", model = "z")
+            )
+        )
+        assertFalse(issues.any { it.blocksSave })
+        assertTrue(issues.any { it.message.contains("推敲プロバイダー不明") })
+    }
+
+    @Test
+    fun testRefineDedicatedModel_SettingsJsonRoundTrip() {
+        // 新2項目は往復し、旧JSON（キーなし）は空＝継承になる。
+        val json = com.example.novelscraper.translation.v2.settings.DataStoreSettingsRepository.v2Json
+        val withRefine = V2Settings(
+            refine = V2RefineSettings(enabled = true, providerId = "openrouter", model = "x/y")
+        )
+        val decoded = json.decodeFromString(V2Settings.serializer(), json.encodeToString(V2Settings.serializer(), withRefine))
+        assertEquals("openrouter", decoded.refine.providerId)
+        assertEquals("x/y", decoded.refine.model)
+        val legacy = json.decodeFromString(V2Settings.serializer(), "{}")
+        assertEquals("", legacy.refine.providerId)
+        assertEquals("", legacy.refine.model)
+        assertNull(buildRefineProfile(legacy.refine))
     }
 }

@@ -354,4 +354,41 @@ class ScrapingStateMachineTest {
         val save2 = actions2.filterIsInstance<ScrapingStateMachine.Action.SaveAndContinue>().first()
         assertEquals("2", save2.chapterNum)
     }
+
+    @Test
+    fun testCfChallengeLoop_terminatesWithFinish() {
+        // 認証待ち→リロードの鎖は上限で確定終了すること（無限停滞の再現防止）。
+        val config = ScraperConfig(delay = "1")
+        val sm = ScrapingStateMachine(config, "https://example.com/1", "TestNovel")
+
+        var last: List<ScrapingStateMachine.Action> = emptyList()
+        repeat(ScrapingStateMachine.MAX_CF_WAITS) {
+            last = sm.onPageLoaded("https://example.com/1", "Just a moment...")
+            assertTrue(last.filterIsInstance<ScrapingStateMachine.Action.WaitForCF>().isNotEmpty())
+            assertTrue(last.filterIsInstance<ScrapingStateMachine.Action.Finish>().isEmpty())
+        }
+        last = sm.onPageLoaded("https://example.com/1", "Just a moment...")
+        val finish = last.filterIsInstance<ScrapingStateMachine.Action.Finish>()
+        assertEquals(1, finish.size)
+        assertTrue(last.filterIsInstance<ScrapingStateMachine.Action.WaitForCF>().isEmpty())
+    }
+
+    @Test
+    fun testCfWaitCount_resetsOnSuccess() {
+        // 一度でも正常取得できれば認証待ちカウンタはリセットされること。
+        val config = ScraperConfig(delay = "1")
+        val sm = ScrapingStateMachine(config, "https://example.com/1", "TestNovel")
+
+        sm.onPageLoaded("https://example.com/1", "Just a moment...")
+        sm.onPageLoaded("https://example.com/1", "Title 1")
+        val raw = """{"title":"第1話","content":"本文1","nextUrl":"","chapter":"","folderName":"TestNovel"}"""
+        sm.onJsResult(ScrapingStateMachine.JsPurpose.SCRAPE_PAGE, Json.encodeToString(raw))
+
+        // カウンタが戻っているため再び上限いっぱいまで待てること。
+        var last: List<ScrapingStateMachine.Action> = emptyList()
+        repeat(ScrapingStateMachine.MAX_CF_WAITS) {
+            last = sm.onPageLoaded("https://example.com/2", "Just a moment...")
+            assertTrue(last.filterIsInstance<ScrapingStateMachine.Action.WaitForCF>().isNotEmpty())
+        }
+    }
 }

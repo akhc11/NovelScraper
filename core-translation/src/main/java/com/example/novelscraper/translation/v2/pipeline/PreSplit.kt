@@ -136,6 +136,71 @@ private suspend fun clearSplitFiles(store: FileStore, novelDirUri: String, log: 
 }
 
 /**
+ * 一括削除の安全判定（pure）。分割成果物（part_*.txt＋宣言書）のみなら真。
+ * 想定外の1件でもあれば偽を返し、呼出側は個別削除に退行する。
+ * 技術的根拠1行：新規作成分でも利用者ファイル混入の可能性を名簿で閉じるため、消す前の1回列挙を必須にする。
+ */
+internal fun isBulkDeleteSafe(children: List<VDoc>): Boolean {
+    for (child in children) {
+        if (child.isDirectory) return false
+        val isPart = child.name.startsWith("part_", ignoreCase = true) &&
+            child.name.endsWith(".txt", ignoreCase = true)
+        if (!isPart && !child.name.equals(PRE_SPLIT_MANIFEST_NAME, ignoreCase = true)) return false
+    }
+    return true
+}
+
+/**
+ * 新規作成フォルダの高速ロールバック。単発削除を試し、消えたことを確認する。
+ * 失敗・想定外ファイル・残存のいずれもfalseを返し、呼出側は[FileStore.deleteRecursively]に退行する。
+ */
+internal suspend fun rollbackNewDirFast(
+    store: FileStore,
+    splitRootUri: String,
+    novelBase: String,
+    novelDirUri: String,
+    log: (String) -> Unit
+): Boolean {
+    val children = try {
+        store.children(novelDirUri)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (t: Throwable) {
+        log("後片付けの確認に失敗しました (${t.message})。個別削除に切り替えます")
+        return false
+    }
+    if (!isBulkDeleteSafe(children)) {
+        log("想定外のファイルがあるため個別削除に切り替えます")
+        return false
+    }
+    val deleted = try {
+        store.deleteDirectory(novelDirUri)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (t: Throwable) {
+        log("一括削除に失敗しました (${t.message})。個別削除に切り替えます")
+        return false
+    }
+    if (!deleted) {
+        log("一括削除が非対応のため個別削除に切り替えます")
+        return false
+    }
+    val gone = try {
+        store.findChild(splitRootUri, novelBase) == null
+    } catch (e: CancellationException) {
+        throw e
+    } catch (t: Throwable) {
+        log("一括削除の確認に失敗しました (${t.message})。個別削除に切り替えます")
+        return false
+    }
+    if (!gone) {
+        log("一括削除後にフォルダが残っているため個別削除に切り替えます")
+        return false
+    }
+    return true
+}
+
+/**
  * 既存フォルダの採用判定。宣言書が有効ならそれを返し、宣言書なしの旧配置は
  * 内容ハッシュを取り直して封印（移行受入れ）する。いずれも不可なら null。
  */
@@ -244,7 +309,10 @@ suspend fun splitSingleTextFile(
         // 技術的根拠1行：中断・失敗時の後片付けはNonCancellableで完遂させるため、ここの例外握りつぶしは意図的である。
         try {
             if (isNew) {
-                store.deleteRecursively(novelDir.uri)
+                // 技術的根拠1行：新規分は自成果物のみのはずだが名簿検証付き単発削除を先に試し、駄目なら個別削除に退行する（利用者ファイルには触れない）。
+                if (!rollbackNewDirFast(store, splitRootUri, novelBase, novelDir.uri, log)) {
+                    store.deleteRecursively(novelDir.uri)
+                }
             } else {
                 // 再利用フォルダでは分割成果物だけ消す（利用者のファイルには触れない）。
                 clearSplitFiles(store, novelDir.uri, log)

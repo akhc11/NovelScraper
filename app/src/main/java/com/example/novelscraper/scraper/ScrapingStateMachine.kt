@@ -55,6 +55,9 @@ class ScrapingStateMachine(
     // 循環ループ検知（A ➔ B ➔ C ➔ A などの無限ループを完全防止）
     private val visitedUrls = mutableSetOf<String>()
 
+    // Cloudflare認証待ちの連続回数（上限到達で確定終了し、無限リロードを防ぐ）
+    private var cfWaitCount = 0
+
     // SPA本文空振り防止（本文が非同期で遅れて届く場合の段階的待機カウンタ）
     var emptyContentRetryCount = 0
         private set
@@ -72,10 +75,9 @@ class ScrapingStateMachine(
         val actions = mutableListOf<Action>()
 
         if (CloudflareDetector.isCloudflareChallenge(pageTitle)) {
-            actions.add(Action.WaitForCF(CF_WAIT_DELAY_MS))
-            actions.add(Action.UpdateStatus("認証待ち..."))
-            return actions
+            return buildCfWaitActions()
         }
+        cfWaitCount = 0 // 通常ページ到達で認証待ちカウンタをリセット
 
         when (state) {
             State.INITIAL_CHECK -> actions.add(buildCheckFolderLinkAction())
@@ -103,6 +105,11 @@ class ScrapingStateMachine(
         return buildRetryActions("通信エラー: $errorCode")
     }
 
+    /** WebView操作自体に失敗した時の処理（破棄競合等）。回数上限付きリトライに寄せる。 */
+    fun onViewError(): List<Action> {
+        return buildRetryActions("ページ表示に失敗しました")
+    }
+
     /** ディレイ計算 (pure関数) */
     fun calculateDelay(): Long = calculateDelay(config.delay)
 
@@ -114,6 +121,22 @@ class ScrapingStateMachine(
     }
 
     // --- 内部ロジック ---
+
+    /**
+     * Cloudflare認証待ち指示（上限付き）。
+     * 技術的根拠1行：認証待ち→リロード→認証待ちの鎖に上限がないとタスクが永久に終わらず、同URLの再取得が死骸タスクに塞がれ続けるため、上限到達で確定終了させる。
+     */
+    private fun buildCfWaitActions(): List<Action> {
+        cfWaitCount++
+        return if (cfWaitCount <= MAX_CF_WAITS) {
+            listOf(
+                Action.WaitForCF(CF_WAIT_DELAY_MS),
+                Action.UpdateStatus("認証待ち... ($cfWaitCount/$MAX_CF_WAITS)")
+            )
+        } else {
+            listOf(Action.Finish("認証が通らないため停止しました"))
+        }
+    }
 
     private fun buildCheckFolderLinkAction(): Action {
         if (config.folderLink.isEmpty()) {
@@ -178,10 +201,7 @@ class ScrapingStateMachine(
             val rawResult = Json.decodeFromString<String>(rawJson)
 
             if (CloudflareDetector.isCFDetectedResult(rawResult)) {
-                return listOf(
-                    Action.WaitForCF(CF_WAIT_DELAY_MS),
-                    Action.UpdateStatus("認証待ち...")
-                )
+                return buildCfWaitActions()
             }
             if (rawResult.startsWith("JS_ERROR")) {
                 return buildRetryActions(rawResult)
@@ -255,6 +275,7 @@ class ScrapingStateMachine(
             visitedUrls.add(currentUrl)
             lastSuccessUrl = currentUrl
             retryCount = 0
+            cfWaitCount = 0 // 正常取得で認証待ちカウンタもリセット
             actions.add(Action.UpdateStatus("保存: $chapNum ${title.take(10)}..."))
 
             val shouldStop = isEndDetected(data.nextUrl, title)
@@ -297,6 +318,8 @@ class ScrapingStateMachine(
         private const val MAX_RETRIES = 5
         private const val RETRY_DELAY_MS = 10000L
         private const val CF_WAIT_DELAY_MS = 5000L
+        // Cloudflare認証待ちの上限（約30秒＋各ロード時間）。上限到達で確定終了する。
+        const val MAX_CF_WAITS = 6
 
         // SPA本文待機スマートリトライ設定（超低速回線対応: 最低1.5秒保証）
         private const val MAX_EMPTY_CONTENT_RETRIES = 3

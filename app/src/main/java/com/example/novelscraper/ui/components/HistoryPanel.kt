@@ -10,7 +10,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
-import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -38,20 +37,25 @@ fun HistoryPanel(
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier.fillMaxSize().background(AppColors.backgroundDarkest)) {
-        // ヘッダー行（全パネル統一形式: 機能名 + 右側に閉じるボタン）
+        // ヘッダー行（タブ＋閉じるボタンを1行に集約）
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(AppColors.backgroundDark)
-                .padding(horizontal = 15.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "履歴",
-                color = AppColors.textPrimary,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
+            HeaderTabButton(
+                title = "実行中",
+                selected = activeTab == 0,
+                onClick = { onTabSelected(0) },
+                modifier = Modifier.weight(1f)
+            )
+            HeaderTabButton(
+                title = "履歴",
+                selected = activeTab == 1,
+                onClick = { onTabSelected(1) },
+                modifier = Modifier.weight(1f)
             )
             Button(
                 onClick = onCloseClick,
@@ -63,24 +67,6 @@ fun HistoryPanel(
             }
         }
 
-        val tabs = remember { listOf("実行中", "履歴") }
-        TabRow(
-            selectedTabIndex = activeTab,
-            containerColor = AppColors.backgroundDark,
-            contentColor = Color.White,
-            indicator = { tabPositions ->
-                TabRowDefaults.SecondaryIndicator(Modifier.tabIndicatorOffset(tabPositions[activeTab]), color = AppColors.accentTeal)
-            }
-        ) {
-            tabs.forEachIndexed { index, title ->
-                Tab(
-                    selected = activeTab == index,
-                    onClick = { onTabSelected(index) },
-                    text = { Text(title, fontWeight = FontWeight.Bold, fontSize = 14.sp) }
-                )
-            }
-        }
-        
         Box(modifier = Modifier.weight(1f).padding(top = 4.dp)) {
             if (activeTab == 0) {
                 RunningTasksList(activeTasks, onStopTaskClick)
@@ -88,6 +74,35 @@ fun HistoryPanel(
                 HistoryList(history, onHistoryItemClick, onHistoryResumeClick, onDeleteHistoryClick)
             }
         }
+    }
+}
+
+@Composable
+private fun HeaderTabButton(
+    title: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = title,
+            color = if (selected) Color.White else AppColors.textSecondary,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp
+        )
+        Spacer(modifier = Modifier.height(3.dp))
+        Box(
+            modifier = Modifier
+                .width(32.dp)
+                .height(2.dp)
+                .background(if (selected) AppColors.accentTeal else Color.Transparent)
+        )
     }
 }
 

@@ -16,16 +16,20 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -56,7 +60,6 @@ data class MainScreenCallbacks(
     val onSetupWebView: (WebView) -> Unit,
     val onInjectInspector: (WebView?) -> Unit,
     val onRemoveInspector: (WebView?) -> Unit,
-    val onNavigate: (String, WebView) -> Unit,
     val onRequestExclude: (String) -> Unit,
     val onTestRun: (WebView) -> Unit,
     val onToggleLiveTranslate: (WebView?) -> Unit
@@ -82,6 +85,10 @@ fun MainScreen(
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     // レンダラープロセス死亡時の再生成キー（破棄済みWebViewは再利用禁止が公式要件）。
     var webViewKey by remember { mutableIntStateOf(0) }
+    // パネル系表示中は背後のWebViewへ一切触らせない（表示層と相互運用層の両方で使う単一判定）。
+    val blocksTouchBehindPanel = uiState.overlay is Overlay.Panel || uiState.overlay is Overlay.TestResult
+    // 回転・プロセス死からの復帰用にWebViewの履歴・スクロールを退避する（公式PersistentWebView方式）。
+    val webViewStateBundle = rememberSaveable { android.os.Bundle() }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -93,6 +100,19 @@ fun MainScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let { viewModel.importPresets(it) }
+    }
+
+    var backupIncludeKeys by remember { mutableStateOf(false) }
+    val backupExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        uri?.let { viewModel.exportBackup(it, backupIncludeKeys) }
+    }
+
+    val backupImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { viewModel.importBackup(it) }
     }
 
     val folderLauncher = rememberLauncherForActivityResult(
@@ -171,23 +191,8 @@ fun MainScreen(
         }
     }
 
-    // URL変更時のナビゲーション（正規化比較により同一URLの不要な二重リロードを完全防止）
-    // 発火点はここ1箇所に集約。webViewRefもキーに含め、冷起動・WebView再生成時の取りこぼしを防ぐ。
-    // SSoTはViewModel.currentUrl。factory側で直接loadしない（二重発火防止）。
-    // 技術的根拠1行：リダイレクト鎖の各hopコールバックが状態を前進させる度に旧hopへ再loadUrlすると鎖が再発火し地址欄が往復するため、直近要求済みは再要求しない（AOSP: loadUrlは現行ロードをcancelする）。
-    val recentNav = remember(webViewRef) { RecentNavigationDedup() }
-    LaunchedEffect(uiState.currentUrl, webViewRef) {
-        val view = webViewRef
-        if (view != null && uiState.currentUrl.isNotEmpty()) {
-            val currentNormalized = view.url?.trimEnd('/') ?: ""
-            val targetNormalized = uiState.currentUrl.trimEnd('/')
-            if (currentNormalized != targetNormalized &&
-                recentNav.shouldRequest(targetNormalized, android.os.SystemClock.elapsedRealtime())
-            ) {
-                callbacks.onNavigate(uiState.currentUrl, view)
-            }
-        }
-    }
+    // URL変更時のナビゲーションは行わない（イベント駆動に一本化）。
+    // 技術的根拠1行：状態変化の度にloadUrlするとリンクタップ・リダイレクトの現行ロードをcancelし(AOSP)ページ遷移が壊れるため、外部要求はViewModel.navigateTo→Activity収集点で一発loadUrlし、ページ内遷移はWebViewClient報告の表示更新に留める。生成時はfactoryの初期ロードが担う。
 
     Scaffold(
         topBar = {
@@ -215,8 +220,8 @@ fun MainScreen(
                     viewModel.togglePanel(PanelType.FAVORITES)
                 },
                 onUrlSubmit = { url ->
-                    // ナビゲーション発火はLaunchedEffect(currentUrl)に一本化し二重loadUrlを防ぐ。
-                    viewModel.setCurrentUrl(url)
+                    // 外部遷移要求は one-shot コマンドで一発配送する（状態駆動loadUrlはしない）。
+                    viewModel.navigateTo(url)
                 },
                 onUrlChange = { viewModel.setInputUrl(it) },
                 onPanelToggle = { panel ->
@@ -248,18 +253,29 @@ fun MainScreen(
                     val url = liveUrl ?: uiState.currentUrl
                     if (url.isNotEmpty()) {
                         if (liveUrl != null && liveUrl != uiState.currentUrl) {
-                            viewModel.setCurrentUrl(liveUrl)
+                            viewModel.onWebViewUrlChanged(liveUrl)
                         }
                         val currentTask = activeTasks.firstOrNull { it.currentUrl == url || it.startUrl == url }
                         if (currentTask != null) {
+                            // 技術的根拠1行：stopだけでは一覧に死骸が残り以降のタップが永久に空振りするため、停止と同時に除去する。既に死んでいた場合は掃除して新規開始する。
+                            val wasRunning = currentTask.isRunning
                             currentTask.stop()
+                            viewModel.removeTask(currentTask)
+                            if (!wasRunning) {
+                                viewModel.startScraping(url)
+                            }
                         } else {
                             viewModel.startScraping(url)
                         }
                     }
                 },
                 onTestRunClick = {
-                    webViewRef?.let { callbacks.onTestRun(it) }
+                    // 設定・履歴パネルと同様のトグル動作：表示中なら閉じ、非表示なら実行する。
+                    if (uiState.overlay is Overlay.TestResult) {
+                        viewModel.setTestResult(null)
+                    } else {
+                        webViewRef?.let { callbacks.onTestRun(it) }
+                    }
                 },
                 onSearchTextQueryClick = {
                     viewModel.showTextQuerySearchDialog()
@@ -296,13 +312,28 @@ fun MainScreen(
                             WebViewHelper.applyDarkMode(this, uiState.isWebViewDarkMode)
                             tag = uiState.isWebViewDarkMode
                             callbacks.onSetupWebView(this)
-                            
+                            // 生成時の初期表示は一度きり。退避済み履歴があれば復元し、なければ共有URL等のcurrentUrlを開く。
+                            // 以降の外部遷移はViewModel.navigateTo→Activity収集点の一発loadUrlに任せ、ここでは撃たない。
+                            val restored = try {
+                                val inner = webViewStateBundle.getBundle("WEBVIEW_STATE")
+                                inner != null && restoreState(inner) != null
+                            } catch (_: Exception) {
+                                false
+                            }
+                            if (!restored) {
+                                val initialUrl = viewModel.uiState.value.currentUrl
+                                if (initialUrl.isNotEmpty()) {
+                                    loadUrl(initialUrl)
+                                }
+                            }
+
                             webViewClient = object : WebViewClient() {
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                     super.onPageStarted(view, url, favicon)
                                     url?.let {
                                         if (it.isNotEmpty() && !it.startsWith("javascript:") && !it.startsWith("data:")) {
-                                            viewModel.setCurrentUrl(it)
+                                            // ページ内遷移の報告は表示更新のみ。loadUrlは発行しない。
+                                            viewModel.onWebViewUrlChanged(it)
                                         }
                                     }
                                 }
@@ -311,7 +342,7 @@ fun MainScreen(
                                     super.doUpdateVisitedHistory(view, url, isReload)
                                     url?.let {
                                         if (it.isNotEmpty() && !it.startsWith("javascript:") && !it.startsWith("data:")) {
-                                            viewModel.setCurrentUrl(it)
+                                            viewModel.onWebViewUrlChanged(it)
                                         }
                                     }
                                 }
@@ -320,7 +351,7 @@ fun MainScreen(
                                     super.onPageFinished(view, url)
                                     url?.let {
                                         if (it.isNotEmpty() && !it.startsWith("javascript:") && !it.startsWith("data:")) {
-                                            viewModel.setCurrentUrl(it)
+                                            viewModel.onWebViewUrlChanged(it)
                                             // LiveTranslateのgoogtransクッキーをここで消さない。
                                             // JSが翻訳トリガに設定した直後のページで消すと競合し、
                                             // 次ページ遷移時の自動継続も阻害するため、明示的な
@@ -351,7 +382,13 @@ fun MainScreen(
                         }
                     },
                     update = { view ->
-                        view.isEnabled = uiState.overlay == Overlay.None || uiState.overlay is Overlay.InspectMode
+                        // 技術的根拠1行：子ネイティブViewにはComposeより先にView配送で届き、down/upはCompose消費より先に渡される（公式PointerInteropFilter）。
+                        // よってisEnabledやComposeスクリムではタップを止め切れない。重なり表示中はOnTouchListenerで握り潰す（View機構上リスナーが既定動作より先に呼ばれる保証がある）。
+                        if (blocksTouchBehindPanel) {
+                            view.setOnTouchListener { _, _ -> true }
+                        } else {
+                            view.setOnTouchListener(null)
+                        }
                         if (view.settings.blockNetworkImage != uiState.blockImages) {
                             view.settings.blockNetworkImage = uiState.blockImages
                         }
@@ -371,6 +408,35 @@ fun MainScreen(
                             clip = true
                             alpha = if (uiState.overlay == Overlay.None || uiState.overlay is Overlay.InspectMode) 1f else 0f
                         }
+                        .pointerInput(blocksTouchBehindPanel) {
+                            // 技術的根拠1行：相互運用はdown/upをInitialパスでネイティブへ直送するため、Mainパス消費では間に合わない。外側修飾子としてInitialで消費し、内部配送を不発にする。
+                            awaitEachGesture {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    if (blocksTouchBehindPanel) {
+                                        event.changes.forEach { it.consume() }
+                                    }
+                                }
+                            }
+                        },
+                    onRelease = { view ->
+                        // 破棄前に履歴・スクロールを退避し、旧インスタンスは必ず破棄する（回転のたびの蓄積を防ぐ）。
+                        // 技術的根拠1行：saveStateは1MB制限超過で例外になり得るため失敗時は退避を諦めてcurrentUrl方式に委ね、destroyは公式要件のため退避成否に関わらず実行する。
+                        try {
+                            val bundle = android.os.Bundle()
+                            if (view.saveState(bundle) != null) {
+                                webViewStateBundle.putBundle("WEBVIEW_STATE", bundle)
+                            }
+                        } catch (_: Exception) {
+                        }
+                        try {
+                            view.destroy()
+                        } catch (_: Exception) {
+                        }
+                        if (webViewRef === view) {
+                            webViewRef = null
+                        }
+                    }
                 )
                 }
 
@@ -431,6 +497,11 @@ fun MainScreen(
                             onConfigChange = { newConfig -> viewModel.updateCurrentConfig { newConfig } },
                             onImportPresetsClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
                             onExportPresetsClick = { exportLauncher.launch("novel_scraper_presets.json") },
+                            onExportBackupClick = { includeKeys ->
+                                backupIncludeKeys = includeKeys
+                                backupExportLauncher.launch("novel_scraper_backup.json")
+                            },
+                            onImportBackupClick = { backupImportLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) },
                             onToggleWebViewDarkModeClick = { viewModel.toggleWebViewDarkMode() },
                             currentUrl = uiState.currentUrl
                         )
@@ -444,8 +515,7 @@ fun MainScreen(
                             onCloseClick = { viewModel.closePanels() },
                             onStopTaskClick = { task -> task.stop(); viewModel.removeTask(task) },
                             onHistoryItemClick = { url ->
-                                // setCurrentUrlがinputUrlも同期するため重複setはしない。遷移はLaunchedEffectに一本化。
-                                viewModel.setCurrentUrl(url)
+                                viewModel.navigateTo(url)
                                 viewModel.closePanels()
                             },
                             onHistoryResumeClick = { folder ->
@@ -468,7 +538,7 @@ fun MainScreen(
                         FavoritesPanel(
                             favorites = favorites,
                             onFavoriteClick = { url ->
-                                viewModel.setCurrentUrl(url)
+                                viewModel.navigateTo(url)
                                 viewModel.closePanels()
                             },
                             onDeleteClick = { name -> viewModel.deleteFavorite(name) },
@@ -498,8 +568,8 @@ fun MainScreen(
                                     TranslationEngine.PAPAGO -> "https://papago.naver.com/?sk=ko&tk=ja"
                                     TranslationEngine.LLM_API -> "https://aistudio.google.com/"
                                 }
-                                // 遷移はLaunchedEffect(currentUrl)に一本化。
-                                viewModel.setCurrentUrl(targetUrl)
+                                // 外部遷移要求は one-shot コマンドで一発配送する。
+                                viewModel.navigateTo(targetUrl)
                                 viewModel.closePanels()
                             },
                             onCloseClick = { viewModel.closePanels() }
@@ -623,9 +693,15 @@ fun MainScreen(
                     onConfirm = { targets, result ->
                         val engine = uiState.activeTranslationEngine
                         if (engine == TranslationEngine.LLM_API) {
-                            val entries = PickerTargetAdapter.toV2FolderEntries(targets)
-                            v2ViewModel.addFolderEntries(entries)
-                            Toast.makeText(context, "フォルダ${entries.size}件を登録しました", Toast.LENGTH_SHORT).show()
+                            val v2targets = PickerTargetAdapter.toV2FolderTargets(targets)
+                            v2ViewModel.addFolderTargets(v2targets)
+                            val fileTotal = v2targets.sumOf { it.fileUris.size }
+                            val msg = if (fileTotal > 0) {
+                                "フォルダ${v2targets.size}件・選択${fileTotal}件を登録しました"
+                            } else {
+                                "フォルダ${v2targets.size}件を登録しました"
+                            }
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                         } else {
                             val items = PickerTargetAdapter.toWebFolderItems(targets)
                             viewModel.addTranslationFolderItems(engine, items)

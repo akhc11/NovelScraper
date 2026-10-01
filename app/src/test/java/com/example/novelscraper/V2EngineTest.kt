@@ -25,6 +25,7 @@ import com.example.novelscraper.translation.v2.settings.V2DictSettings
 import com.example.novelscraper.translation.v2.settings.V2Limits
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2PrevContext
+import com.example.novelscraper.translation.v2.settings.V2RefineSettings
 import com.example.novelscraper.translation.v2.settings.V2Settings
 import com.example.novelscraper.translation.v2.settings.V2SplitSettings
 import kotlinx.coroutines.CoroutineScope
@@ -1298,9 +1299,96 @@ class V2EngineTest {
         val summary = engine.run(listOf(folder.uri), settings)
         assertFalse(summary.aborted)
         assertEquals(1, summary.completedFiles)
-        // Korean source + auto => prompt 3 (Hanja name rules), not prompt 1.
+        // Korean source + auto => prompt 3 (Korean base prompt), not prompt 1.
+        // 技術的根拠1行：自動選択の検証は基底文の現在の一意識別行で指紋照合する（旧"Hanja"行は基底文改訂で消滅したためstale）。
         assertTrue(seen.isNotEmpty())
-        assertTrue(seen.any { it.contains("Hanja") })
+        assertTrue(seen.any { it.contains("韓国語の小説テキスト") })
+        assertTrue(seen.none { it.contains("ライトノベル調で自然な日本語に意訳") })
+    }
+
+    @Test
+    fun testRunEngine_RefineDedicatedModel() = kotlinx.coroutines.runBlocking {
+        // 推敲専用モデル指定時は磨きだけ別モデルで送り、翻訳は原本のまま（混入なし）。磨き採用まで一気通貫すること。
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel")
+        val doc = store.createFile(folder.uri, "a.txt", "text/plain")!!
+        store.writeText(doc.uri, "주인공은 평범한 소년이었다。\n어느 날 신비한 힘을 각성했다。\n")
+        val seen = mutableListOf<String>()
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                synchronized(seen) { seen.add(request.model + "|" + request.systemPrompt.contains("POLISH-IT")) }
+                return if (request.systemPrompt.contains("POLISH-IT")) {
+                    LlmResult.Success("主人公は平凡な少年だった。\nある日不思議な力に覚醒した！")
+                } else {
+                    LlmResult.Success("主人公は平凡な少年だった。\nある日不思議な力に覚醒した。\n[SRC_END]")
+                }
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, _, _ -> handler }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0),
+            refine = V2RefineSettings(enabled = true, prompt = "POLISH-IT", model = "gemini-2.5-pro")
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(1, summary.completedFiles)
+        // 翻訳は原本・磨きは専用モデルで送ること。
+        assertTrue(seen.any { it == "gemini-3.5-flash|false" })
+        assertTrue(seen.any { it == "gemini-2.5-pro|true" })
+        assertTrue(seen.none { it.startsWith("gemini-2.5-pro|false") })
+        // 磨き文が採用されて保存されること。
+        val outDir = store.findChild(folder.uri, "翻訳完了_LLM")
+        assertNotNull(outDir)
+        val outFile = store.findChild(outDir!!.uri, "a.txt")
+        val saved = store.readText(outFile!!.uri) ?: ""
+        assertTrue(saved.contains("覚醒した！"))
+    }
+
+    @Test
+    fun testRunEngine_RefineDedicatedOpenRouterKey() = kotlinx.coroutines.runBlocking {
+        // 推敲専用がOpenRouter指定時は専用鍵で送り、翻訳は原本の鍵のまま（鍵の取り違えなし）。
+        val store = InMemoryFileStore()
+        val folder = store.createRoot("novel-or")
+        val doc = store.createFile(folder.uri, "a.txt", "text/plain")!!
+        store.writeText(doc.uri, "주인공은 평범한 소년이었다。\n어느 날 신비한 힘을 각성했다。\n")
+        val seenKeys = mutableListOf<String>()
+        val handler = object : ProviderHandler {
+            override suspend fun call(request: LlmRequest): LlmResult {
+                return if (request.systemPrompt.contains("POLISH-IT")) {
+                    LlmResult.Success("主人公は平凡な少年だった。\nある日不思議な力に覚醒した！")
+                } else {
+                    LlmResult.Success("主人公は平凡な少年だった。\nある日不思議な力に覚醒した。\n[SRC_END]")
+                }
+            }
+        }
+        val engine = RunEngine(
+            store = store,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            options = EngineOptions(workerStaggerSec = 0, minSendIntervalMs = 0L),
+            handlerFactory = { _, profile, key ->
+                synchronized(seenKeys) { seenKeys.add(profile.model + "|" + key) }
+                handler
+            }
+        )
+        val settings = V2Settings(
+            geminiKeys = listOf("k1"),
+            openRouterKey = "or",
+            profiles = listOf(V2ModelProfile(providerId = "gemini", model = "gemini-3.5-flash")),
+            limits = V2Limits(parallelWorkers = 1, requestDelaySec = 0),
+            refine = V2RefineSettings(enabled = true, prompt = "POLISH-IT", providerId = "openrouter", model = "x/y")
+        )
+        val summary = engine.run(listOf(folder.uri), settings)
+        assertFalse(summary.aborted)
+        assertEquals(1, summary.completedFiles)
+        assertTrue(seenKeys.any { it == "gemini-3.5-flash|k1" })
+        assertTrue(seenKeys.any { it == "x/y|or" })
     }
 
     @Test

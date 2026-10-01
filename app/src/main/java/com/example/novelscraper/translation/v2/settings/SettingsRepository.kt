@@ -9,6 +9,7 @@ import com.example.novelscraper.translation.v2.domain.TranslationLimits
 import com.example.novelscraper.translation.v2.domain.V2DeclaredEncoding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -74,6 +75,32 @@ class DataStoreSettingsRepository(private val context: Context) : SettingsReposi
         withContext(Dispatchers.Default) {
             importLegacySettings(rawJson)
         }
+
+    /**
+     * 全体バックアップ用：生設定JSONの排出（検証なし・そのまま）。
+     * 技術的根拠1行：DataStoreの多重オープンを避けるため排出・取込口は所有者に出す。
+     */
+    suspend fun exportValue(): String? = withContext(Dispatchers.IO) {
+        try {
+            context.v2DataStore.data.map { it[Keys.SETTINGS] }.first()
+        } catch (e: Exception) {
+            android.util.Log.w("V2Settings", "export failed", e)
+            null
+        }
+    }
+
+    /**
+     * 全体バックアップ用：検証して採用。破損時は書かずfalse（既存保護）。
+     */
+    suspend fun importValue(raw: String): Boolean = withContext(Dispatchers.IO) {
+        val decoded = try {
+            v2Json.decodeFromString(V2Settings.serializer(), raw)
+        } catch (_: Exception) {
+            return@withContext false
+        }
+        save(decoded)
+        true
+    }
 
     companion object {
         val v2Json = Json {

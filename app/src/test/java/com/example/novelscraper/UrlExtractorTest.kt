@@ -115,4 +115,35 @@ class UrlExtractorTest {
         assertNull(UrlExtractor.extractUrlFromCandidates(null, "", "URLなしの文章です。"))
         assertNull(UrlExtractor.extractUrlFromCandidates())
     }
+
+    @Test
+    fun testResolveNavigationTarget_fullUrlPassthrough() {
+        assertEquals(
+            "https://ncode.syosetu.com/n12345/1/",
+            UrlExtractor.resolveNavigationTarget("https://ncode.syosetu.com/n12345/1/")
+        )
+    }
+
+    @Test
+    fun testResolveNavigationTarget_domainWithoutScheme() {
+        assertEquals(
+            "https://ncode.syosetu.com/n12345/1/",
+            UrlExtractor.resolveNavigationTarget("ncode.syosetu.com/n12345/1/")
+        )
+    }
+
+    @Test
+    fun testResolveNavigationTarget_searchFallback() {
+        val result = UrlExtractor.resolveNavigationTarget("異世界転生 おすすめ")
+        assertEquals(
+            "https://www.google.com/search?q=" + java.net.URLEncoder.encode("異世界転生 おすすめ", "UTF-8"),
+            result
+        )
+    }
+
+    @Test
+    fun testResolveNavigationTarget_blank() {
+        assertEquals("", UrlExtractor.resolveNavigationTarget(null))
+        assertEquals("", UrlExtractor.resolveNavigationTarget("   "))
+    }
 }

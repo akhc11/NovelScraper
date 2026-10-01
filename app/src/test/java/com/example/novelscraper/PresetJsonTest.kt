@@ -36,6 +36,34 @@ class PresetJsonTest {
     }
 
     @Test
+    fun testSaveDirBackwardCompatibility() {
+        // saveDirの無い旧プリセットJSONは空文字として読めること
+        val oldJsonStr = """
+            {
+                "OldPreset": {
+                    "folder": "#novel_title",
+                    "body": "#honbun"
+                }
+            }
+        """.trimIndent()
+        val oldImported = json.decodeFromString<Map<String, ScraperConfig>>(oldJsonStr)
+        assertEquals("", oldImported["OldPreset"]?.saveDir)
+
+        // saveDir付きは保持されること
+        val newJsonStr = """
+            {
+                "NewPreset": {
+                    "folder": "#novel_title",
+                    "body": "#honbun",
+                    "saveDir": "韓国小説"
+                }
+            }
+        """.trimIndent()
+        val newImported = json.decodeFromString<Map<String, ScraperConfig>>(newJsonStr)
+        assertEquals("韓国小説", newImported["NewPreset"]?.saveDir)
+    }
+
+    @Test
     fun testEmptyPresetJsonValidation() {
         // 空のJSONデータのバリデーションテスト
         val jsonStr = "{}"

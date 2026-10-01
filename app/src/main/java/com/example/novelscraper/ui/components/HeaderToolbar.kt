@@ -142,7 +142,7 @@ fun HeaderToolbar(
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 ToolButton(Icons.Filled.Settings, { onPanelToggle(PanelType.SETTINGS) }, uiState.activePanelType == PanelType.SETTINGS)
-                ToolButton(Icons.Filled.CheckCircle, onTestRunClick, false, AppColors.surfaceLight)
+                ToolButton(Icons.Filled.CheckCircle, onTestRunClick, uiState.isTestResultShowing, AppColors.surfaceLight)
                 ToolButton(Icons.Filled.Search, onInspectModeToggle, uiState.isInspectMode, if (uiState.isInspectMode) AppColors.inspectActive else AppColors.surfaceMedium)
                 
                 // 即時翻訳ボタン (🌐): Kiwi / TWP スタイルのインプレースDOM翻訳

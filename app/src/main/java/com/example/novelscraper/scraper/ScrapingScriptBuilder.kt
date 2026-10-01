@@ -151,6 +151,140 @@ object ScrapingScriptBuilder {
         }
     """.trimIndent()
 
+    // --- Shadow DOM pierce ヘルパ（open専用。closedはnullのため対象外） ---
+    // 技術的根拠1行：取得系がdocument.*直叩き・対象が別ツリーshadowRootという責務不一致をpierce層で吸収する。
+    // 注意: cloneNodeではshadowが複写されない（既定clonable:false）ためホストclone流用を避けshadow実体で合成する。
+    private val JS_SHADOW_PIERCE = """
+        function hasPierce(sel) { return !!sel && String(sel).indexOf('>>>') >= 0; }
+        function splitPierce(sel) {
+            return String(sel).split('>>>').map(function(s){ return s.trim(); }).filter(function(s){ return !!s; });
+        }
+        function queryPierceAll(sel, root) {
+            if (!sel) return [];
+            var startRoot = root || document;
+            if (String(sel).indexOf('>>>') < 0) {
+                try { return Array.from(startRoot.querySelectorAll(sel)); } catch(e){ return []; }
+            }
+            var parts = String(sel).split('>>>').map(function(s){ return s.trim(); }).filter(Boolean);
+            if (!parts.length) return [];
+            var currents = [startRoot];
+            for (var i = 0; i < parts.length; i++) {
+                var part = parts[i];
+                var isLast = (i === parts.length - 1);
+                var nextEls = [];
+                for (var c = 0; c < currents.length; c++) {
+                    var base = currents[c];
+                    var found = [];
+                    try { found = Array.from(base.querySelectorAll(part)); } catch(e){ continue; }
+                    if (isLast) {
+                        for (var k = 0; k < found.length; k++) nextEls.push(found[k]);
+                    } else {
+                        for (var k2 = 0; k2 < found.length; k2++) {
+                            try { if (found[k2].shadowRoot) nextEls.push(found[k2].shadowRoot); } catch(e){}
+                        }
+                    }
+                }
+                if (isLast) return nextEls;
+                currents = nextEls;
+                if (!currents.length) return [];
+            }
+            return [];
+        }
+        function queryPierceFirst(sel, root) {
+            try { var a = queryPierceAll(sel, root); return a.length ? a[0] : null; } catch(e){ return null; }
+        }
+        function qsFirst(sel) {
+            if (!sel) return null;
+            try {
+                if (String(sel).indexOf('>>>') >= 0) return queryPierceFirst(sel);
+                return document.querySelector(sel);
+            } catch(e){ return null; }
+        }
+        function qsAll(sel) {
+            if (!sel) return [];
+            try {
+                if (String(sel).indexOf('>>>') >= 0) return queryPierceAll(sel);
+                return Array.from(document.querySelectorAll(sel));
+            } catch(e){ return []; }
+        }
+        function isUniqueInRoot(sel, root) {
+            try { return root.querySelectorAll(sel).length === 1; } catch(e){ return false; }
+        }
+        function getInnerSelector(el, root) {
+            if (!el || el.nodeType !== 1 || !root) return '';
+            var path = [];
+            var cur = el;
+            var guard = 0;
+            while (cur && cur.nodeType === 1 && cur !== root && guard < 6) {
+                guard++;
+                var tag = (cur.tagName || '').toLowerCase() || '*';
+                var s = null;
+                try { s = shortSelector(cur); } catch(e){}
+                if (s) {
+                    try { if (root.querySelectorAll(s).length === 1) { path.unshift(s); break; } } catch(e){}
+                }
+                var sib = cur;
+                var nth = 1;
+                while (sib = sib.previousElementSibling) {
+                    try { if ((sib.tagName || '').toLowerCase() === tag) nth++; } catch(e){}
+                }
+                path.unshift(tag + (nth > 1 ? ':nth-of-type(' + nth + ')' : ''));
+                cur = cur.parentNode;
+                if (!cur || cur === root) break;
+            }
+            return path.join(' > ');
+        }
+        function getPierceSelector(el) {
+            if (!el || el.nodeType !== 1) return '';
+            var parts = [];
+            var cur = el;
+            var guard2 = 0;
+            while (cur && cur.nodeType === 1 && guard2 < 6) {
+                guard2++;
+                var root = null;
+                try { root = cur.getRootNode ? cur.getRootNode() : null; } catch(e){}
+                var inShadow = root && root.nodeType === 11 && root.host;
+                if (inShadow) {
+                    var inner = '';
+                    try { inner = getInnerSelector(cur, root); } catch(e){}
+                    if (!inner) inner = (cur.tagName || '').toLowerCase() || '*';
+                    parts.unshift(inner);
+                    cur = root.host;
+                } else {
+                    var hostSel = '';
+                    try { hostSel = shortSelector(cur) || getUniqueSelector(cur); } catch(e){}
+                    if (!hostSel) hostSel = (cur.tagName || '').toLowerCase() || '*';
+                    parts.unshift(hostSel);
+                    break;
+                }
+            }
+            return parts.join(' >>> ');
+        }
+        function collectPierceTextNodes(maxNodes) {
+            var out = [];
+            var limit = maxNodes || 8000;
+            function walkRoot(root) {
+                if (!root || out.length >= limit) return;
+                try {
+                    var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+                    var n = null;
+                    while ((n = w.nextNode())) {
+                        out.push(n);
+                        if (out.length >= limit) return;
+                    }
+                } catch(e){}
+                var els = null;
+                try { els = root.querySelectorAll('*'); } catch(e){ return; }
+                for (var i = 0; i < els.length; i++) {
+                    if (out.length >= limit) return;
+                    try { if (els[i].shadowRoot) walkRoot(els[i].shadowRoot); } catch(e){}
+                }
+            }
+            try { walkRoot(document.documentElement); } catch(e){}
+            return out;
+        }
+    """.trimIndent()
+
 
     fun buildScrapingScript(config: ScraperConfig, useImages: Boolean, isDebug: Boolean = false): String {
         val configJson = Json.encodeToString(config)
@@ -186,6 +320,8 @@ object ScrapingScriptBuilder {
 
                     // --- CSS セレクタ取得ユーティリティ（共通スニペット） ---
                     ${JS_UNIQUE_SELECTOR}
+                    ${JS_SHORT_SELECTOR}
+                    ${JS_SHADOW_PIERCE}
 
 
                     var meta = {};
@@ -204,7 +340,7 @@ object ScrapingScriptBuilder {
                     } else if (config.folder) {
                         var targetSel = config.folder.trim();
                         var el = null;
-                        try { el = document.querySelector(targetSel); } catch(e){}
+                        try { el = qsFirst(targetSel); } catch(e){}
                         if (el) {
                             f = (el.tagName === 'TITLE') ? (document.title || el.textContent || "") : (el.innerText || el.textContent || "");
                         } else if (targetSel.toLowerCase() === 'title') {
@@ -224,7 +360,7 @@ object ScrapingScriptBuilder {
                     f = applyRegexPipeline(f, (config.regex || "").trim());
                     result.folderName = clean(f);
 
-                    var t = config.title ? document.querySelector(config.title) : null;
+                    var t = config.title ? qsFirst(config.title) : null;
                     if (!t) t = document.querySelector('.novel_subtitle, .ep-title, .episode-title, .chapter-title, h1, h2');
                     result.title = t ? clean(t.innerText || t.textContent || "") : "";
                     if (!result.title) result.title = meta.headline || clean(document.title);
@@ -244,7 +380,7 @@ object ScrapingScriptBuilder {
                         var actualSelector = chapSetting.split('||')[0].trim();
                         if (actualSelector && !actualSelector.startsWith('@')) {
                             var el = null;
-                            try { el = document.querySelector(actualSelector); } catch(e){}
+                            try { el = qsFirst(actualSelector); } catch(e){}
                             var text = el ? (el.innerText || el.textContent || "") : "";
                             if (text) {
                                 if (config.chapterRegex) {
@@ -258,7 +394,49 @@ object ScrapingScriptBuilder {
                     result.chapter = c;
 
                     // --- プロ仕様：小説整形エンジン（字下げ正規化） ---
-                    var b = config.body ? document.querySelector(config.body) : null;
+                    // Shadow DOM（open）対応：>>> 記法は shadowRoot 経由で解決する。cloneNodeではshadowが落ちるため実体合成する。
+                    var bodySel = (config.body || "").trim();
+                    var b = null;
+                    if (bodySel && bodySel.indexOf('>>>') >= 0) {
+                        var pierceBodyEls = [];
+                        try { pierceBodyEls = queryPierceAll(bodySel); } catch(e){ pierceBodyEls = []; }
+                        if (pierceBodyEls.length) {
+                            var synth = document.createElement('div');
+                            for (var pi = 0; pi < pierceBodyEls.length; pi++) {
+                                try { synth.appendChild(pierceBodyEls[pi].cloneNode(true)); } catch(e){}
+                            }
+                            b = synth;
+                        }
+                    } else {
+                        try { b = bodySel ? document.querySelector(bodySel) : null; } catch(e){ b = null; }
+                        if (b && b.shadowRoot) {
+                            var shadowKids = [];
+                            try { shadowKids = Array.from(b.shadowRoot.querySelectorAll('p, div, h1, h2, h3, h4, li, figure')); } catch(e){}
+                            var hostLen = 0;
+                            try { hostLen = ((b.innerText || b.textContent) || "").trim().length; } catch(e){}
+                            var shadowLen = 0;
+                            try { shadowLen = (b.shadowRoot.textContent || "").length; } catch(e){}
+                            if (shadowKids.length && (hostLen < 100 || shadowLen > hostLen)) {
+                                var synth2 = document.createElement('div');
+                                try {
+                                    Array.from(b.shadowRoot.childNodes).forEach(function(n) {
+                                        if (!n) return;
+                                        if (n.nodeType === 1) {
+                                            var tg = "";
+                                            try { tg = (n.tagName || "").toUpperCase(); } catch(e){}
+                                            if (tg === "STYLE" || tg === "SCRIPT" || tg === "TEMPLATE" || tg === "LINK") return;
+                                            try { synth2.appendChild(n.cloneNode(true)); } catch(e){}
+                                        } else if (n.nodeType === 3) {
+                                            var tx = "";
+                                            try { tx = n.textContent || ""; } catch(e){}
+                                            if (tx && tx.trim()) { try { synth2.appendChild(document.createTextNode(tx)); } catch(e){} }
+                                        }
+                                    });
+                                } catch(e){}
+                                if (synth2.childNodes.length) b = synth2;
+                            }
+                        }
+                    }
                     if (!b) {
                         var cand = Array.from(document.querySelectorAll('div, article, section, main')).map(el => ({ el: el, s: el.innerText.length + (el.querySelectorAll('p').length * 40) })).sort((a,b) => b.s - a.s);
                         if (cand[0] && cand[0].s > 100) b = cand[0].el;
@@ -271,32 +449,54 @@ object ScrapingScriptBuilder {
                                 config.exclude.split(',').forEach(function(s) {
                                     var sel = s.trim();
                                     if (sel) {
-                                        clone.querySelectorAll(sel).forEach(function(el) { el.remove(); });
+                                        if (sel.indexOf('>>>') >= 0) {
+                                            var lastPart = sel.split('>>>').pop().trim();
+                                            if (lastPart) {
+                                                try { clone.querySelectorAll(lastPart).forEach(function(el) { el.remove(); }); } catch(e){}
+                                            }
+                                        } else {
+                                            clone.querySelectorAll(sel).forEach(function(el) { el.remove(); });
+                                        }
                                     }
                                 });
                             } catch(e){}
                         }
                         if (!${useImages}) clone.querySelectorAll('img, picture, svg').forEach(n => n.remove());
-                        
-                        // 1. 改行の確保
-                        clone.querySelectorAll('br').forEach(br => { br.after(document.createTextNode('\n')); br.remove(); });
-                        clone.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6, li, dt, dd').forEach(el => {
-                            if (el.innerText.trim().length > 0) el.after(document.createTextNode('\n'));
+
+                        // 1. 改行の確保（分離DOMでもtextContent併用で破綻防止）
+                        clone.querySelectorAll('br').forEach(br => { try { br.after(document.createTextNode('\n')); } catch(e){} try { br.remove(); } catch(e){} });
+                        clone.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6, li, dt, dd, figure').forEach(function(el) {
+                            var bt = "";
+                            try { bt = (el.innerText || el.textContent || ""); } catch(e){}
+                            if (bt.trim().length > 0) { try { el.after(document.createTextNode('\n')); } catch(e){} }
                         });
 
                         // 2. テキストの分解とプロ仕様の整形
-                        var lines = clone.innerText.split('\n');
+                        var rawText = "";
+                        try { rawText = clone.innerText || clone.textContent || ""; } catch(e){}
+                        var lines = String(rawText).split('\n');
                         var formattedLines = [];
                         var debugLines = [];
 
                         var dbgTexts = [];
                         if (${isDebug}) {
                             try {
-                                var dbgWalker = document.createTreeWalker(b, NodeFilter.SHOW_TEXT, null, false);
-                                var dbgNode;
-                                while ((dbgNode = dbgWalker.nextNode())) {
-                                    dbgTexts.push({ t: dbgNode.textContent, el: dbgNode.parentElement });
-                                }
+                                var dbgRoots = [b];
+                                try { if (b.shadowRoot) dbgRoots.push(b.shadowRoot); } catch(e){}
+                                try {
+                                    Array.from(b.querySelectorAll('*')).forEach(function(h) {
+                                        try { if (h.shadowRoot) dbgRoots.push(h.shadowRoot); } catch(e){}
+                                    });
+                                } catch(e){}
+                                dbgRoots.forEach(function(r) {
+                                    try {
+                                        var dbgWalker = document.createTreeWalker(r, NodeFilter.SHOW_TEXT, null, false);
+                                        var dbgNode = null;
+                                        while ((dbgNode = dbgWalker.nextNode())) {
+                                            dbgTexts.push({ t: dbgNode.textContent, el: dbgNode.parentElement });
+                                        }
+                                    } catch(e){}
+                                });
                             } catch(e){}
                         }
 
@@ -317,7 +517,12 @@ object ScrapingScriptBuilder {
                                 try {
                                     for (var di = 0; di < dbgTexts.length; di++) {
                                         if (dbgTexts[di].t.includes(l)) {
-                                            selector = getUniqueSelector(dbgTexts[di].el);
+                                            try {
+                                                var candSel = getPierceSelector(dbgTexts[di].el);
+                                                selector = candSel || getUniqueSelector(dbgTexts[di].el);
+                                            } catch(e){
+                                                selector = getUniqueSelector(dbgTexts[di].el);
+                                            }
                                             break;
                                         }
                                     }
@@ -342,12 +547,23 @@ object ScrapingScriptBuilder {
                         try { nUrl = safeResolve(config.next.substring(3)); } catch(e){}
                     }
                     if (!nUrl) {
-                        var nEl = config.next ? document.querySelector(config.next) : document.querySelector('a[rel="next"]');
+                        var nEl = config.next ? qsFirst(config.next) : document.querySelector('a[rel="next"]');
                         if (!nEl) {
                             var links = Array.from(document.querySelectorAll('a'));
-                            // タイポ修正: \u7d1a(級) ➔ \u7d9a(続く)
-                            var regex = /^(?:\u6b21|Next|\u7d9a\u304f|>>|\u300b|\u6b21\u3078|\u4e0b\u4e00\u7ae0|\u4e0b\u4e00\u9875)/i;
-                            nEl = links.find(a => a.innerText.trim().length < 15 && regex.test(a.innerText.trim()));
+                            try {
+                                Array.from(document.querySelectorAll('*')).forEach(function(h) {
+                                    if (h.shadowRoot) {
+                                        try { Array.from(h.shadowRoot.querySelectorAll('a')).forEach(function(a) { links.push(a); }); } catch(e){}
+                                    }
+                                });
+                            } catch(e){}
+                            // タイポ修正: \u7d1a(級) ➔ \u7d9a(続く)。韓国語の次（\uB2E4\uC74C）も対象にする
+                            var regex = /^(?:\u6b21|Next|\u7d9a\u304f|\uB2E4\uC74C|>>|\u300b|\u6b21\u3078|\u4e0b\u4e00\u7ae0|\u4e0b\u4e00\u9875)/i;
+                            nEl = links.find(function(a) {
+                                var at = "";
+                                try { at = (a.innerText || a.textContent || "").trim(); } catch(e){}
+                                return at.length < 15 && regex.test(at);
+                            });
                         }
                         nUrl = nEl ? nEl.href : "";
                     }
@@ -492,6 +708,7 @@ object ScrapingScriptBuilder {
 
                 // CSS セレクタ取得ユーティリティ（共通スニペット）
                 ${JS_UNIQUE_SELECTOR}
+                ${JS_SHADOW_PIERCE}
 
                 function highlight(el) {
                     if (prevHighlight) prevHighlight.style.outline = '';
@@ -520,21 +737,21 @@ object ScrapingScriptBuilder {
                     } catch(e){}
                     try {
                         getExcludeList().forEach(function(s) {
-                            try { document.querySelectorAll(s).forEach(function(n){ n.style.opacity = ''; }); } catch(e){}
+                            try { qsAll(s).forEach(function(n){ n.style.opacity = ''; }); } catch(e){}
                         });
                     } catch(e){}
                 }
 
                 function applyCurrentConfig() {
                     clearInspectorMarks();
-                    try { if (config.title) document.querySelector(config.title).classList.add('__novel_mark_title'); } catch(e){}
-                    try { if (config.body) document.querySelector(config.body).classList.add('__novel_mark_body'); } catch(e){}
-                    try { if (config.next) document.querySelector(config.next).classList.add('__novel_mark_next'); } catch(e){}
+                    try { if (config.title) qsFirst(config.title).classList.add('__novel_mark_title'); } catch(e){}
+                    try { if (config.body) { var bm = qsAll(config.body); bm.forEach(function(x){ try{ x.classList.add('__novel_mark_body'); }catch(e){} }); } } catch(e){}
+                    try { if (config.next) qsFirst(config.next).classList.add('__novel_mark_next'); } catch(e){}
                     try {
                         if (config.exclude) {
                             config.exclude.split(',').forEach(function(s) {
                                 var sel = s.trim();
-                                if (sel) document.querySelectorAll(sel).forEach(function(el){ el.style.opacity = '0.3'; });
+                                if (sel) qsAll(sel).forEach(function(el){ el.style.opacity = '0.3'; });
                             });
                         }
                     } catch(e){}
@@ -542,7 +759,7 @@ object ScrapingScriptBuilder {
 
                 function buildPreview(sel, target) {
                     var el = null;
-                    try { el = document.querySelector(sel); } catch(e) {}
+                    try { el = qsFirst(sel); } catch(e) {}
                     if (!el) return '(一致なし)';
 
                     // 次ページ または 別URL取得: リンク先URLをプレビュー
@@ -562,9 +779,36 @@ object ScrapingScriptBuilder {
                         return '抽出話数: ' + chapNum + '  (元テキスト: ' + (raw.length > 50 ? raw.substring(0, 50) + '…' : raw) + ')';
                     }
 
+                    // 本文/タイトル等: 先頭150字に加え全一致の合計字数・行数・件数を付記する
+                    // 技術的根拠1行：pierce複数一致（host >>> p等）は先頭1件表示では量が判断できないため集計を分離表示する。
+                    var all = [];
+                    try { all = qsAll(sel); } catch(e) {}
+                    if (all.length > 1) {
+                        var totalChars = 0;
+                        var totalLines = 0;
+                        try {
+                            all.forEach(function(x) {
+                                var xt = ((x.innerText || x.textContent || '') + '');
+                                totalChars += xt.replace(/\s+/g, '').length;
+                                var parts = xt.split('\n');
+                                var cnt = 0;
+                                for (var li = 0; li < parts.length; li++) { if (parts[li].trim()) cnt++; }
+                                totalLines += cnt || (xt.trim() ? 1 : 0);
+                            });
+                        } catch(e){}
+                        var head = ((el.innerText || el.textContent || '') + '').trim();
+                        if (head.length > 150) head = head.substring(0, 150) + '…';
+                        return '(' + all.length + '件合計 約' + totalChars + '字/' + totalLines + '行) ' + (head || '(テキストなし)');
+                    }
                     var t = ((el.innerText || el.textContent || '') + '').trim();
+                    var chars = t.replace(/\s+/g, '').length;
+                    var lns = 0;
+                    try {
+                        var ps = t.split('\n');
+                        for (var k = 0; k < ps.length; k++) { if (ps[k].trim()) lns++; }
+                    } catch(e){}
                     if (t.length > 150) t = t.substring(0, 150) + '…';
-                    return t || '(テキストなし)';
+                    return '(約' + chars + '字/' + lns + '行) ' + (t || '(テキストなし)');
                 }
 
                 // 短縮セレクタ（共通スニペット）
@@ -574,12 +818,37 @@ object ScrapingScriptBuilder {
                 function getCandidates(el) {
                     var cands = [];
                     var seen = {};
-                    traverseCandidates(el, function(node, label, s) {
+                    function pushCand(node, label, s) {
                         if (!s || seen[s]) return;
                         seen[s] = true;
                         var m = 0;
-                        try { m = document.querySelectorAll(s).length; } catch(e) {}
+                        try { m = qsAll(s).length; } catch(e) {}
                         cands.push({ node: node, selector: s, label: label, matchCount: m });
+                    }
+                    var inShadow = false;
+                    try {
+                        var rt = el.getRootNode ? el.getRootNode() : null;
+                        inShadow = !!(rt && rt.nodeType === 11 && rt.host);
+                    } catch(e){}
+                    if (inShadow) {
+                        var pierceSel = "";
+                        try { pierceSel = getPierceSelector(el); } catch(e){}
+                        if (pierceSel) pushCand(el, 'Shadow内要素', pierceSel);
+                        try {
+                            var r = el.getRootNode();
+                            var host = r.host;
+                            var hostSel = "";
+                            try { hostSel = shortSelector(host) || getUniqueSelector(host); } catch(e){}
+                            if (hostSel) {
+                                pushCand(host, 'Shadowホスト', hostSel);
+                                var tag = (el.tagName || "").toLowerCase() || "*";
+                                var generic = hostSel + " >>> " + tag;
+                                if (generic !== pierceSel) pushCand(el, 'Shadow内汎用', generic);
+                            }
+                        } catch(e){}
+                    }
+                    traverseCandidates(el, function(node, label, s) {
+                        pushCand(node, label, s);
                         if (cands.length >= 10) return false;
                     }, true);
                     return cands.slice(0, 10);
@@ -650,13 +919,13 @@ object ScrapingScriptBuilder {
                                 if (isRemovable) {
                                     config.exclude = getExcludeList().filter(function(s){ return s !== c.selector; }).join(', ');
                                     try { window.AndroidBridge.onRemoveExclude(c.selector); } catch(e){}
-                                    try { document.querySelectorAll(c.selector).forEach(function(n){ n.style.opacity = ''; }); } catch(e){}
+                                    try { qsAll(c.selector).forEach(function(n){ n.style.opacity = ''; }); } catch(e){}
                                 } else {
                                     var list = getExcludeList();
                                     if (list.indexOf(c.selector) < 0) list.push(c.selector);
                                     config.exclude = list.join(', ');
                                     try { window.AndroidBridge.onApplyCandidate('exclude', c.selector); } catch(e){}
-                                    try { document.querySelectorAll(c.selector).forEach(function(n){ n.style.opacity = '0.3'; }); } catch(e){}
+                                    try { qsAll(c.selector).forEach(function(n){ n.style.opacity = '0.3'; }); } catch(e){}
                                 }
                             } else {
                                 config[pendingTarget] = c.selector;
@@ -748,17 +1017,28 @@ object ScrapingScriptBuilder {
                     popup.style.top = top + 'px';
                 }
 
+                function resolveTapTarget(e) {
+                    var t = null;
+                    try {
+                        if (e.composedPath && e.composedPath().length) t = e.composedPath()[0];
+                    } catch(err){}
+                    if (!t) { try { t = e.target; } catch(err2){} }
+                    if (t && t.nodeType === 3) { try { t = t.parentElement || e.target; } catch(err3){} }
+                    if (t && t.nodeType !== 1) { try { t = e.target; } catch(err4){} }
+                    return t;
+                }
+
                 function handleClick(e) {
                     if (!active) return;
+                    var tapEl = resolveTapTarget(e);
                     try {
-                        var t = e.target;
-                        if (t && t.closest && t.closest('#__novel_popup')) return;
+                        if (tapEl && tapEl.closest && tapEl.closest('#__novel_popup')) return;
                     } catch(e){}
                     e.preventDefault();
                     e.stopPropagation();
-                    var cands = getCandidates(e.target);
+                    var cands = getCandidates(tapEl);
                     if (!cands.length) return;
-                    try { highlight(e.target); } catch(e){}
+                    try { highlight(tapEl); } catch(e){}
                     showCandidatePopup(cands, e.clientX || 0, e.clientY || 0);
                 }
 
@@ -808,9 +1088,17 @@ object ScrapingScriptBuilder {
                     
                     ${JS_UNIQUE_SELECTOR}
                     ${JS_SHORT_SELECTOR}
+                    ${JS_SHADOW_PIERCE}
 
                     // 短いセレクタが一意でない場合は一意セレクタにフォールバック（誤適用防止）
+                    // Shadow内要素は host >>> inner 形式で返す
                     function pickSelector(el) {
+                        try {
+                            var rt = el.getRootNode ? el.getRootNode() : null;
+                            if (rt && rt.nodeType === 11 && rt.host) {
+                                try { return getPierceSelector(el); } catch(e2){}
+                            }
+                        } catch(e){}
                         try {
                             var s = shortSelector(el);
                             if (s && document.querySelectorAll(s).length === 1) return s;
@@ -867,10 +1155,11 @@ object ScrapingScriptBuilder {
                         }
                     }
 
-                    // 3. セレクタ直接指定クエリとしての判定（, () + を含む複合セレクタ対応）
+                    // 3. セレクタ直接指定クエリとしての判定（, () + を含む複合セレクタ対応・>>> pierce対応）
                     try {
                         if (/^[a-zA-Z0-9_\-\.\#\>\s\[\]\:\=\*\^\~\$\|\"\'\,\(\)\+]+$/.test(query)) {
-                            var directEls = document.querySelectorAll(query);
+                            var directEls = [];
+                            try { directEls = queryPierceAll(query); } catch(e){ try { directEls = Array.from(document.querySelectorAll(query)); } catch(e2){} }
                             if (directEls.length > 0) {
                                 var firstEl = directEls[0];
                                 var firstText = (firstEl.innerText || firstEl.textContent || '').trim().replace(/\s+/g, ' ');
@@ -880,10 +1169,18 @@ object ScrapingScriptBuilder {
                         }
                     } catch(e){}
 
-                    // 4. 全DOMツリー（document.documentElement）のテキストノード探索
-                    var walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_TEXT, null, false);
-                    var node;
-                    while ((node = walker.nextNode())) {
+                    // 4. 全DOMツリー＋open Shadow内テキストノード探索（TreeWalkerは境界を越えないため再帰走査）
+                    var allTextNodes = [];
+                    try { allTextNodes = collectPierceTextNodes(8000); } catch(e){}
+                    if (!allTextNodes.length) {
+                        try {
+                            var fallbackWalker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_TEXT, null, false);
+                            var fb = null;
+                            while ((fb = fallbackWalker.nextNode())) allTextNodes.push(fb);
+                        } catch(e){}
+                    }
+                    for (var ni = 0; ni < allTextNodes.length; ni++) {
+                        var node = allTextNodes[ni];
                         var text = (node.textContent || '').trim();
                         if (text && text.toLowerCase().indexOf(qLower) >= 0) {
                             var p = node.parentElement;
@@ -896,7 +1193,12 @@ object ScrapingScriptBuilder {
                                     addCandidate(p, 'title', 'ページタイトル (<title>)', text);
                                 } else {
                                     var pSel = pickSelector(p);
-                                    addCandidate(p, pSel, pTag + ' 要素');
+                                    var inShadow = false;
+                                    try {
+                                        var prt = p.getRootNode ? p.getRootNode() : null;
+                                        inShadow = !!(prt && prt.nodeType === 11 && prt.host);
+                                    } catch(e){}
+                                    addCandidate(p, pSel, pTag + ' 要素' + (inShadow ? ' (Shadow内)' : ''));
                                 }
                             }
                         }
@@ -920,20 +1222,46 @@ object ScrapingScriptBuilder {
         return """
             (function(){
                 try {
-                    var baseEl = document.querySelector('$safeSelector');
+                    var baseEl = null;
+                    try { baseEl = document.querySelector('$safeSelector'); } catch(e){}
+                    if (!baseEl) { try { baseEl = queryPierceFirst('$safeSelector'); } catch(e2){} }
                     if (!baseEl) return '[]';
                     ${JS_UNIQUE_SELECTOR}
                     ${JS_SHORT_SELECTOR}
+                    ${JS_SHADOW_PIERCE}
                     ${JS_CANDIDATE_TRAVERSAL}
                     var cands = [];
                     var seen = {};
+                    try {
+                        var brt = baseEl.getRootNode ? baseEl.getRootNode() : null;
+                        if (brt && brt.nodeType === 11 && brt.host) {
+                            var ps = "";
+                            try { ps = getPierceSelector(baseEl); } catch(e){}
+                            if (ps && !seen[ps]) {
+                                seen[ps] = true;
+                                var pc = 0, pch = 0, pln = 0, ppv = '(テキストなし)';
+                                try {
+                                    pc = qsAll(ps).length;
+                                    var pf = qsFirst(ps);
+                                    if (pf) {
+                                        var pt = ((pf.innerText || pf.textContent || '') + '').replace(/[ \t]+/g, ' ');
+                                        pln = pt.split('\n').filter(function(x){ return x.trim(); }).length;
+                                        pch = pt.replace(/\s+/g, '').length;
+                                        var pp = pt.trim().replace(/\s+/g, ' ');
+                                        ppv = (pp.length > 120) ? pp.substring(0, 120) + '…' : (pp || '(テキストなし)');
+                                    }
+                                } catch(e){}
+                                cands.push({ label: 'Shadow内要素', selector: ps, metric: pc + '件・約' + pch + '字/' + pln + '行', preview: ppv });
+                            }
+                        }
+                    } catch(e){}
                     traverseCandidates(baseEl, function(node, label, s) {
                         if (!s || seen[s]) return;
                         seen[s] = true;
                         var count = 0, chars = 0, lines = 0, preview = '(テキストなし)';
                         try {
-                            count = document.querySelectorAll(s).length;
-                            var first = document.querySelector(s);
+                            count = qsAll(s).length;
+                            var first = qsFirst(s);
                             if (first) {
                                 var t = ((first.innerText || '') + '').replace(/[ \t]+/g, ' ');
                                 lines = t.split('\n').filter(function(x){ return x.trim(); }).length;

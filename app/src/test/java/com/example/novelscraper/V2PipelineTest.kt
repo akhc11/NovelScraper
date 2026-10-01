@@ -63,6 +63,7 @@ import com.example.novelscraper.translation.v2.pipeline.translateBatch
 import com.example.novelscraper.translation.v2.pipeline.writeFailed
 import com.example.novelscraper.translation.v2.pipeline.translateLarge
 import com.example.novelscraper.translation.v2.pipeline.translateSingle
+import com.example.novelscraper.translation.v2.pipeline.PolishResult
 import com.example.novelscraper.translation.v2.pipeline.RefineConfig
 import com.example.novelscraper.translation.v2.pipeline.ResidualOptions
 import com.example.novelscraper.translation.v2.pipeline.RetryBudget
@@ -1745,7 +1746,8 @@ class V2PipelineTest {
             ctx,
             VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
         )
-        assertEquals("初回訳です。", out)
+        assertTrue(out is PolishResult.Adopted)
+        assertEquals("初回訳です。", (out as PolishResult.Adopted).text)
         assertEquals(0, calls)
     }
 
@@ -1760,12 +1762,15 @@ class V2PipelineTest {
             VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
         )
         // fakeは入力をそのまま返すため、磨き文は推敲入力そのものになる
-        assertTrue(out.contains("初回訳です。"))
-        assertTrue(out.contains("=== SOURCE"))
+        assertTrue(out is PolishResult.Adopted)
+        val text = (out as PolishResult.Adopted).text
+        assertTrue(text.contains("初回訳です。"))
+        assertTrue(text.contains("=== SOURCE"))
     }
 
     @Test
-    fun testRefine_FailureKeepsFirst() = kotlinx.coroutines.runBlocking {
+    fun testRefine_FailureHoldsWithoutSaving() = kotlinx.coroutines.runBlocking {
+        // 推敲送信の失敗は初回訳の温存保存をせず、未完了保留で返す
         val base = looseCtx(call = { _, _, _ -> fail(FailureKind.RETRYABLE_AFTER) })
         val ctx = base.copy(refine = RefineConfig("polish it") { _, _ -> fail(FailureKind.RETRYABLE_AFTER) })
         val out = com.example.novelscraper.translation.v2.pipeline.polishTranslation(
@@ -1774,21 +1779,95 @@ class V2PipelineTest {
             ctx,
             VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
         )
-        assertEquals("初回訳です。", out)
+        assertTrue(out is PolishResult.Held)
+        assertEquals(FailureKind.RETRYABLE_AFTER, (out as PolishResult.Held).kind)
     }
 
     @Test
-    fun testRefine_RejectKeepsFirst() = kotlinx.coroutines.runBlocking {
-        // 磨き文が空＝検証不合格のため初回訳を採用する
+    fun testRefine_RejectHoldsWithoutSaving() = kotlinx.coroutines.runBlocking {
+        // 磨き文が空＝検証不合格のため、初回訳の温存保存をせず未完了保留で返す（理由付き）。
+        val logs = mutableListOf<String>()
         val base = looseCtx(call = { _, _, _ -> ok("   ") })
-        val ctx = base.copy(refine = RefineConfig("polish it") { _, _ -> ok("   ") })
+        val ctx = base.copy(
+            refine = RefineConfig("polish it") { _, _ -> ok("   ") },
+            log = { synchronized(logs) { logs.add(it) } }
+        )
         val out = com.example.novelscraper.translation.v2.pipeline.polishTranslation(
             "原文です。",
             "初回訳です。",
             ctx,
             VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
         )
-        assertEquals("初回訳です。", out)
+        assertTrue(out is PolishResult.Held)
+        assertEquals("polish-rejected", (out as PolishResult.Held).note)
+        assertTrue(logs.any { it.contains("推敲不採用のため未完了として保留します") && it.contains("blank") })
+    }
+
+    @Test
+    fun testRefine_EchoAdoptsWithoutChange() = kotlinx.coroutines.runBlocking {
+        // 「直す所なし」とそのまま返却した磨き文は正常採用される（不採用は壊した／返さない時だけ）。
+        val ctx = looseCtx(call = { _, _, _ -> ok("x") }).copy(
+            refine = RefineConfig("polish it") { _, _ -> ok("初回訳です。") }
+        )
+        val out = com.example.novelscraper.translation.v2.pipeline.polishTranslation(
+            "原文です。",
+            "初回訳です。",
+            ctx,
+            VerifyOptions(sizeMinPct = 0, sizeMaxPct = 10000, kanaFloor = 0.0, markerEnabled = false)
+        )
+        assertTrue(out is PolishResult.Adopted)
+        assertEquals("初回訳です。", (out as PolishResult.Adopted).text)
+    }
+
+    @Test
+    fun testRefine_HoldSkipsSaveInSingle() = kotlinx.coroutines.runBlocking {
+        // 単品路：推敲不採用時は Translated にせず、非確定の Failed（.failed 化しない）で返す
+        val ctx = looseCtx(call = { _, _, _ -> ok("李雲が旅立った。") }).copy(
+            refine = RefineConfig("polish it") { _, _ -> fail(FailureKind.RETRYABLE_AFTER) }
+        )
+        val r = translateSingle("李云出发了。", ctx)
+        assertTrue(r is SingleResult.Failed)
+        val failed = r as SingleResult.Failed
+        assertFalse(failed.isDeterministic)
+        assertFalse(shouldPersistFailed(failed))
+    }
+
+    @Test
+    fun testRefine_HoldSkipsSaveInBatch() = kotlinx.coroutines.runBlocking {
+        // 束ね路：推敲不採用品は保存せず、単体再送もせず未完了保留にすること。
+        val store = InMemoryFileStore()
+        val root = store.createRoot("refine_hold_batch")
+        val items = listOf(
+            "b1.txt" to "第1話\nむかしむかし",
+            "b2.txt" to "第2話\nあるところに"
+        )
+        val logs = mutableListOf<String>()
+        val base = looseCtx(call = { _, _, source ->
+            if (source.contains("<documents>")) {
+                ok("""
+                    <translations>
+                    <trans id="1">
+                    第1話の訳文です。
+                    </trans>
+                    <trans id="2">
+                    第2話の訳文です。
+                    </trans>
+                    </translations>
+                """.trimIndent())
+            } else {
+                ok("単訳です。")
+            }
+        })
+        val ctx = base.copy(
+            refine = RefineConfig("polish it") { _, _ -> fail(FailureKind.RETRYABLE_AFTER) },
+            log = { synchronized(logs) { logs.add(it) } }
+        )
+        val outcome = translateBatch(store, root.uri, items, ctx)
+        assertEquals(0, outcome.completed)
+        assertNull(store.findChild(root.uri, "b1.txt"))
+        assertNull(store.findChild(root.uri, "b2.txt"))
+        assertNull(store.findChild(root.uri, "b1.txt.failed"))
+        assertTrue(logs.any { it.contains("推敲不採用のため未完了として保留します") })
     }
 
     @Test
@@ -1897,7 +1976,7 @@ class V2PipelineTest {
         assertEquals(listOf("落ち着いた宗主", "冷静な青年", "h4"), table["李云"])
         assertNull(table["幽霊"])
         assertNull(table["江思"])
-        // 既定上限は1名5件。
+        // 既定上限は1名3件（入力肥大防止のため5から縮小）。
         val many = collectProfileHints(
             listOf(
                 com.example.novelscraper.translation.v2.pipeline.ExtractedNames(
@@ -1906,7 +1985,7 @@ class V2PipelineTest {
                 )
             )
         )
-        assertEquals(5, many["甲"]!!.size)
+        assertEquals(3, many["甲"]!!.size)
     }
 
     @Test

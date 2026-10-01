@@ -18,7 +18,9 @@ data class ScraperConfig(
     val delay: String = "15-30",
     val endCheck: String = "list|index|toc|javascript|null",
     val autoUrl: String = "",
-    val exclude: String = ""
+    val exclude: String = "",
+    // 保存先ルート名（Downloads/<saveDir>/<作品名>/）。空欄時は従来のNovelScraper。
+    val saveDir: String = ""
 ) {
     fun toJson(): String = Json.encodeToString(this)
 

@@ -30,6 +30,7 @@ import com.example.novelscraper.translation.v2.pipeline.utf8Bytes
 import com.example.novelscraper.translation.v2.pipeline.writeFailed
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2Settings
+import com.example.novelscraper.translation.v2.settings.buildRefineProfile
 import com.example.novelscraper.translation.v2.settings.buildRefineProfileOverrides
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
@@ -59,6 +60,11 @@ class WorkerRunner(
     private val existing: MutableSet<String>,
     private val pool: BundlePool,
     private val stopped: () -> Boolean = { false },
+    /**
+     * 推敲専用巡回器。null＝翻訳巡回器を継承（従来動作）。
+     * 技術的根拠1行：専用モデルは翻訳巡回に載せると訳文側に混入・クォータ scope 混用のため、口だけ差し替える。
+     */
+    private val refineRouter: PromptRouter? = null,
     private val onFileStart: (fileName: String, done: Int, total: Int) -> Unit = { _, _, _ -> },
     private val onProgress: ProgressObserver = { _, _, _ -> },
     private val onChunkProgress: (current: Int, total: Int) -> Unit = { _, _ -> },
@@ -120,10 +126,26 @@ class WorkerRunner(
         // 技術的根拠1行：磨き送り口は主経路の別名としてここで作り、番号解釈の抜け道を翻訳路に持ち込まない。
         // 技術的根拠1行：推敲の思考上書きは口の差分引数に乗せ、巡回器の二重化（クォータ二重管理）を避ける。
         val batchCall = bindCall(true)
-        val refineOverrides = buildRefineProfileOverrides(profiles, settings.refine)
-            .ifEmpty { null }
+        val refineProfile = buildRefineProfile(settings.refine)
         val refineCall: (suspend (String, String) -> LlmResult)? =
-            if (settings.refine.enabled) {
+            if (!settings.refine.enabled) {
+                null
+            } else if (refineProfile != null && refineRouter != null) {
+                // 技術的根拠1行：専用モデルは思考上書き済みの単一プロファイルで回し、翻訳巡回への混入とクォータ scope の混用をなくす。
+                val sender: suspend (String, String) -> LlmResult =
+                    { prompt, source ->
+                        // 技術的根拠1行：推敲文は頭差し替え対象外のため、固定文番(-1)の Spec で送る。
+                        val spec = PromptSpec(headNum = -1, headText = prompt, blocks = emptyList())
+                        refineRouter.execute(listOf(assemblePrompt(spec)), source)
+                    }
+                sender
+            } else {
+                // 技術的根拠1行：無言の継承 fallback は誤設定の見落としを生むため、代行時は記録に残す。
+                if (refineProfile != null) {
+                    log("⚠️ 推敲専用モデル指定ありも専用巡回器なしのため翻訳経路で代行します")
+                }
+                val refineOverrides = buildRefineProfileOverrides(profiles, settings.refine)
+                    .ifEmpty { null }
                 val refineSender = bindCall(forBatch = false, profileOverrides = refineOverrides)
                 val sender: suspend (String, String) -> LlmResult =
                     { prompt, source ->
@@ -131,7 +153,7 @@ class WorkerRunner(
                         refineSender("w$workerId", PromptSpec(headNum = -1, headText = prompt, blocks = emptyList()), source)
                     }
                 sender
-            } else null
+            }
         val ctx = TranslateContext(
             basePrompts = allBasePrompts,
             promptOrder = promptOrder, // 技術的根拠: translateSingleで品質チェックNG時のプロンプト順序リトライを実行するため設定順序を渡す

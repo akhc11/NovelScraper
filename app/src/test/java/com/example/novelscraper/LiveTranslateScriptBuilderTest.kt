@@ -59,4 +59,39 @@ class LiveTranslateScriptBuilderTest {
         assertTrue(script.contains("__liveTranslateScrollY"))
         assertTrue(script.contains("scrollTo"))
     }
+
+    @Test
+    fun testToggle_supportsComboFallbackAndFailCleanup() {
+        val script = LiveTranslateScriptBuilder.buildToggleLiveTranslateScript()
+        // default(comboあり)に戻し、gadget-simple/翻訳済みマーカーでもSUCCESSできること
+        assertTrue(script.contains(".goog-te-combo"))
+        assertTrue(script.contains("goog-te-gadget-simple"))
+        assertTrue(script.contains("translated-ltr"))
+        assertTrue(script.contains("goog-text-highlight"))
+        // 失敗時にcookie残留を掃除すること
+        assertTrue(script.contains("__gtClearGoogTransCookie"))
+        // #断片のみの遷移でbackupを捨てないこと
+        assertTrue(script.contains("__gtBase"))
+        // 復元時にmenu-frameとtranslatedクラスも掃除すること
+        assertTrue(script.contains("goog-te-menu-frame"))
+        assertTrue(script.contains("translated-rtl"))
+    }
+
+    @Test
+    fun testToggle_verifiesMarkersAfterDispatchBeforeSuccess() {
+        val script = LiveTranslateScriptBuilder.buildToggleLiveTranslateScript()
+        // 配送即SUCCESSせず、マーカー検証を経ること
+        assertTrue(script.contains("__gtDispatched"))
+        assertTrue(script.contains("TRANSLATE_NOT_APPLIED"))
+        assertTrue(script.contains("translated-ltr"))
+        assertTrue(script.contains("goog-text-highlight"))
+    }
+
+    @Test
+    fun testRestore_cleansMenuFrameAndTranslatedClass() {
+        val script = LiveTranslateScriptBuilder.buildRestoreScript()
+        assertTrue(script.contains("goog-te-menu-frame"))
+        assertTrue(script.contains("translated-ltr"))
+        assertTrue(script.contains("translated-rtl"))
+    }
 }

@@ -53,6 +53,8 @@ fun SettingsPanel(
     onConfigChange: (ScraperConfig) -> Unit,
     onImportPresetsClick: () -> Unit,
     onExportPresetsClick: () -> Unit,
+    onExportBackupClick: (Boolean) -> Unit = {},
+    onImportBackupClick: () -> Unit = {},
     onToggleWebViewDarkModeClick: () -> Unit = {},
     currentUrl: String = "",
     modifier: Modifier = Modifier
@@ -216,6 +218,36 @@ fun SettingsPanel(
                     modifier = Modifier.weight(1f).height(36.dp)
                 ) { Text("エクスポート", fontSize = 12.sp) }
             }
+            // 全体バックアップ行（設定・履歴・お気に入り・LLM翻訳。APIキー同梱のみ選択式）
+            var backupIncludeKeys by remember { mutableStateOf(false) }
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { onExportBackupClick(backupIncludeKeys) },
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTealDark),
+                    shape = ButtonCornerShape,
+                    modifier = Modifier.weight(1f).padding(end = 4.dp).height(36.dp)
+                ) { Text("バックアップ", fontSize = 12.sp) }
+                Button(
+                    onClick = onImportBackupClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTealDark),
+                    shape = ButtonCornerShape,
+                    modifier = Modifier.weight(1f).height(36.dp)
+                ) { Text("復元", fontSize = 12.sp) }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = backupIncludeKeys,
+                    onCheckedChange = { backupIncludeKeys = it }
+                )
+                Text(
+                    text = "APIキーを含める（平文注意）",
+                    color = AppColors.textSecondary,
+                    fontSize = 11.sp
+                )
+            }
         }
 
         // セクション1: 作品・章の識別設定
@@ -240,6 +272,13 @@ fun SettingsPanel(
                 helpInfo = SettingsHelpData.FOLDER_LINK,
                 onHelpClick = { openHelp(SettingsHelpData.FOLDER_LINK) { v -> updateField { it.copy(folderLink = v) } } },
                 onValueChange = { updateField { c -> c.copy(folderLink = it) } }
+            )
+            ConfigInputField(
+                label = "保存先フォルダ",
+                value = localConfig.saveDir,
+                helpInfo = SettingsHelpData.SAVE_DIR,
+                onHelpClick = { openHelp(SettingsHelpData.SAVE_DIR) { v -> updateField { it.copy(saveDir = v) } } },
+                onValueChange = { updateField { c -> c.copy(saveDir = it) } }
             )
             ConfigInputField(
                 label = "タイトル Selector",

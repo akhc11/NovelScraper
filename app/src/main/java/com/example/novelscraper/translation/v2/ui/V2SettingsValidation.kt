@@ -11,6 +11,7 @@ import com.example.novelscraper.translation.v2.domain.resolveProviderOrderReport
 import com.example.novelscraper.translation.v2.domain.resolveReasoningEffort
 import com.example.novelscraper.translation.v2.domain.toProviderId
 import com.example.novelscraper.translation.v2.settings.V2Settings
+import com.example.novelscraper.translation.v2.settings.buildRefineProfile
 
 /**
  * 設定保存前の範囲検査（pure・JVMテスト可）。
@@ -138,10 +139,17 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
         issues.add(V2SettingsIssue("推敲プロンプトは上限${TranslationLimits.MAX_DICT_PROMPT_CHARS}字を超えた分を切り落として送信します", false))
     }
     // 技術的根拠1行：推敲の上書きは翻訳プロファイル群に載るため、可否判定は既存の能力表・解決則に寄せて新規則を作らない。
+    // 技術的根拠1行：専用モデル時は判定対象を単一プロファイルに寄せ、翻訳群への二重適用をなくす。
+    // 技術的根拠1行：未知プロバイダーは送信層でOpenRouter扱いに倒れるため、黙認せず警告に残す（取込時の除外警告と対称）。
     if (settings.refine.enabled) {
         val refine = settings.refine
-        settings.profiles.forEachIndexed { index, profile ->
-            val label = "推敲(モデル${index + 1})"
+        val dedicated = buildRefineProfile(refine)
+        if (dedicated != null && refine.providerId.isNotBlank() && refine.providerId.toProviderId() == null) {
+            issues.add(V2SettingsIssue("推敲プロバイダー不明のためOpenRouter扱いになります", false))
+        }
+        val targets = dedicated?.let { listOf(it) } ?: settings.profiles
+        targets.forEachIndexed { index, profile ->
+            val label = if (dedicated != null) "推敲(専用モデル)" else "推敲(モデル${index + 1})"
             if (refine.thinkingLevel != null) {
                 val allowed = (ProviderRegistry.capabilitiesForOrNull(profile.providerId, profile.model)?.thinking as? ThinkingSupport.Levels)?.supported
                 if (allowed == null) {
@@ -170,12 +178,15 @@ fun validateV2Settings(settings: V2Settings): List<V2SettingsIssue> {
         }
     }
 
-    val needsGemini = settings.profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI }
+    val refineDedicated = if (settings.refine.enabled) buildRefineProfile(settings.refine) else null
+    val needsGemini = settings.profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI } ||
+        refineDedicated?.providerId?.toProviderId() == ProviderId.GEMINI
     if (needsGemini && settings.geminiKeys.none { it.isNotBlank() }) {
         issues.add(V2SettingsIssue("Geminiキー未設定のため開始できません", true))
     }
     val needsOpenRouter = settings.profiles.any { it.providerId.toProviderId() == ProviderId.OPENROUTER } ||
-        (settings.dict.enabled && settings.dict.providerId.toProviderId() == ProviderId.OPENROUTER)
+        (settings.dict.enabled && settings.dict.providerId.toProviderId() == ProviderId.OPENROUTER) ||
+        refineDedicated?.providerId?.toProviderId() == ProviderId.OPENROUTER
     if (needsOpenRouter && settings.openRouterKey.isBlank()) {
         issues.add(V2SettingsIssue("OpenRouterキー未設定のため開始できません", true))
     }

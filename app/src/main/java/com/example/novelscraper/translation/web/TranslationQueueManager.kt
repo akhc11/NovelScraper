@@ -209,7 +209,12 @@ class TranslationQueueManager(
                 for (f in foldersToProcess) {
                     if (currentSessionId != getActiveSessionId(engine)) return@launch
                     val fUri = f.uri ?: continue
-                    val doc = withContext(Dispatchers.IO) { resolveDocument(fUri) } ?: continue
+                    // 注意: 解決不能の無言continueが再発の温床。必ずログに残すこと。
+                    val doc = withContext(Dispatchers.IO) { resolveDocument(fUri) }
+                    if (doc == null) {
+                        android.util.Log.w("TranslationQueue", "unresolvable folder, skipping visibly: $fUri")
+                        continue
+                    }
                     if (doc.isDirectory) {
                         val children = withContext(Dispatchers.IO) { doc.listFiles().toList() }
                         val rawFiles = children.filter {
@@ -256,10 +261,18 @@ class TranslationQueueManager(
         }
     }
 
+    /**
+     * 文書解決。フォルダ系の子URIは共有のルート辿りに寄せる。
+     * 注意: 子URIをfromTreeUriに直渡しするとルートに化けて誤列挙になるため禁止
+     * (詳細はTranslationFileStore.resolveTreeFolder契約。同じバグの再発防止)。
+     */
     private fun resolveDocument(uri: Uri): DocumentFile? {
         return if (uri.scheme == "file") {
             val file = File(uri.path ?: return null)
             if (file.exists()) DocumentFile.fromFile(file) else null
+        } else if (splitTreeChildUri(uri.toString()) != null) {
+            // ファイル単体はfromSingleUri側に任せるため、ここではフォルダ解決を試み、駄目なら従来退行する。
+            resolveTreeFolder(appContext, uri) ?: DocumentFile.fromSingleUri(appContext, uri)
         } else {
             DocumentFile.fromTreeUri(appContext, uri) ?: DocumentFile.fromSingleUri(appContext, uri)
         }
@@ -289,11 +302,14 @@ class TranslationQueueManager(
             }
 
             if (folders.isEmpty() || folderIndex >= folders.size) {
+                // 技術的根拠1行：空キューを完了表示すると未翻訳のまま成功に見えるため、対象なしは明示する。
+                val emptyMsg = if (folders.isEmpty()) "翻訳対象のフォルダがありません"
+                else "全 ${folders.size} フォルダの翻訳が完了しました"
                 mutate(engine) {
-                    it.copy(isTranslating = false, statusText = "全 ${folders.size} フォルダの翻訳が完了しました")
+                    it.copy(isTranslating = false, statusText = emptyMsg)
                 }
                 val engineName = engineDisplayName(engine)
-                onShowMessage?.invoke("[$engineName 翻訳] 全 ${folders.size} フォルダの翻訳が完了しました", true)
+                onShowMessage?.invoke("[$engineName 翻訳] $emptyMsg", true)
                 notifyChanged()
                 return@launch
             }

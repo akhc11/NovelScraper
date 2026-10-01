@@ -27,17 +27,26 @@ class V2TranslationService : Service() {
         const val ACTION_UPDATE_STATUS = "com.example.novelscraper.translation.UPDATE_STATUS"
         const val ACTION_SHOW_COMPLETE = "com.example.novelscraper.translation.SHOW_COMPLETE"
         const val ACTION_STOP_TRANSLATION = "com.example.novelscraper.translation.STOP"
+        const val ACTION_REMOVE_RUN = "com.example.novelscraper.translation.REMOVE_RUN"
 
         const val EXTRA_TITLE = "extra_title"
         const val EXTRA_MSG = "extra_msg"
         const val EXTRA_PROGRESS_CURRENT = "extra_progress_current"
         const val EXTRA_PROGRESS_TOTAL = "extra_progress_total"
+        const val EXTRA_RUN_ID = "extra_run_id"
+        const val EXTRA_SLOT = "extra_slot"
 
         const val NOTIFICATION_ID_FOREGROUND = 2
         const val NOTIFICATION_ID_COMPLETE = 1002
 
-        /** 通知の停止ボタン押下時に ViewModel へ通知するコールバック */
-        var onStopRequested: (() -> Unit)? = null
+        /** runId別の停止コールバック。同時実行のrun毎停止に使う。 */
+        var stopCallbacks: MutableMap<String, () -> Unit> = mutableMapOf()
+
+        /** run別フォアグラウンド通知ID（slot加算で連動し、上限変更時の決め打ちを作らない）。 */
+        fun foregroundId(slot: Int): Int = NOTIFICATION_ID_FOREGROUND + slot.coerceAtLeast(0)
+
+        /** run別完了通知ID（同上）。 */
+        fun completeId(slot: Int): Int = NOTIFICATION_ID_COMPLETE + slot.coerceAtLeast(0)
 
         /** チャンネル初期化（Controllerの直接完了通知投稿時にも安全に呼べるよう共有） */
         fun ensureChannels(context: Context) {
@@ -61,7 +70,7 @@ class V2TranslationService : Service() {
         }
 
         /** 完了通知の生成・表示（ControllerとService共通の単一実装） */
-        fun showCompletionNotification(context: Context, title: String, msg: String) {
+        fun showCompletionNotification(context: Context, title: String, msg: String, slot: Int = 0) {
             ensureChannels(context)
             val openIntent = Intent(context, MainActivity::class.java)
             val openPendingIntent = PendingIntent.getActivity(
@@ -80,7 +89,7 @@ class V2TranslationService : Service() {
                 .build()
 
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-            manager?.notify(NOTIFICATION_ID_COMPLETE, notification)
+            manager?.notify(completeId(slot), notification)
         }
     }
 
@@ -116,20 +125,42 @@ class V2TranslationService : Service() {
         }
 
         if (intent != null) {
+            // 技術的根拠1行：run別操作はID付きで振り分け、付け忘れは全停止の従来動作に倒して黙殺しない。
+            val runId = intent.getStringExtra(EXTRA_RUN_ID) ?: ""
+            val slot = intent.getIntExtra(EXTRA_SLOT, 0)
             when (intent.action) {
                 ACTION_STOP_TRANSLATION -> {
-                    // 技術的根拠1行：陳腐コールバックの残存を防ぐため通知は使い捨てにする。
-                    onStopRequested?.invoke()
-                    onStopRequested = null
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                    if (runId.isBlank()) {
+                        stopCallbacks.values.toList().forEach { cb ->
+                            try {
+                                cb()
+                            } catch (e: Exception) {
+                                android.util.Log.w("V2TranslationService", "stop callback failed", e)
+                            }
+                        }
+                        stopCallbacks.clear()
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    } else {
+                        try {
+                            stopCallbacks.remove(runId)?.invoke()
+                        } catch (e: Exception) {
+                            android.util.Log.w("V2TranslationService", "stop callback failed", e)
+                        }
+                        stopForeground(foregroundId(slot))
+                    }
                 }
+                // 注意: 本分岐の送信者は現在いない(完了はController直投稿に一本化)。将来送る場合はrunId付きにすること。
                 ACTION_SHOW_COMPLETE -> {
                     val title = intent.getStringExtra(EXTRA_TITLE) ?: "LLM翻訳完了"
                     val msg = intent.getStringExtra(EXTRA_MSG) ?: "すべてのファイルの翻訳が完了しました"
-                    showCompletionNotification(this, title, msg)
+                    showCompletionNotification(this, title, msg, slot)
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
+                }
+                ACTION_REMOVE_RUN -> {
+                    // 技術的根拠1行：他run継続中はstopSelfしない（サービス死で残runの保護を失うため）。
+                    stopForeground(foregroundId(slot))
                 }
                 else -> {
                     // 技術的根拠1行：未知操作を状態更新に流用すると将来の操作追加時に誤処理するため、更新操作だけを受け付ける。
@@ -138,7 +169,7 @@ class V2TranslationService : Service() {
                         val msg = intent.getStringExtra(EXTRA_MSG) ?: "翻訳を実行中..."
                         val current = intent.getIntExtra(EXTRA_PROGRESS_CURRENT, 0)
                         val total = intent.getIntExtra(EXTRA_PROGRESS_TOTAL, 0)
-                        updateForegroundNotification(title, msg, current, total)
+                        updateForegroundNotification(title, msg, current, total, runId, slot)
                     }
                 }
             }
@@ -155,12 +186,15 @@ class V2TranslationService : Service() {
         super.onTimeout(startId, fgsType)
         TranslationDiagnostics.appendLine(this, "lifecycle", "dataSync timeout (startId=$startId type=$fgsType): stopping gracefully")
         android.util.Log.w("V2TranslationService", "dataSync timeout (startId=$startId type=$fgsType): stopping gracefully")
-        try {
-            onStopRequested?.invoke()
-        } catch (e: Exception) {
-            android.util.Log.w("V2TranslationService", "onTimeout stop callback failed", e)
+        // 技術的根拠1行：枠はrun共有のため全run停止に倒し、片残しの中途半端を作らない。
+        stopCallbacks.values.toList().forEach { cb ->
+            try {
+                cb()
+            } catch (e: Exception) {
+                android.util.Log.w("V2TranslationService", "onTimeout stop callback failed", e)
+            }
         }
-        onStopRequested = null
+        stopCallbacks.clear()
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } catch (e: Exception) {
@@ -189,24 +223,38 @@ class V2TranslationService : Service() {
                 android.util.Log.w("V2TranslationService", "wakelock release failed", e)
             }
         }
-        onStopRequested = null
+        stopCallbacks.clear()
         super.onDestroy()
     }
 
-    private fun buildForegroundNotification(title: String, msg: String, current: Int, total: Int): Notification {
+    private fun buildForegroundNotification(
+        title: String,
+        msg: String,
+        current: Int,
+        total: Int,
+        runId: String = "",
+        slot: Int = 0
+    ): Notification {
         val openIntent = Intent(this, MainActivity::class.java)
         val openPendingIntent = PendingIntent.getActivity(
             this, 0, openIntent,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
         )
 
-        // 通知から直接停止できるアクション
+        // 通知から直接停止できるアクション（run別に PendingIntent を分ける）
         val stopIntent = Intent(this, V2TranslationService::class.java).apply {
             action = ACTION_STOP_TRANSLATION
+            putExtra(EXTRA_RUN_ID, runId)
+            putExtra(EXTRA_SLOT, slot)
         }
+        // 技術的根拠1行：extrasは照合対象外のためslot再利用で陳腐化する。UPDATE_CURRENTで置換する(IMMUTABLEと併用可)。
         val stopPendingIntent = PendingIntent.getService(
-            this, 1, stopIntent,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+            this, 10 + slot.coerceAtLeast(0), stopIntent,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
         )
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID_SERVICE)
@@ -228,12 +276,19 @@ class V2TranslationService : Service() {
         return builder.build()
     }
 
-    private fun updateForegroundNotification(title: String, msg: String, current: Int, total: Int) {
-        val notification = buildForegroundNotification(title, msg, current, total)
+    private fun updateForegroundNotification(
+        title: String,
+        msg: String,
+        current: Int,
+        total: Int,
+        runId: String = "",
+        slot: Int = 0
+    ) {
+        val notification = buildForegroundNotification(title, msg, current, total, runId, slot)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID_FOREGROUND, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            startForeground(foregroundId(slot), notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
-            startForeground(NOTIFICATION_ID_FOREGROUND, notification)
+            startForeground(foregroundId(slot), notification)
         }
     }
 

@@ -140,7 +140,7 @@ private fun DictPromptsSection(
     Text("辞書用プロンプト個別カスタマイズ", color = AppColors.accentTealLight, fontSize = 12.sp, fontWeight = FontWeight.Bold)
     Spacer(modifier = Modifier.height(2.dp))
     Text(
-        "※ 空欄で既定文を使用。JSON形式の行を消すと辞書生成に失敗します。変更後は辞書を自動再生成します",
+        "※ 空欄で既定文を使用。JSON形式の行を消すと辞書生成に失敗します。変更後は dictionary.json を削除して再実行で作り直し",
         color = AppColors.textTertiary, fontSize = 9.sp
     )
     Spacer(modifier = Modifier.height(6.dp))

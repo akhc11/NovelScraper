@@ -44,4 +44,25 @@ object UrlExtractor {
         }
         return null
     }
+
+    /**
+     * アドレスバー入力・共有URLなどの生入力を、WebViewに渡す遷移先URLに解決する（pure・JVMテスト可）。
+     * - 前後空白を除去し、空は空のまま返す（呼び元で無視する）。
+     * - http(s) URLを含む/ドメイン形式なら正規化URLを返す（スキームなしは https を補う）。
+     * - それ以外は通常の検索語としてGoogle検索URLにフォールバックする。
+     * 技術的根拠1行：android.util.Patterns/URLUtilは単体テストのJVM上で未mockのため、純Kotlin正規表現に寄せて振る舞いを固定する。
+     */
+    fun resolveNavigationTarget(rawInput: String?): String {
+        val input = rawInput?.trim().orEmpty()
+        if (input.isEmpty()) return ""
+        val asUrl = extractUrl(input)
+        if (asUrl != null) {
+            return if (asUrl.lowercase().startsWith("http")) asUrl else "https://$asUrl"
+        }
+        val trimmed = input.trimEnd(*TRAILING_TRIM_CHARS)
+        if (trimmed.isNotEmpty() && GENERIC_DOMAIN_REGEX.matches(trimmed)) {
+            return "https://$trimmed"
+        }
+        return "https://www.google.com/search?q=" + java.net.URLEncoder.encode(input, "UTF-8")
+    }
 }

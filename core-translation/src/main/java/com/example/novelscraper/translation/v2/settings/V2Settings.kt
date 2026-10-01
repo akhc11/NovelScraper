@@ -109,6 +109,10 @@ data class V2PrevContext(
 data class V2RefineSettings(
     val enabled: Boolean = false,
     val prompt: String = "",
+    /** 推敲専用プロバイダー。model空＝継承のため無視。model有り＋空＝gemini（辞書設定と同一約束）。 */
+    val providerId: String = "",
+    /** 推敲専用モデル。空＝翻訳プロファイル群を継承（従来動作）。 */
+    val model: String = "",
     /** Gemini直結用。null＝継承 */
     val thinkingLevel: String? = null,
     /** Gemini旧式（2.5系）用。null＝継承 */
@@ -118,6 +122,24 @@ data class V2RefineSettings(
     /** OpenRouter用。null＝継承 */
     val reasoningEnabled: Boolean? = null
 )
+
+/**
+ * 推敲専用プロファイルを作る（pure）。model空＝継承のためnull。
+ * 技術的根拠1行：継承判定を純粋関数に寄せ、巡回器・UI・検証の三者で使い回して乖離をなくす。
+ */
+fun buildRefineProfile(refine: V2RefineSettings): V2ModelProfile? {
+    val model = refine.model.trim()
+    if (model.isEmpty()) return null
+    return V2ModelProfile(
+        id = "refine",
+        providerId = refine.providerId.trim().ifBlank { "gemini" },
+        model = model,
+        thinkingLevel = refine.thinkingLevel,
+        thinkingBudget = refine.thinkingBudget,
+        reasoningEffort = refine.reasoningEffort,
+        reasoningEnabled = refine.reasoningEnabled
+    )
+}
 
 /**
  * 推敲用のプロファイル上書き対応表を作る（pure）。
@@ -156,6 +178,40 @@ data class V2PromptPreset(
     val label: String = "",
     val order: List<Int> = listOf(1, 1)
 )
+
+/**
+ * 全設定プリセット1件。snapshotは鍵を除く[V2Settings]丸ごと（言語連動の量比・自動順序・プロンプトも含む）。
+ * 技術的根拠1行：設定の二重定義は必ず乖離するため、型は正本の再利用に寄せ、鍵だけ抜く方式にする。
+ */
+@Serializable
+data class V2SettingsPreset(
+    val id: String = "",
+    val label: String = "",
+    val updatedAt: Long = 0L,
+    val snapshot: V2Settings = V2Settings()
+)
+
+/**
+ * プリセット索引1件。一覧表示は全文ではなく索引だけ読む。
+ * 技術的根拠1行：DataStoreは全文キャッシュのため、常駐は索引・実体は適用時の単発読込に寄せてフォアグラウンド常駐を抑える。
+ */
+@Serializable
+data class V2PresetIndexEntry(
+    val id: String = "",
+    val label: String = "",
+    val updatedAt: Long = 0L
+)
+
+/** プリセット保存用：鍵を抜いたsnapshotを作る（pure）。 */
+fun snapshotForPreset(settings: V2Settings): V2Settings =
+    settings.copy(geminiKeys = emptyList(), openRouterKey = "")
+
+/** プリセット適用用：snapshotに現行の鍵を戻す（pure）。 */
+fun applyPresetSnapshot(current: V2Settings, snapshot: V2Settings): V2Settings =
+    snapshot.copy(geminiKeys = current.geminiKeys, openRouterKey = current.openRouterKey)
+
+/** プリセット新規ID（pure）。衝突回避のためUUIDに寄せる。 */
+fun newPresetId(): String = java.util.UUID.randomUUID().toString()
 
 fun defaultV2PromptPresets(): List<V2PromptPreset> = listOf(
     V2PromptPreset("zh_std", "中国語 標準", listOf(1, 1)),

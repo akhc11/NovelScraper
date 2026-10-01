@@ -34,6 +34,7 @@ import com.example.novelscraper.translation.v2.pipeline.resolvePromptOrder
 import com.example.novelscraper.translation.v2.pipeline.splitSingleTextFile
 import com.example.novelscraper.translation.v2.settings.V2ModelProfile
 import com.example.novelscraper.translation.v2.settings.V2Settings
+import com.example.novelscraper.translation.v2.settings.buildRefineProfile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -70,6 +71,21 @@ data class EngineOptions(
     )
 )
 
+/**
+ * 同時実行の開始可否（pure）。null＝可、非null＝拒否理由。
+ * 技術的根拠1行：上限と重複の判定を純粋関数に寄せ、UIとテストで同一判定を使う。
+ */
+fun canStartRun(
+    activeRuns: Int,
+    maxRuns: Int,
+    activeFolderUris: Set<String>,
+    newFolderUris: Set<String>
+): String? = when {
+    activeRuns >= maxRuns -> "同時実行は${maxRuns}件までです"
+    newFolderUris.any { it in activeFolderUris } -> "実行中のフォルダと重複しています"
+    else -> null
+}
+
 data class EngineState(
     val isRunning: Boolean = false,
     val statusText: String = "idle",
@@ -81,6 +97,17 @@ data class EngineState(
 )
 
 data class RunSummary(val folders: Int, val completedFiles: Int, val totalFiles: Int, val aborted: Boolean)
+
+/**
+ * ブラウザ選択の確定単位。空のfileUrisは絞り込みなし(全件・従来動作)。
+ * 非空時は選択時点のスナップショットのみ翻訳し、指定外の親同胞を巻き込まない。
+ * 技術的根拠1行：列挙は実行時再取得のためURI一致で突合せ、改名時の取違えを防ぐ。
+ */
+data class FolderTarget(
+    val folderUri: String,
+    val displayName: String,
+    val fileUris: Set<String> = emptySet()
+)
 
 /**
  * v2実行エンジン。フォルダ巡回・早期スキップ・事前物理分割・辞書・ワーカー分配・中止判定を担う。
@@ -100,7 +127,12 @@ class RunEngine(
     // 技術的根拠1行：記述子既定値を登録簿に一本化し、新会社追加は登録簿の1行で追従する（既存2社の内容同一）。
     private val descriptors: Map<ProviderId, ProviderDescriptor> = ProviderRegistry.descriptors,
     /** テスト用の差し替え口。null時は内蔵生成を使う */
-    private val handlerFactory: ((V2Settings, V2ModelProfile, String) -> ProviderHandler)? = null
+    private val handlerFactory: ((V2Settings, V2ModelProfile, String) -> ProviderHandler)? = null,
+    /**
+     * 並行実行時の共有送信ゲート。null時は自前（単独実行の従来動作）。
+     * 技術的根拠1行：ゲートは送信間隔の共有財のため、複数エンジンでも合計並列の上限だけ共有し他はrun別に保つ。
+     */
+    sharedSendGate: V2SendGate? = null
 ) {
     private val _state = MutableStateFlow(EngineState())
     val state: StateFlow<EngineState> = _state.asStateFlow()
@@ -108,7 +140,7 @@ class RunEngine(
     private val stopFlag = AtomicBoolean(false)
 
     /** Shared send gate, engine lifetime (parity with the old global gate). */
-    private val sendGate = V2SendGate()
+    private val sendGate = sharedSendGate ?: V2SendGate()
 
     fun requestStop() {
         stopFlag.set(true)
@@ -171,6 +203,18 @@ class RunEngine(
                 uriString.substringAfterLast('/').substringAfterLast(':').ifBlank { "フォルダ" }
             }
         }
+
+        /**
+         * 選択スナップショットの純粋フィルタ(JVMテスト可)。空=全件。
+         * 技術的根拠1行：実行時列挙との突合せはURI完全一致に寄せ、改名時の誤翻訳を作らない。
+         */
+        internal fun applyFileFilter(
+            listed: List<com.example.novelscraper.translation.v2.infra.VDoc>,
+            allowFileUris: Set<String>
+        ): List<com.example.novelscraper.translation.v2.infra.VDoc> {
+            if (allowFileUris.isEmpty()) return listed
+            return listed.filter { it.uri in allowFileUris }
+        }
     }
 
     suspend fun run(folderUris: List<String>, settings: V2Settings): RunSummary {
@@ -178,7 +222,19 @@ class RunEngine(
     }
 
     suspend fun runWithNames(folderItems: List<Pair<String, String>>, settings: V2Settings): RunSummary {
+        return runWithTargets(folderItems.map { FolderTarget(it.first, it.second) }, settings)
+    }
+
+    /**
+     * 選択ファイル絞り込み付き実行。辞書・分割・保存の本体は変えず、入力列挙だけ絞る。
+     * 技術的根拠1行：絞り込み責務をprocessFolder入口の1箇所に寄せ、辞書は絞り後の同一リストでそのまま作る(辞書改変なし)。
+     */
+    suspend fun runWithTargets(
+        targets: List<FolderTarget>,
+        settings: V2Settings
+    ): RunSummary {
         stopFlag.set(false)
+        // 技術的根拠1行：履歴はViewModelのruns一覧が担うため、エンジン側で世代保持しない（履歴の二重管理防止）。
         _state.update {
             it.copy(isRunning = true, statusText = "開始準備中...", logs = emptyList())
         }
@@ -193,8 +249,9 @@ class RunEngine(
                 _state.update { it.copy(statusText = "⚠️ 利用可能なAPIキーがありません") }
                 return RunSummary(0, 0, 0, aborted = true)
             }
-            for ((folderIndex, item) in folderItems.withIndex()) {
-                val (folderUri, designatedName) = item
+            for ((folderIndex, item) in targets.withIndex()) {
+                val folderUri = item.folderUri
+                val designatedName = item.displayName
                 if (stopFlag.get() || !coroutineContext.isActive) break
                 if (shouldAbort(pool, settings)) {
                     addLog("abort: quota exhausted (skip split/dict/workers)")
@@ -205,7 +262,7 @@ class RunEngine(
                 val folderName = designatedName.ifBlank { extractReadableFolderName(folderUri).ifBlank { "folder${folderIndex + 1}" } }
                 _state.update { it.copy(folderName = folderName, statusText = "フォルダ「$folderName」を開始") }
                 addLog("folder start: $folderName")
-                val (done, total) = processFolder(folderUri, folderName, settings, pool, meter)
+                val (done, total) = processFolder(folderUri, folderName, settings, pool, meter, item.fileUris)
                 filesDone += done
                 filesTotal += total
                 foldersDone++
@@ -463,6 +520,11 @@ class RunEngine(
             )
         )
 
+        // 技術的根拠1行：専用判定はワーカー共通のため、文面解決と開始記録は束ね前に1回に寄せる（ worker 毎の再計算・多重記録をなくす）。
+        val refineProfile = if (settings.refine.enabled) buildRefineProfile(settings.refine) else null
+        if (refineProfile != null) {
+            addLog("✨ 推敲専用モデル: ${refineProfile.providerId}/${refineProfile.model}（翻訳とは別経路）")
+        }
         supervisorScope {
             for (wId in 1..workerCount) {
                 val claimed = if (profiles.any { it.providerId.toProviderId() == ProviderId.GEMINI }) {
@@ -475,6 +537,10 @@ class RunEngine(
                     continue
                 }
                 val router = createRouter(wId, profiles, pool, claimed, settings, meter)
+                // 技術的根拠1行：専用モデルは翻訳巡回に載せると訳文側に混入するため、同一資格情報で単一巡回器を別建てする（解放は冪等のため二重でも安全）。
+                val refineRouter = refineProfile?.let {
+                    createRouter(wId, listOf(it), pool, claimed, settings, meter)
+                }
                 launch(kotlinx.coroutines.Dispatchers.IO) {
                     try {
                         if (wId > 1 && options.workerStaggerSec > 0) {
@@ -492,7 +558,8 @@ class RunEngine(
                             splitThresholdBytes, chunkSizeBytes,
                             effectiveLang, promptOrder,
                             profiles, profilePromptOrders,
-                            contextTracker
+                            contextTracker,
+                            refineRouter = refineRouter
                         )
                     } catch (e: CancellationException) {
                         throw e
@@ -500,6 +567,7 @@ class RunEngine(
                         addLog("❌ [W#$wId] worker failed: ${t.message}")
                     } finally {
                         router.release()
+                        refineRouter?.release()
                     }
                 }
             }
@@ -512,7 +580,8 @@ class RunEngine(
         folderName: String,
         settings: V2Settings,
         pool: QuotaPool,
-        meter: CostMeter
+        meter: CostMeter,
+        allowFileUris: Set<String> = emptySet()
     ): Pair<Int, Int> {
         if (shouldAbort(pool, settings)) {
             addLog("⚠️ 利用可能なキー枠が枯渇したためフォルダ処理を中止: $folderName")
@@ -520,12 +589,17 @@ class RunEngine(
             return 0 to 0
         }
 
-        val allTxtFiles = store.children(folderUri)
+        val listed = store.children(folderUri)
             .filter {
                 !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) &&
                     !LangCacheStore.isCacheFileName(it.name)
             }
             .sortedBy { it.name }
+        // 技術的根拠1行：選択スナップショット外の親同胞を翻訳しないよう、実行時列挙を実行時URI一致で絞る(空=従来通り全件)。
+        val allTxtFiles = applyFileFilter(listed, allowFileUris)
+        if (allowFileUris.isNotEmpty()) {
+            addLog("絞り込み: $folderName (選択${allowFileUris.size}件→対象${allTxtFiles.size}件)")
+        }
         val outSubDirName = settings.limits.outputSubDir.ifBlank { "翻訳完了_LLM" }
         if (allTxtFiles.isEmpty()) {
             addLog("⚠️ 対象ファイルなし: $folderName (直下に.txtファイルがありません)")
@@ -635,7 +709,8 @@ class RunEngine(
         promptOrder: List<Int>,
         profiles: List<V2ModelProfile>,
         profilePromptOrders: Map<String, List<Int>>,
-        contextTracker: SourceContextTracker
+        contextTracker: SourceContextTracker,
+        refineRouter: PromptRouter? = null
     ) {
         WorkerRunner(
             workerId = workerId,
@@ -653,6 +728,7 @@ class RunEngine(
             profiles = profiles,
             profilePromptOrders = profilePromptOrders,
             contextTracker = contextTracker,
+            refineRouter = refineRouter,
             files = files,
             outputDirUri = outputDirUri,
             existing = existing,

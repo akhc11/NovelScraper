@@ -351,6 +351,24 @@ class SafFileStore(private val context: Context) : FileStore {
             }
         }
 
+    /**
+     * ディレクトリの単発削除。ExternalStorageProviderは中身を再帰削除するが、
+     * 契約外のため成否だけ返し、消えたことの検証と退行は呼出側が行う。
+     * 技術的根拠1行：子列挙も個別削除もしない1 IPCに寄せ、新規作成分の中断後片付けを秒単位にする。
+     */
+    override suspend fun deleteDirectory(dirUri: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val parsed = safeParseUri(dirUri) ?: return@withContext false
+            val targetDocUri = toDocumentUri(parsed)
+            DocumentsContract.deleteDocument(context.contentResolver, targetDocUri)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("SafFileStore", "deleteDirectory failed: $dirUri", e)
+            false
+        }
+    }
+
     override suspend fun deleteFile(fileUri: String): Boolean = withContext(Dispatchers.IO) {
         try {
             val parsed = safeParseUri(fileUri) ?: return@withContext false

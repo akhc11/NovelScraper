@@ -9,10 +9,37 @@ import com.example.novelscraper.translation.web.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
+/**
+ * URLに対するプリセット自動適用の判定（pure・JVMテスト可）。
+ * 適用すべき (プリセット名, 設定) を返し、適用不要なら null を返す。
+ * 技術的根拠1行：setCurrentUrl直後とプリセット到着追補の2入口で判定が乖離すると冷起動共有だけ不適用になるため、判定はここに一本化する。
+ */
+internal fun resolvePresetMatch(
+    url: String,
+    presets: Map<String, ScraperConfig>,
+    lastAppliedAutoUrlDomain: String,
+    currentPresetName: String,
+    isConfigManuallyEdited: Boolean
+): Pair<String, ScraperConfig>? {
+    if (url.isEmpty() || presets.isEmpty()) return null
+    for ((name, config) in presets) {
+        if (config.autoUrl.isNotEmpty() && url.contains(config.autoUrl)) {
+            // 別ドメインへ移動した時のみ自動適用する。
+            if (lastAppliedAutoUrlDomain != config.autoUrl) return Pair(name, config)
+            // 同一サイト巡回中は手動編集がなければ未適用分のみ同期し、手動編集は保護する。
+            if (!isConfigManuallyEdited && currentPresetName != name) return Pair(name, config)
+            return null
+        }
+    }
+    // マッチなし（検索・ホーム等）では一切適用しない。
+    return null
+}
+
 class ScrapingViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = PreferencesRepository(application)
     private val presetRepository = PresetRepository(application)
+    private val backupRepository = BackupRepository(application)
     private val fileRepository = FileRepository(application)
     private val serviceController = ScraperServiceController(application)
 
@@ -39,6 +66,11 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
     // UI層への一方向イベント（Toast等の表示はActivityが収集して描画する）。
     val eventBus = UiEventBus()
 
+    // 外部からの遷移要求（共有intent・URLバー確定・履歴/お気に入りタップ）の一回限り配送。
+    // 技術的根拠1行：currentUrl状態駆動でloadUrlするとページ内遷移の報告コールバックが再loadUrlを誘発し現行ロードをcancelするため、外部要求のみをイベントで一発配送し、ページ内遷移は表示更新に留める。
+    private val _navigationCommands = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    val navigationCommands: SharedFlow<String> = _navigationCommands.asSharedFlow()
+
     private fun notify(message: String, long: Boolean = false) {
         viewModelScope.launch { eventBus.send(UiEvent.ShowToast(message, isLong = long)) }
     }
@@ -52,7 +84,12 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     init {
         viewModelScope.launch {
-            presetRepository.presetsFlow.collect { _presets.value = it }
+            presetRepository.presetsFlow.collect {
+                _presets.value = it
+                // 冷起動共有などでプリセット到着がURL設定より遅れた場合の追補適用。
+                // 技術的根拠1行：DataStore初回読込は非同期のため、冷起動直後のsetCurrentUrlは空マップを見て不適用で終わる。適用条件は共有関数に一本化し、手動編集の保護則も同一にする。
+                applyMatchingPreset(_uiState.value.currentUrl)
+            }
         }
         viewModelScope.launch {
             repository.webViewDarkModeFlow.collect { isDark ->
@@ -240,9 +277,36 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
 
     fun setInputUrl(url: String) { _uiState.update { it.copy(inputUrl = url) } }
 
+    /**
+     * 外部からの遷移要求（共有intent・URLバー確定・履歴/お気に入り・翻訳元開設）。
+     * 表示状態を更新してから one-shot コマンドを発行する。同一URLの再要求も配送する
+     * （WebView実体との不整合を上書き修復するため、状態一致での抑止はしない）。
+     * 実際の重複loadUrl抑止は収集側でWebView実URL比較により行う。
+     */
+    fun navigateTo(rawInput: String?) {
+        val trimmed = rawInput?.trim().orEmpty()
+        if (trimmed.isEmpty()) return
+        if (trimmed.length > 2000) {
+            notify("URLまたは検索クエリが長すぎます。無効なデータです。", long = true)
+            return
+        }
+        val target = UrlExtractor.resolveNavigationTarget(trimmed)
+        if (target.isEmpty()) return
+        setCurrentUrl(target)
+        _navigationCommands.tryEmit(target)
+    }
+
+    /**
+     * WebView内部の遷移報告（リンクタップ・リダイレクト・履歴移動）専用。
+     * アドレスバー表示とプリセット自動適用だけを更新し、loadUrlは発行しない。
+     */
+    fun onWebViewUrlChanged(url: String) {
+        setCurrentUrl(url)
+    }
+
     fun setCurrentUrl(url: String) {
         // 同一URLの重複更新を抑止（WebViewClientの3コールバックが同URLで連呼するため）。
-        // ナビゲーション発火（LaunchedEffect）は正規化比較で同一URLを無視するので、ここでの早期復帰と整合する。
+        // 遷移コマンドの配送とは独立した表示更新のみ行う（loadUrlの発火はnavigateTo→収集点に一本化）。
         if (_uiState.value.currentUrl == url) return
         // フラグメント移動（#以降のみ変化）は同一文書のため翻訳状態を維持する。
         // 技術的根拠1行：JSコンテキスト・googtrans・DOMが存続するのに旗だけ落とすと表示と実態が乖離するため。
@@ -256,34 +320,27 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 isLiveTranslated = if (fragmentOnlyChange) it.isLiveTranslated else false
             ) 
         }
-        viewModelScope.launch {
-            val presetsMap = _presets.value
-            var matchedPreset: Pair<String, ScraperConfig>? = null
-            for ((name, config) in presetsMap) {
-                if (config.autoUrl.isNotEmpty() && url.contains(config.autoUrl)) {
-                    matchedPreset = Pair(name, config)
-                    break
-                }
-            }
+        // プリセット自動適用（表示更新と同スレッドで同期実行し、冷起動の到着順競合を追補側と一本化する）。
+        applyMatchingPreset(url)
+    }
 
-            if (matchedPreset != null) {
-                val (name, config) = matchedPreset
-                // 1. 全く異なる小説サイト（別autoUrlドメイン）へ移動した時のみ、そのサイトのプリセットを自動適用
-                if (lastAppliedAutoUrlDomain != config.autoUrl) {
-                    lastAppliedAutoUrlDomain = config.autoUrl
-                    isConfigManuallyEdited = false
-                    _uiState.update { it.copy(currentPresetName = name, currentConfig = config) }
-                } else {
-                    // 2. 同一サイト内の巡回中:
-                    // ユーザーが手動編集していない場合のみ、万が一未適用の初期プリセットがあれば同期
-                    if (!isConfigManuallyEdited && _uiState.value.currentPresetName != name) {
-                        _uiState.update { it.copy(currentPresetName = name, currentConfig = config) }
-                    }
-                }
-            }
-            // 3. マッチするプリセットがない場合（ホーム画面・Google検索などへの一時的移動）:
-            // lastAppliedAutoUrlDomain や currentConfig、手動編集状態は一切リセットせず100%保護する
-        }
+    /**
+     * URLに対するプリセット自動適用（setCurrentUrlとプリセット到着追補の共有入口）。
+     * 1. 別autoUrlドメインへ移動時のみ自動適用する。
+     * 2. 同一サイト巡回中は手動編集がなければ未適用分のみ同期する。
+     * 3. マッチなし（検索・ホーム等）では一切リセットせず保護する。
+     */
+    private fun applyMatchingPreset(url: String) {
+        val matched = resolvePresetMatch(
+            url = url,
+            presets = _presets.value,
+            lastAppliedAutoUrlDomain = lastAppliedAutoUrlDomain,
+            currentPresetName = _uiState.value.currentPresetName,
+            isConfigManuallyEdited = isConfigManuallyEdited
+        ) ?: return
+        lastAppliedAutoUrlDomain = matched.second.autoUrl
+        isConfigManuallyEdited = false
+        _uiState.update { it.copy(currentPresetName = matched.first, currentConfig = matched.second) }
     }
 
     fun setBlockImages(block: Boolean) { _uiState.update { it.copy(blockImages = block) } }
@@ -489,7 +546,7 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                 }
                 override fun onSaveResult(folderName: String, title: String, content: String, chapterNum: String) {
                     viewModelScope.launch {
-                        val success = fileRepository.saveChapter(folderName, title, content, chapterNum)
+                        val success = fileRepository.saveChapter(folderName, title, content, chapterNum, config.saveDir)
                         if (!success) {
                             notify("ファイル保存に失敗しました: $title ($chapterNum)")
                         }
@@ -530,6 +587,40 @@ class ScrapingViewModel(application: Application) : AndroidViewModel(application
                     else -> ex?.message ?: "不明なエラー"
                 }
                 "インポートに失敗しました: $errorDetails"
+            }
+            notify(msg, long = true)
+        }
+    }
+
+    fun exportBackup(uri: Uri, includeKeys: Boolean) {
+        viewModelScope.launch {
+            val result = backupRepository.exportBackup(uri, includeKeys)
+            val msg = if (result.isSuccess) {
+                if (includeKeys) "バックアップを保存しました（APIキー含む）" else "バックアップを保存しました"
+            } else {
+                "バックアップに失敗しました: ${result.exceptionOrNull()?.message ?: "不明なエラー"}"
+            }
+            notify(msg, long = true)
+        }
+    }
+
+    fun importBackup(uri: Uri) {
+        viewModelScope.launch {
+            val result = backupRepository.importBackup(uri)
+            val msg = if (result.isSuccess) {
+                val report = result.getOrNull()
+                val total = report?.restored?.values?.sum() ?: 0
+                val skipped = report?.skipped?.size ?: 0
+                val keyNote = if (report?.includeKeys == false) "（APIキーは再入力してください）" else ""
+                "復元しました: ${total}件$keyNote" + if (skipped > 0) "（スキップ${skipped}件）" else ""
+            } else {
+                val ex = result.exceptionOrNull()
+                val errorDetails = when (ex) {
+                    is kotlinx.serialization.SerializationException -> "無効なファイル形式です"
+                    is IllegalArgumentException -> ex.message ?: "無効なデータです"
+                    else -> ex?.message ?: "不明なエラー"
+                }
+                "復元に失敗しました: $errorDetails"
             }
             notify(msg, long = true)
         }

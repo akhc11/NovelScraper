@@ -19,3 +19,8 @@ graphify-out/
 
 # Local test data
 test_data/
+
+# Tool/build byproducts (do not commit)
+.freebuff/
+.kotlin/
+diff_*.txt

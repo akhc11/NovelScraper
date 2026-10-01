@@ -154,6 +154,14 @@ class InMemoryFileStore : FileStore {
         slot.first.remove(slot.second) != null
     }
 
+    override suspend fun deleteDirectory(dirUri: String): Boolean = mutex.withLock {
+        val slot = parentSlot(dirUri) ?: return@withLock false
+        val node = slot.first[slot.second] ?: return@withLock false
+        if (!node.isDirectory) return@withLock false
+        slot.first.remove(slot.second)
+        true
+    }
+
     override suspend fun deleteFile(fileUri: String): Boolean = mutex.withLock {
         val slot = parentSlot(fileUri) ?: return@withLock false
         val node = slot.first[slot.second] ?: return@withLock false

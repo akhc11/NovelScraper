@@ -35,7 +35,6 @@ sealed interface ActiveDialog {
  */
 sealed interface UiEvent {
     data class ShowToast(val message: String, val isLong: Boolean = false) : UiEvent
-    data class NavigateToUrl(val url: String) : UiEvent
 }
 
 enum class TranslationEngine { GOOGLE, DEEPL, PAPAGO, LLM_API }
@@ -107,6 +106,9 @@ data class MainUiState(
 ) {
     val isInspectMode: Boolean
         get() = overlay is Overlay.InspectMode
+
+    val isTestResultShowing: Boolean
+        get() = overlay is Overlay.TestResult
 
     val activePanelType: PanelType?
         get() = (overlay as? Overlay.Panel)?.type

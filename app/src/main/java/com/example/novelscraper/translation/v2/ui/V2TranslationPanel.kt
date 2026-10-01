@@ -22,6 +22,13 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -62,9 +69,22 @@ fun V2TranslationPanel(
 ) {
     val settings by viewModel.settings.collectAsState()
     val folders by viewModel.folders.collectAsState()
-    val engineState by viewModel.engineState.collectAsState()
+    val runs by viewModel.runs.collectAsState()
     val importWarnings by viewModel.importWarnings.collectAsState()
+    val presetIndex by viewModel.presetIndex.collectAsState()
+    val presetMessage by viewModel.presetMessage.collectAsState()
+    val runMessage by viewModel.runMessage.collectAsState()
     var showSettings by remember { mutableStateOf(false) }
+    // 技術的根拠1行：タブ内停止は誤タップで不可逆のため、確定ダイアログを挟む(選択タップ自体は停止しない)。
+    var runToStop by remember { mutableStateOf<RunView?>(null) }
+    // 選択run: 無効化時は最新実行中→先頭へ退行
+    var selectedRunId by remember { mutableStateOf<String?>(null) }
+    val selectedRun = remember(selectedRunId, runs) {
+        runs.firstOrNull { it.runId == selectedRunId }
+            ?: runs.firstOrNull { it.active }
+            ?: runs.firstOrNull()
+    }
+    val anyRunning = runs.any { it.active && it.state.isRunning }
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
 
@@ -89,7 +109,12 @@ fun V2TranslationPanel(
 
     val blocking = remember(settings) { validateV2Settings(settings).filter { it.blocksSave } }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
+    // 技術的根拠1行：内容が画面溢れで開始・停止に届かなくなるためrootを縦スクロールにし、内側ログは200dp固定で同方向ネストを壊さない。
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+    ) {
         // 新旧並置の明確な境界ヘッダー
         Spacer(modifier = Modifier.height(4.dp))
         Box(
@@ -134,10 +159,19 @@ fun V2TranslationPanel(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // 全設定プリセット（索引のみ常駐・実体は適用時に1件読込）
+        V2PresetSection(
+            index = presetIndex,
+            message = presetMessage,
+            onApply = { viewModel.applyPreset(it) },
+            onClearMessage = { viewModel.clearPresetMessage() }
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         // 対象フォルダ（高頻度更新から隔離するため子に切る）
         V2FolderSection(
             folders = folders,
-            isRunning = engineState.isRunning,
             onPickFolder = { folderLauncher.launch(null) },
             onBrowseClick = onBrowseClick,
             onRemoveFolder = { viewModel.removeFolder(it) },
@@ -146,20 +180,32 @@ fun V2TranslationPanel(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // 実行タブ（複数runの切替・個別停止）。選択は純UI状態。
+        V2RunTabsSection(
+            runs = runs,
+            selectedRunId = selectedRun?.runId,
+            onSelect = { selectedRunId = it },
+            onStopRun = { id -> runToStop = runs.firstOrNull { it.runId == id } }
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         // 進捗 & ログ表示エリア（更新頻度の異なる部位ごとに子に切る）
         V2RunStatusSection(
-            statusText = engineState.statusText,
-            done = engineState.progress.first,
-            total = engineState.progress.second,
-            chunkDone = engineState.chunkProgress.first,
-            chunkTotal = engineState.chunkProgress.second,
-            fileName = engineState.fileName
+            statusText = selectedRun?.state?.statusText ?: "待機中",
+            done = selectedRun?.state?.progress?.first ?: 0,
+            total = selectedRun?.state?.progress?.second ?: 0,
+            chunkDone = selectedRun?.state?.chunkProgress?.first ?: 0,
+            chunkTotal = selectedRun?.state?.chunkProgress?.second ?: 0,
+            fileName = selectedRun?.state?.fileName ?: ""
         )
         Spacer(modifier = Modifier.height(6.dp))
+        // 技術的根拠1行：履歴は実行タブが担うため、ログ欄は選択runの現行のみ出す(世代の二重管理防止)。
         V2EngineLogSection(
-            logs = engineState.logs,
+            logs = selectedRun?.state?.logs ?: emptyList(),
             onCopyLogs = {
-                clipboardManager.setText(AnnotatedString(engineState.logs.joinToString("\n")))
+                val lines = selectedRun?.state?.logs ?: emptyList()
+                clipboardManager.setText(AnnotatedString(lines.joinToString("\n")))
                 android.widget.Toast.makeText(context, "ログをクリップボードにコピーしました", android.widget.Toast.LENGTH_SHORT).show()
             }
         )
@@ -174,7 +220,7 @@ fun V2TranslationPanel(
             else -> null
         }
 
-        if (folders.isNotEmpty() && startBlockedReason != null && !engineState.isRunning) {
+        if (folders.isNotEmpty() && startBlockedReason != null && !anyRunning) {
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = "⚠️ $startBlockedReason",
@@ -186,9 +232,18 @@ fun V2TranslationPanel(
             Spacer(modifier = Modifier.height(10.dp))
         }
 
+        if (runMessage.isNotBlank()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(runMessage, color = Color(0xFFFFAA66), fontSize = 11.sp, modifier = Modifier.weight(1f))
+                Text("✕", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.clickable { viewModel.clearRunMessage() })
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+        }
+
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             V2RunActions(
-                isRunning = engineState.isRunning,
+                isRunning = anyRunning,
                 canStart = folders.isNotEmpty() && startBlockedReason == null,
                 onStart = { viewModel.start() },
                 onStop = { viewModel.stop() }
@@ -196,21 +251,141 @@ fun V2TranslationPanel(
         }
     }
 
+    runToStop?.let { target ->
+        androidx.compose.ui.window.Dialog(onDismissRequest = { runToStop = null }) {
+            androidx.compose.material3.Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = AppColors.surfaceDark,
+                tonalElevation = 8.dp,
+                modifier = Modifier.fillMaxWidth(0.85f)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("実行停止の確認", color = AppColors.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "「${target.label.ifBlank { "実行" }}」を停止しますか?進行分は保持されます。",
+                        color = AppColors.textSecondary,
+                        fontSize = 11.sp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = { runToStop = null },
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceMedium),
+                            shape = RoundedCornerShape(4.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("キャンセル", color = AppColors.textPrimary, fontSize = 11.sp)
+                        }
+                        Button(
+                            onClick = {
+                                viewModel.stopRun(target.runId)
+                                runToStop = null
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F)),
+                            shape = RoundedCornerShape(4.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("停止", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if (showSettings) {
         V2SettingsDialog(
             initial = settings,
             importWarnings = importWarnings,
+            presetIndex = presetIndex,
+            presetMessage = presetMessage,
             onSave = {
                 viewModel.saveSettings(it)
                 showSettings = false
             },
+            onSavePreset = { label, draft -> viewModel.savePreset(label, draft) },
+            onApplyPreset = {
+                viewModel.applyPreset(it)
+                showSettings = false
+            },
+            onDeletePreset = { viewModel.deletePreset(it) },
             onImportLegacy = { viewModel.importLegacy(it) },
             onTestConnection = { profile -> viewModel.testConnection(profile) },
             onDismiss = {
                 viewModel.clearImportWarnings()
+                viewModel.clearPresetMessage()
                 showSettings = false
             }
         )
+    }
+}
+
+/**
+ * 全設定プリセット選択。実行前の手動切替用。
+ * 技術的根拠1行：索引だけを子の境界内に閉じ込め、実体decodeを適用時のIO単発に寄せる。
+ */
+@Composable
+private fun V2PresetSection(
+    index: List<com.example.novelscraper.translation.v2.settings.V2PresetIndexEntry>,
+    message: String,
+    onApply: (String) -> Unit,
+    onClearMessage: () -> Unit
+) {
+    var selectedId by remember { mutableStateOf<String?>(null) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF162826), RoundedCornerShape(4.dp))
+            .border(0.5.dp, AppColors.accentTeal.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+            .padding(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("全設定プリセット:", color = AppColors.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            // 技術的根拠1行：適用は次回開始分にしか効かないため実行中も可とし、2本目の準備を塞がない。
+            Text(
+                "適用",
+                color = if (selectedId != null) AppColors.accentTealLight else AppColors.textTertiary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.clickable(enabled = selectedId != null) {
+                    selectedId?.let { onApply(it) }
+                }
+            )
+        }
+        if (index.isEmpty()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("未登録（v2詳細設定→プリセットで保存）", color = AppColors.textTertiary, fontSize = 10.sp)
+        } else {
+            Spacer(modifier = Modifier.height(4.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                items(index, key = { it.id }) { entry ->
+                    val selected = entry.id == selectedId
+                    Box(
+                        modifier = Modifier
+                            .background(
+                                if (selected) AppColors.accentTeal else Color(0xFF112220),
+                                RoundedCornerShape(3.dp)
+                            )
+                            .clickable { selectedId = entry.id }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(entry.label, color = Color.White, fontSize = 11.sp, maxLines = 1)
+                    }
+                }
+            }
+        }
+        if (message.isNotBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(message, color = AppColors.accentTealLight, fontSize = 10.sp, modifier = Modifier.weight(1f))
+                Text("✕", color = Color.Gray, fontSize = 10.sp, modifier = Modifier.clickable { onClearMessage() })
+            }
+        }
     }
 }
 
@@ -269,12 +444,12 @@ private fun V2PanelSettingsSummary(
 @Composable
 private fun V2FolderSection(
     folders: List<V2FolderItem>,
-    isRunning: Boolean,
     onPickFolder: () -> Unit,
     onBrowseClick: (() -> Unit)?,
     onRemoveFolder: (Int) -> Unit,
     onClearFolders: () -> Unit
 ) {
+    // 技術的根拠1行：実行中フォルダは開始時に確定済みのため、編集中の変更は次回開始分にしか効かず同時実行の準備を塞がない。
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -298,7 +473,7 @@ private fun V2FolderSection(
                 .height(38.dp)
                 .background(AppColors.surfaceMedium, RoundedCornerShape(4.dp))
                 .border(1.dp, Color.DarkGray, RoundedCornerShape(4.dp))
-                .clickable(enabled = !isRunning) { onPickFolder() }
+                .clickable { onPickFolder() }
                 .padding(horizontal = 10.dp),
             contentAlignment = Alignment.CenterStart
         ) {
@@ -321,7 +496,6 @@ private fun V2FolderSection(
         Spacer(modifier = Modifier.width(6.dp))
         Button(
             onClick = onPickFolder,
-            enabled = !isRunning,
             colors = ButtonDefaults.buttonColors(containerColor = AppColors.accentTeal),
             shape = RoundedCornerShape(4.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp)
@@ -333,7 +507,6 @@ private fun V2FolderSection(
         Spacer(modifier = Modifier.height(6.dp))
         Button(
             onClick = onBrowseClick,
-            enabled = !isRunning,
             colors = ButtonDefaults.buttonColors(containerColor = AppColors.surfaceMedium),
             shape = RoundedCornerShape(4.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
@@ -358,9 +531,7 @@ private fun V2FolderSection(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("キュー一覧(v2 ${folders.size}件):", color = AppColors.accentTealLight, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                if (!isRunning) {
-                    Text("全解除", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.clickable { onClearFolders() })
-                }
+                Text("全解除", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.clickable { onClearFolders() })
             }
             Spacer(modifier = Modifier.height(4.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
@@ -372,16 +543,15 @@ private fun V2FolderSection(
                             .padding(horizontal = 6.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("${index + 1}. ${item.name}", color = Color.White, fontSize = 11.sp, maxLines = 1)
-                        if (!isRunning) {
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = "削除",
-                                tint = Color.LightGray,
-                                modifier = Modifier.size(13.dp).clickable { onRemoveFolder(index) }
-                            )
-                        }
+                        val label = if (item.fileUris.isNotEmpty()) "${item.name} (${item.fileUris.size}件指定)" else item.name
+                        Text("${index + 1}. $label", color = Color.White, fontSize = 11.sp, maxLines = 1)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "削除",
+                            tint = Color.LightGray,
+                            modifier = Modifier.size(13.dp).clickable { onRemoveFolder(index) }
+                        )
                     }
                 }
             }
@@ -496,12 +666,25 @@ private fun V2EngineLogSection(
                     Text("ログはまだありません", color = AppColors.textTertiary, fontSize = 11.sp)
                 }
             } else {
+                // 技術的根拠1行：反転はrememberに寄せ、logs不変時の再計算をなくす。
+                val reversed = remember(logs) { logs.reversed() }
+                // 技術的根拠1行：枠内の余りスクロール・フリングをここで消費し尽くし、親画面への伝播を断つ(公式NestedScrollConnection則)。
+                val logScrollBlocker = remember {
+                    object : NestedScrollConnection {
+                        override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset =
+                            available
+                        override suspend fun onPreFling(available: Velocity): Velocity = available
+                        override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity = available
+                    }
+                }
                 LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .nestedScroll(logScrollBlocker),
                     reverseLayout = false
                 ) {
                     // 最新のログが最上部に見えるように reversed() のみを使用（二重反転解消）
-                    items(logs.reversed()) { logLine ->
+                    items(reversed) { logLine ->
                         val color = when {
                             logLine.contains("✅") -> Color(0xFF81C784)
                             logLine.contains("❌") -> Color(0xFFE57373)
@@ -538,7 +721,7 @@ private fun RowScope.V2RunActions(
 ) {
     Button(
         onClick = onStart,
-        enabled = !isRunning && canStart,
+        enabled = canStart,
         colors = ButtonDefaults.buttonColors(
             containerColor = AppColors.accentOrange,
             disabledContainerColor = AppColors.surfaceMedium
@@ -562,11 +745,65 @@ private fun RowScope.V2RunActions(
     ) {
         Icon(
             Icons.Filled.Close,
-            contentDescription = "停止",
+            contentDescription = "全停止",
             tint = if (isRunning) Color.White else AppColors.textTertiary,
             modifier = Modifier.size(16.dp)
         )
         Spacer(modifier = Modifier.width(4.dp))
-        Text("停止", color = if (isRunning) Color.White else AppColors.textTertiary, fontSize = 13.sp)
+        Text("全停止", color = if (isRunning) Color.White else AppColors.textTertiary, fontSize = 13.sp)
+    }
+}
+
+/**
+ * 実行タブ。複数runの切替と個別停止。
+ * 技術的根拠1行：run一覧だけを子の境界内に閉じ込め、ログ刻みの再構成をタブ行へ波及させない。
+ */
+@Composable
+private fun V2RunTabsSection(
+    runs: List<RunView>,
+    selectedRunId: String?,
+    onSelect: (String) -> Unit,
+    onStopRun: (String) -> Unit
+) {
+    if (runs.isEmpty()) return
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF162826), RoundedCornerShape(4.dp))
+            .border(0.5.dp, AppColors.accentTeal.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+            .padding(8.dp)
+    ) {
+        Text("実行一覧:", color = AppColors.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(4.dp))
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+            items(runs, key = { it.runId }) { run ->
+                val selected = run.runId == selectedRunId
+                Row(
+                    modifier = Modifier
+                        .background(if (selected) AppColors.accentTeal else Color(0xFF112220), RoundedCornerShape(3.dp))
+                        .clickable { onSelect(run.runId) }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        (if (run.active && run.state.isRunning) "●" else "○") + run.label.ifBlank { "実行" },
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                    if (run.active && run.state.isRunning) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            "停止",
+                            color = Color(0xFFFFB74D),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable { onStopRun(run.runId) }
+                        )
+                    }
+                }
+            }
+        }
     }
 }

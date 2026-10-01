@@ -66,6 +66,7 @@ class MainActivity : ComponentActivity() {
         private const val TAG = "MainActivity"
         // androidx.core.content.IntentCompat.EXTRA_HTML_TEXT と同値。新規依存を追加せず参照するための定数。
         private const val EXTRA_HTML_TEXT = "android.intent.extra.HTML_TEXT"
+        private const val KEY_SAVED_URL = "novelscraper:last_url"
     }
 
     private lateinit var viewModel: ScrapingViewModel
@@ -86,6 +87,11 @@ class MainActivity : ComponentActivity() {
             }
         }
         viewModel = ViewModelProvider(this)[ScrapingViewModel::class.java]
+        // プロセス死からの復帰時は表示URLだけ復元する（ページ実体はWebViewのsaveState復元が担う）。
+        // 技術的根拠1行：ViewModelはプロセス死で空に戻るため、地址欄が空白のまま残る不整合を防ぐ。共有intentがあれば後続handleIntentが上書きする。
+        savedInstanceState?.getString(KEY_SAVED_URL)?.takeIf { it.isNotEmpty() }?.let {
+            viewModel.setCurrentUrl(it)
+        }
         val shortToast: (String) -> Unit =
             { msg -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
         val isAlive: () -> Boolean = { !isFinishing && !isDestroyed }
@@ -115,7 +121,6 @@ class MainActivity : ComponentActivity() {
                         onSetupWebView = { view -> setupWebView(view) },
                         onInjectInspector = { view -> injectInspector(view) },
                         onRemoveInspector = { view -> removeInspector(view) },
-                        onNavigate = { url, view -> performNavigation(url, view) },
                         onRequestExclude = { selector -> handleExcludeRequest(selector) },
                         onTestRun = { view -> performTestRun(view) },
                         onToggleLiveTranslate = { view -> toggleLiveTranslation(view) }
@@ -124,8 +129,16 @@ class MainActivity : ComponentActivity() {
             }
         }
         observeViewModel()
-        if (savedInstanceState == null) {
-            handleIntent(intent)
+        // savedInstanceStateの有無に関わらず毎回処理する。
+        // 技術的根拠1行：回転再生成では同一intent再配送・プロセス死後の再生成ではonCreate後にonNewIntentが来るが、消費済み化（action=MAIN＋extra除去）済みなら再処理は無害なため、ガードで落とすより毎回処理が取りこぼさない。
+        handleIntent(intent)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        try {
+            outState.putString(KEY_SAVED_URL, viewModel.uiState.value.currentUrl)
+        } catch (_: Exception) {
         }
     }
 
@@ -142,51 +155,29 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
-        if (intent.action != Intent.ACTION_SEND) return
-        // Manifestは text/plain のみ宣言。受信側は text/* と type==null（EXTRA_TEXT付きの変則共有）を
-        // 寛容に受け付ける。判定は「データ有無」が主、MIMEは補助（公式「想定外データが来る前提で検証せよ」に準拠）。
-        val type = intent.type
-        if (type != null && !type.startsWith("text/")) return
+        val action = intent.action ?: return
+        // 受信対象は共有(SEND)・リンク開放(VIEW)・選択テキスト渡し(PROCESS_TEXT)のみ。それ以外(MAIN等)は何もしない。
+        // 技術的根拠1行：Chromeの共有はSENDだが「他のアプリで開く」系はVIEW+data、他アプリのテキスト選択メニューはPROCESS_TEXTで届くため、SENDのみ処理すると受信漏れで不動になる（公式intent-filter指針）。
+        if (action != Intent.ACTION_SEND && action != Intent.ACTION_VIEW && action != Intent.ACTION_PROCESS_TEXT) return
         try {
-            val extraText = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
-            val htmlText = intent.getCharSequenceExtra(EXTRA_HTML_TEXT)?.toString()
-                ?: intent.getStringExtra(EXTRA_HTML_TEXT)
-            val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
-            val clipTexts = mutableListOf<String?>()
-            intent.clipData?.let { clip ->
-                for (i in 0 until clip.itemCount) {
-                    val item = clip.getItemAt(i)
-                    clipTexts += item.text?.toString()
-                    clipTexts += item.htmlText?.toString()
-                }
-            }
-            val candidates = mutableListOf<String?>()
-            candidates += extraText
-            candidates += htmlText
-            candidates += clipTexts
-            candidates += subject
-            val extractedUrl = UrlExtractor.extractUrlFromCandidates(*candidates.toTypedArray())
+            // SEND/PROCESS_TEXT/VIEW共通の抽出。VIEWはdata先行、それ以外はEXTRA_TEXT先行で候補順にする。
+            val extractedUrl = extractSharedUrl(intent, dataFirst = (action == Intent.ACTION_VIEW))
             if (extractedUrl != null) {
-                // setCurrentUrlがinputUrlも同時更新するためsetInputUrlの重複呼び出しはしない。
-                // 同一URL再共有は状態更新せずToastのみで二重ロードと表示矛盾を防ぐ。
-                val currentNormalized = viewModel.uiState.value.currentUrl.trimEnd('/')
-                if (currentNormalized == extractedUrl.trimEnd('/')) {
-                    viewModel.closePanels()
-                    Toast.makeText(this, "そのURLは既に開いています", Toast.LENGTH_SHORT).show()
-                } else {
-                    viewModel.closePanels()
-                    viewModel.setCurrentUrl(extractedUrl)
-                    Toast.makeText(this, "共有されたURLを開きます", Toast.LENGTH_SHORT).show()
-                }
+                // 遷移は one-shot コマンドでWebView実体へ一発配送する。状態一致での抑止はしない
+                // （状態と実表示の不整合時に再共有で修復できなくなるため）。重複loadUrlの抑止は
+                // 収集側でWebView実URL比較により行う。
+                viewModel.closePanels()
+                viewModel.navigateTo(extractedUrl)
+                Toast.makeText(this, "共有されたURLを開きます", Toast.LENGTH_SHORT).show()
             } else {
-                android.util.Log.w(TAG, "handleIntent: no URL found in shared content (type=$type)")
+                android.util.Log.w(TAG, "handleIntent: no URL found in shared content (action=$action type=${intent.type})")
                 Toast.makeText(this, "共有内容にURLが見つかりませんでした", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
             android.util.Log.e(TAG, "handleIntent: failed to handle shared intent", e)
             Toast.makeText(this, "共有の受け取りに失敗しました", Toast.LENGTH_SHORT).show()
         } finally {
-            // 消費済み化: 回転・再生成・タスク復帰での再発火を防ぐ（actionをMAINに戻し共有extraを除去）。
+            // 消費済み化: 回転・再生成・タスク復帰での再発火を防ぐ（actionをMAINに戻し共有extraとdataを除去）。
             intent.removeExtra(Intent.EXTRA_TEXT)
             intent.removeExtra(Intent.EXTRA_SUBJECT)
             intent.removeExtra(EXTRA_HTML_TEXT)
@@ -195,8 +186,52 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) {
                 android.util.Log.w(TAG, "handleIntent: failed to clear clipData")
             }
+            try {
+                intent.data = null
+            } catch (_: Exception) {
+                android.util.Log.w(TAG, "handleIntent: failed to clear data")
+            }
             intent.action = Intent.ACTION_MAIN
         }
+    }
+
+    /**
+     * 共有intentからURLを抽出する唯一の入口（SEND/PROCESS_TEXT/VIEW共用）。
+     * Manifestは text/plain のみ宣言。受信側は text系MIME と type==null（EXTRA_TEXT付きの変則共有）を
+     * 寛容に受け付ける。判定は「データ有無」が主、MIMEは補助（公式「想定外データが来る前提で検証せよ」に準拠）。
+     */
+    private fun extractSharedUrl(intent: Intent, dataFirst: Boolean): String? {
+        // VIEWはURI起点のためMIME判定をしない（非テキストtype付きでもdataのURLを拾う）。
+        // SEND系のみ text/* と type==null を寛容に受け付ける。
+        if (!dataFirst) {
+            val type = intent.type
+            if (type != null && !type.startsWith("text/")) return null
+        }
+        val dataString = try {
+            intent.dataString ?: intent.data?.toString()
+        } catch (_: Exception) {
+            null
+        }
+        val extraText = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+        val htmlText = intent.getCharSequenceExtra(EXTRA_HTML_TEXT)?.toString()
+            ?: intent.getStringExtra(EXTRA_HTML_TEXT)
+        val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
+        val clipTexts = mutableListOf<String?>()
+        intent.clipData?.let { clip ->
+            for (i in 0 until clip.itemCount) {
+                val item = clip.getItemAt(i)
+                clipTexts += item.text?.toString()
+                clipTexts += item.htmlText?.toString()
+            }
+        }
+        val candidates = mutableListOf<String?>()
+        if (dataFirst) candidates += dataString
+        candidates += extraText
+        candidates += htmlText
+        candidates += clipTexts
+        candidates += subject
+        if (!dataFirst) candidates += dataString
+        return UrlExtractor.extractUrlFromCandidates(*candidates.toTypedArray())
     }
 
     private fun setupSystemUI() {
@@ -207,22 +242,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         WebView.setWebContentsDebuggingEnabled(true)
-    }
-
-    private fun performNavigation(input: String, view: WebView) {
-        if (input.isEmpty()) return
-
-        if (input.length > 2000) {
-            Toast.makeText(this, "URLまたは検索クエリが長すぎます。無効なデータです。", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        val target = if (android.util.Patterns.WEB_URL.matcher(input).matches() || android.webkit.URLUtil.isValidUrl(input)) {
-            if (!input.lowercase().startsWith("http")) "https://$input" else input
-        } else {
-            "https://www.google.com/search?q=${java.net.URLEncoder.encode(input, "UTF-8")}"
-        }
-        view.loadUrl(target)
     }
 
     private fun performTestRun(view: WebView) {
@@ -270,15 +289,40 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.eventBus.events.collect { event ->
-                    when (event) {
-                        is UiEvent.ShowToast -> Toast.makeText(
+                    if (event is UiEvent.ShowToast) {
+                        Toast.makeText(
                             this@MainActivity,
                             event.message,
                             if (event.isLong) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
                         ).show()
-                        // 発行元なし（予約型）。単一パイプライン維持のため状態更新経由に寄せる。
-                        is UiEvent.NavigateToUrl -> viewModel.setCurrentUrl(event.url)
                     }
+                }
+            }
+        }
+        // 外部遷移コマンドの単一収集点：WebView実体へ一発loadUrlする。
+        // 技術的根拠1行：loadUrlは現行ロードをcancelするため(AOSP)、状態変化の度に撃つとリンクタップ・リダイレクトが壊れる。外部要求のみここで撃ち、ページ内遷移はWebViewに任せる。
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.navigationCommands.collect { url ->
+                    val view = webViewHolder.current
+                    if (view != null) {
+                        // 実表示との比較で重複のみ抑止（状態比較では不整合時に修復不能になるため使わない）。
+                        val current = try {
+                            view.url?.trimEnd('/') ?: ""
+                        } catch (_: Exception) {
+                            ""
+                        }
+                        if (current != url.trimEnd('/')) {
+                            try {
+                                view.loadUrl(url)
+                            } catch (e: Exception) {
+                                android.util.Log.e(TAG, "navigation command failed: $url", e)
+                            }
+                        }
+                    }
+                    // WebView未生成時（冷起動直後）は何もしない。
+                    // navigateToがcurrentUrl表示を同期更新済みのため、生成時の初期ロードで同一URLを開く。
+                    // なお冷起動では生成時ロードと本コマンドが同一URLに2度loadUrlし得るが、後発が先行を取り消すだけで可視上の多重表示・循環にはならないため、抑止機構は持たない（複雑化の方が害）。
                 }
             }
         }

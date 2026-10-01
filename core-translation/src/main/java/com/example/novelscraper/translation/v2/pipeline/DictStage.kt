@@ -50,7 +50,8 @@ data class DictPrompts(
         "- authors: names from author notes/ads only. If in both, keep in names.\n" +
         "- No Japanese translation.\n" +
         "- hints: listed names only, immutable trait/identity within 20 chars from this excerpt. Omit if no evidence, no guessing.\n" +
-        "Example: {\"names\":[\"克莱恩\",\"李云龙\",\"Arthur\"],\"authors\":[],\"hints\":{\"李云龙\":[\"落ち着いた少年\"]}}",
+        "Example: {\"names\":[\"克莱恩\",\"李云龙\",\"Arthur\"],\"authors\":[],\"hints\":{\"李云龙\":[\"落ち着いた少年\"],\"Arthur\":[\"明るい少女\"]}}\n" +
+        "Example: {\"names\":[\"克莱恩\",\"赛勒丝\"],\"authors\":[],\"hints\":{\"克莱恩\":[\"厳格な中年男性\"]}}",
 
     val merge: String = "Merge the dictionary names below into one clean JSON list.\n" +
         "Output ONLY valid JSON: {\"names\":[\"Name1\"]}.\n" +
@@ -61,13 +62,34 @@ data class DictPrompts(
 
     val translate: String = "Review the merged character names below and create a Japanese dictionary.\n" +
         "Output ONLY valid JSON: {\"style\":\"カタカナ|漢字|ハイブリッド\",\"characters\":{\"Original\":\"Japanese\"},\"profiles\":{\"Original\":\"memo\"}}.\n" +
-        "- Every input name needs exactly one Japanese value. Do not swap similar names.\n" +
-        "- Chinese: kanji first, katakana only for clear Western transliterations. Korean: katakana by default, kanji only if clearly natural. Keep one style per work.\n" +
-        "- Drop places, organizations, titles, common nouns. Values must be natural Japanese.\n" +
-        "- profiles: 40 chars max from hints only, immutable traits. Empty if no hints, no guessing.\n" +
-        "Example: {\"style\":\"漢字\",\"characters\":{\"李云\":\"李雲\"},\"profiles\":{\"李云\":\"落ち着いた少年\"}}\n" +
-        "Example: {\"style\":\"カタカナ\",\"characters\":{\"克莱恩\":\"クライン\"},\"profiles\":{}}\n" +
-        "Example: {\"style\":\"カタカナ\",\"characters\":{\"사재혁\":\"サ・ジェヒョク\"},\"profiles\":{}}",
+        "\n" +
+        "【Input Data】\n" +
+        "Input JSON format: {\"names\":[\"Name1\",\"Name2\"],\"hints\":{\"Name1\":[\"snippet1\",\"snippet2\"]}}.\n" +
+        "- names: Character names to translate.\n" +
+        "- hints: Trait and identity snippets for each character. Used as the factual basis to create character profiles.\n" +
+        "\n" +
+        "【Rules】\n" +
+        "1. characters (Translation):\n" +
+        "- Every input name in \"names\" must have exactly one Japanese reading. Do not swap similar names.\n" +
+        "- Chinese: kanji first, katakana only for clear Western transliterations. Korean: katakana by default, kanji only if clearly natural. Keep one consistent style per work.\n" +
+        "- Drop places, organizations, titles, and common nouns. Readings must be natural Japanese.\n" +
+        "\n" +
+        "2. profiles (Character Memos - MANDATORY when hints exist):\n" +
+        "- For EVERY character present in input \"hints\", you MUST synthesize a concise Japanese memo (10 to 40 characters max) in \"profiles\".\n" +
+        "- Synthesize the snippets into immutable traits (gender, age, identity, personality). Keep gender/age words verbatim.\n" +
+        "- CRITICAL: If a character exists in input \"hints\", generating its profile in \"profiles\" is MANDATORY. Do NOT omit any hinted character, and NEVER return an empty \"profiles\": {} when \"hints\" contains entries.\n" +
+        "- Only omit a character from \"profiles\" if it has no entries in \"hints\". If input \"hints\" is completely empty, \"profiles\" should be {}.\n" +
+        "\n" +
+        "【Examples】\n" +
+        "Example 1 (Chinese, kanji style with hints):\n" +
+        "Input: {\"names\":[\"李云\",\"王五\"],\"hints\":{\"李云\":[\"落ち着いた少年\",\"沈着冷静な剣士\"]}}\n" +
+        "Output: {\"style\":\"漢字\",\"characters\":{\"李云\":\"李雲\",\"王五\":\"王五\"},\"profiles\":{\"李云\":\"落ち着いた少年、冷静な剣士\"}}\n" +
+        "\n" +
+        "Example 2 (Korean, katakana style with hints):\n" +
+        "Input: {\"names\":[\"사재혁\",\"이지은\"],\"hints\":{\"사재혁\":[\"温厚な青年\"],\"이지은\":[\"聡明な少女\"]}}\n" +
+        "Output: {\"style\":\"カタカナ\",\"characters\":{\"사재혁\":\"サ・ジェヒョク\",\"이지은\":\"イ・ジウン\"},\"profiles\":{\"사재혁\":\"温厚な青年\",\"이지은\":\"聡明な少女\"}}\n" +
+        "\n" +
+        "- REMINDER: For every name present in input \"hints\", you MUST generate a non-empty Japanese summary in \"profiles\". Never leave \"profiles\" empty when hints are given.",
 
     // 後方互換用エイリアス
     val review: String = translate
@@ -106,6 +128,8 @@ data class DictOptions(
     val maxRetriesPerBatch: Int = 4,
     val mergeRetries: Int = 3,
     val reviewRetries: Int = 2,
+    /** 命名・翻訳1回あたりの名前数上限。超過分は複数回に割って送る（弱いモデルの完走用）。 */
+    val translateChunkNames: Int = TranslationLimits.DICT_TRANSLATE_CHUNK_NAMES,
     val prompts: DictPrompts = DictPrompts(),
     /** 文面ハッシュ。台帳照合用（呼出側が解決済み文面から算出して渡す） */
     val promptsHash: String = ""
@@ -196,7 +220,7 @@ fun selectHintsForTranslate(
     return out
 }
 
-private val dictJson = Json { ignoreUnknownKeys = true; isLenient = true }
+private val dictJson = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
 
 private fun extractJsonObject(rawJson: String): String {
     var text = rawJson.trim()
@@ -413,6 +437,86 @@ fun selectSampleFiles(fileNames: List<String>, maxFiles: Int, uniform: Boolean):
         indices.add(cursor++)
     }
     return indices.sorted().take(maxFiles).map { fileNames[it] }
+}
+
+/**
+ * 1チャンク分の命名・翻訳。被覆率が全件になるまで上限内で取り直し、最良を返す。
+ * 技術的根拠1行：判定・保持の単位をチャンクに寄せ、割った分の独立性を保つ。
+ */
+private suspend fun translateChunk(
+    chunkNames: List<String>,
+    chunkHints: Map<String, List<String>>,
+    reviewModel: String,
+    translatePrompt: String,
+    maxRetries: Int,
+    call: suspend (model: String, prompt: String, text: String) -> LlmResult,
+    log: (String) -> Unit
+): Pair<NovelDict?, Boolean> {
+    val translateInput = dictJson.encodeToString(
+        ExtractedNames.serializer(),
+        ExtractedNames(names = chunkNames, hints = chunkHints)
+    )
+    // 技術的根拠1行：素の有無は送信文にしか残らないため、取り直し判定用に引数で受ける。
+    val hintsSent = chunkHints.isNotEmpty()
+    // 技術的根拠1行：素あり名数が分母のため、被覆率は送信束から数える（受信側の自己申告に寄せない）。
+    val hintedCount = chunkHints.size
+    val attempts = maxRetries.coerceIn(1, 5)
+    var bestDict: NovelDict? = null
+    var bestCovered = -1
+    var sawNonJapanese = false
+    for (retry in 0 until attempts) {
+        if (retry > 0) {
+            log("  🔄 辞書命名・翻訳: 再試行[$retry/$attempts]")
+        }
+        when (val r = call(reviewModel, translatePrompt, translateInput)) {
+            is LlmResult.Success -> {
+                val rawParsed = parseNovelDict(r.text)
+                if (rawParsed != null) {
+                    val sanitized = sanitizeNovelDict(rawParsed)
+                    val dropped = rawParsed.characters.size - sanitized.characters.size
+                    if (dropped > 0) {
+                        val sample = (rawParsed.characters.keys - sanitized.characters.keys).take(3).joinToString(",")
+                        log("⚠️ 辞書生成: 日本語でない${dropped}件を除外 (例: ${sample})")
+                        sawNonJapanese = true
+                    }
+                    val droppedProfiles = rawParsed.profiles.size - sanitized.profiles.size
+                    if (droppedProfiles > 0) {
+                        log("⚠️ 辞書生成: 人物メモ${droppedProfiles}件を除外（40字超・非日本語の規格外）")
+                    }
+                    if (sanitized.characters.isNotEmpty()) {
+                        // 技術的根拠1行：一部欠けの取り直しは最良保持と組にし、後退（良い回を悪い回で上書き）を構造的に防ぐ。
+                        // 技術的根拠1行：1欠けは表記揺れ・落としと区別不能のため許容し、全件固執の送り直し浪費をなくす（本文品質の1件許容と同一則）。
+                        val covered = sanitized.profiles.keys.count { it in chunkHints }
+                        if (!hintsSent || covered + DICT_ALLOWED_MISSING >= hintedCount) {
+                            if (hintsSent && covered < hintedCount) {
+                                log("  ⚠️ 辞書命名・翻訳: 人物メモ${covered}/${hintedCount}件で確定します（1欠け許容）")
+                            }
+                            return sanitized to sawNonJapanese
+                        }
+                        if (covered > bestCovered) {
+                            bestDict = sanitized
+                            bestCovered = covered
+                        }
+                        if (retry + 1 < attempts) {
+                            if (covered == 0) {
+                                log("  ⚠️ 辞書命名・翻訳: 人物メモ0件のため再試行します")
+                            } else {
+                                log("  ⚠️ 辞書命名・翻訳: 人物メモ${covered}/${hintedCount}件のため再試行します")
+                            }
+                            continue
+                        }
+                        // 技術的根拠1行：被覆率は0以上で最良初期値-1を必ず上回るため、ここでは最良が入っている（到達不能な代替は置かない）。
+                        return bestDict!! to sawNonJapanese
+                    }
+                }
+                log("  ⚠️ 辞書命名・翻訳: 結果が空のため再試行します")
+            }
+            is LlmResult.Failure -> {
+                // 技術的根拠1行：巡回・待機は呼出側callの責務のため、ステージ側での二重待機は行わない。
+            }
+        }
+    }
+    return null to sawNonJapanese
 }
 
 /**
@@ -715,47 +819,49 @@ suspend fun generateDictionary(
         log("📖 辞書名寄せ: 1字の名前を${mergedNames.size - registrableNames.size}件除外します")
     }
     val effectiveTranslateRetries = options.reviewRetries.coerceIn(1, 5)
-    val translateInput = dictJson.encodeToString(
-        ExtractedNames.serializer(),
-        ExtractedNames(
-            names = registrableNames,
-            hints = selectHintsForTranslate(registrableNames, hintTable)
-        )
-    )
-    var translatedDict: NovelDict? = null
+    // 技術的根拠1行：弱いモデルでも完走できる分量にするため、命名は上限ずつに割って送る（量の責務をモデル性能から切り離す）。
+    val nameChunks = registrableNames.chunked(options.translateChunkNames.coerceAtLeast(1))
+    if (nameChunks.size > 1) {
+        log("🔍 辞書命名・翻訳: ${nameChunks.size}分割で実行中（${registrableNames.size}名・${options.translateChunkNames}名ずつ）...")
+    } else {
+        log("🔍 辞書命名・翻訳: 実行中（${registrableNames.size}名）...")
+    }
+    val mergedCharacters = LinkedHashMap<String, String>()
+    val mergedProfiles = LinkedHashMap<String, String>()
+    val styleVotes = mutableListOf<String>()
+    // 技術的根拠1行：素の有無は送信文にしか残らないため、警告判定用に送信束を束ねて保持する。
+    val allSentHints = LinkedHashMap<String, List<String>>()
     var sawNonJapanese = false
+    var chunkFailed = false
 
-    for (retry in 0 until effectiveTranslateRetries) {
-        if (retry > 0) {
-            log("  🔄 辞書命名・翻訳: 再試行[$retry/$effectiveTranslateRetries]")
-        } else {
-            log("🔍 辞書命名・翻訳: 実行中（${registrableNames.size}名）...")
+    for ((chunkIdx, chunkNames) in nameChunks.withIndex()) {
+        if (nameChunks.size > 1) {
+            log("🔍 辞書命名・翻訳: チャンク${chunkIdx + 1}/${nameChunks.size}（${chunkNames.size}名）...")
         }
-        when (val r = call(reviewModel, options.prompts.translate, translateInput)) {
-            is LlmResult.Success -> {
-                val rawParsed = parseNovelDict(r.text)
-                if (rawParsed != null) {
-                    val sanitized = sanitizeNovelDict(rawParsed)
-                    val dropped = rawParsed.characters.size - sanitized.characters.size
-                    if (dropped > 0) {
-                        val sample = (rawParsed.characters.keys - sanitized.characters.keys).take(3).joinToString(",")
-                        log("⚠️ 辞書生成: 日本語でない${dropped}件を除外 (例: ${sample})")
-                        sawNonJapanese = true
-                    }
-                    if (sanitized.characters.isNotEmpty()) {
-                        translatedDict = sanitized
-                        break
-                    }
-                }
-                log("  ⚠️ 辞書命名・翻訳: 結果が空のため再試行します")
-            }
-            is LlmResult.Failure -> {
-                // 技術的根拠1行：巡回・待機は呼出側callの責務のため、ステージ側での二重待機は行わない。
-            }
+        val chunkHints = selectHintsForTranslate(chunkNames, hintTable)
+        allSentHints.putAll(chunkHints)
+        val (chunkDict, chunkNonJapanese) = translateChunk(
+            chunkNames = chunkNames,
+            chunkHints = chunkHints,
+            reviewModel = reviewModel,
+            translatePrompt = options.prompts.translate,
+            maxRetries = effectiveTranslateRetries,
+            call = call,
+            log = log
+        )
+        if (chunkNonJapanese) sawNonJapanese = true
+        if (chunkDict == null) {
+            // 技術的根拠1行：1チャンクの失敗で確定分を全破棄すると99名級で全滅ループになるため、温存して継続する。
+            chunkFailed = true
+            log("⚠️ 辞書命名・翻訳: チャンク${chunkIdx + 1}は失敗・確定分${mergedCharacters.size}名を温存して継続します")
+            continue
         }
+        for ((k, v) in chunkDict.characters) mergedCharacters.putIfAbsent(k, v)
+        for ((k, v) in chunkDict.profiles) mergedProfiles.putIfAbsent(k, v)
+        styleVotes.add(chunkDict.style)
     }
 
-    if (translatedDict == null) {
+    if (mergedCharacters.isEmpty()) {
         if (sawNonJapanese) {
             log("⚠️ 辞書生成: 使える項目ゼロのため保留します（次回再挑戦）")
         } else {
@@ -763,15 +869,37 @@ suspend fun generateDictionary(
         }
         return@supervisorScope null
     }
+    if (chunkFailed) {
+        // 技術的根拠1行：部分確定でも翻訳は進める。ゼロ扱いの全中断より、訳語ありの進行を優先する。
+        log("⚠️ 辞書生成: 一部チャンク失敗のため部分確定します（${mergedCharacters.size}名）")
+    }
 
-    val reviewed = translatedDict
+    // 技術的根拠1行：表記統一は作品単位のため、割った分の判定は多数決で1つに戻す（同数は先勝ち）。
+    // 技術的根拠1行：異なり表の再計算は割れ判定・記録で三重になるため、1回の distinct に寄せる。
+    val distinctStyles = styleVotes.distinct()
+    val finalStyle = distinctStyles.maxByOrNull { s -> styleVotes.count { it == s } } ?: "カタカナ"
+    if (distinctStyles.size > 1) {
+        log("⚠️ 辞書生成: 表記スタイルが割れました（${distinctStyles.joinToString(",")}）→${finalStyle}に統一")
+    }
+    val reviewed = NovelDict(style = finalStyle, characters = mergedCharacters, profiles = mergedProfiles)
+    // 技術的根拠1行：素ありのメモ欠け確定は次回作り直しの判断材料のため、件数と併せて警告に残す（訳語は温存する）。
+    if (allSentHints.isNotEmpty()) {
+        val covered = reviewed.profiles.keys.count { it in allSentHints }
+        if (covered < allSentHints.size) {
+            if (covered == 0) {
+                log("⚠️ 辞書生成: 人物メモなしで確定します（素あり${hintTable.size}名・モデルが空返却）")
+            } else {
+                log("⚠️ 辞書生成: 人物メモ${covered}/${allSentHints.size}件で確定します（残りは素あり・モデルが未記入）")
+            }
+        }
+    }
     val dictDoc = findOrCreateFile(store, workDirUri, "dictionary.json", "application/json")
     if (dictDoc != null && store.writeText(
             dictDoc.uri,
             dictJson.encodeToString(NovelDict.serializer(), reviewed)
         )
     ) {
-        log("✅ 辞書確定: ${reviewed.characters.size}名（スタイル: ${reviewed.style}）")
+        log("✅ 辞書確定: ${reviewed.characters.size}名（スタイル: ${reviewed.style}・人物メモ${reviewed.profiles.size}件）")
         return@supervisorScope reviewed
     }
     log("⚠️ 辞書生成: 保存に失敗したため保留します")

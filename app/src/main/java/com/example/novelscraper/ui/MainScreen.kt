@@ -379,16 +379,18 @@ fun MainScreen(
                                 }
                             }
                             webViewRef = this
+                            // 技術的根拠1行：タップ透過の可否をタッチ到達時に毎回判定する。update時の切替だと再コンポーズの隙間で旧判定が残り透過するため。
+                            setOnTouchListener { _, _ ->
+                                val ov = try {
+                                    viewModel.uiState.value.overlay
+                                } catch (_: Exception) {
+                                    null
+                                }
+                                ov is Overlay.Panel || ov is Overlay.TestResult
+                            }
                         }
                     },
                     update = { view ->
-                        // 技術的根拠1行：子ネイティブViewにはComposeより先にView配送で届き、down/upはCompose消費より先に渡される（公式PointerInteropFilter）。
-                        // よってisEnabledやComposeスクリムではタップを止め切れない。重なり表示中はOnTouchListenerで握り潰す（View機構上リスナーが既定動作より先に呼ばれる保証がある）。
-                        if (blocksTouchBehindPanel) {
-                            view.setOnTouchListener { _, _ -> true }
-                        } else {
-                            view.setOnTouchListener(null)
-                        }
                         if (view.settings.blockNetworkImage != uiState.blockImages) {
                             view.settings.blockNetworkImage = uiState.blockImages
                         }

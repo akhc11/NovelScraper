@@ -5,7 +5,7 @@ import android.util.Log
 import com.example.novelscraper.FolderItem
 
 /**
- * v2向けフォルダ確定単位。空のfileUrisは絞り込みなし(全件・従来動作)。
+ * v2向けフォルダ確定単位。空のfileUrisは絞り込みなし(直下全件・従来動作)。
  * 非空時は選択時点のファイルURIのみ翻訳し、指定外の親同胞を巻き込まない。
  */
 data class V2FolderTarget(
@@ -112,7 +112,7 @@ object PickerTargetAdapter {
      * v2向け(絞り込み付き)。v2エンジンは入力URI直下のchildren列挙が前提のため、
      * 従来はファイル単体を親フォルダに畳んで同胞ごと翻訳していた。
      * 本関数は親ごとに選択ファイルURI集合を保持し、RunEngine側でURI一致フィルタする。
-     * FOLDER単体(子FILEなし)の空集合は全件扱い(従来動作)。親不明FILEは落とす。
+     * FOLDER単体(子FILEなし)の空集合は直下全件扱い(従来動作)。親不明FILEは落とす。
      * 技術的根拠1行：畳み込み責務をURI変換の境界に残し、絞り込み判定は実行時列挙側に寄せて二重管理しない。
      */
     fun toV2FolderTargets(targets: List<PickerTarget>): List<V2FolderTarget> {
@@ -149,38 +149,5 @@ object PickerTargetAdapter {
             }
         }
         return acc.map { (uri, a) -> V2FolderTarget(uri, a.name.ifBlank { FALLBACK_FOLDER_NAME }, a.files.toSet()) }
-    }
-
-    /**
-     * v2向け。v2エンジンは入力URI直下のchildren列挙が前提(RunEngine.processFolder)のため、
-     * ファイル単体は親フォルダに畳む。親不明のFILEは投入不能のため落とし、ログに残す。
-     * URIはツリー形に寄せる(SafFileStoreはisTreeUri門のため文書URIでは列挙不能)。
-     * 絞り込み付きが必要な場合は[toV2FolderTargets]を使うこと(本関数は後方互換のフォルダ列のみ)。
-     */
-    fun toV2FolderEntries(targets: List<PickerTarget>): List<Pair<String, String>> {
-        val seen = LinkedHashSet<String>()
-        val out = ArrayList<Pair<String, String>>(targets.size)
-        fun add(uri: String, name: String) {
-            if (uri.isBlank()) return
-            if (seen.add(uri)) out.add(uri to name.ifBlank { FALLBACK_FOLDER_NAME })
-        }
-        for (t in targets) {
-            when (t.kind) {
-                PickerKind.ROOT -> add(t.treeUri, t.displayName)
-                PickerKind.FOLDER -> add(
-                    toTreeChildUri(t.treeUri, t.docUri) ?: t.docUri,
-                    t.displayName.ifBlank { t.relPath.substringAfterLast('/') }
-                )
-                PickerKind.FILE -> {
-                    if (t.parentDocUri.isBlank()) {
-                        Log.w(TAG, "dropping FILE without parent: ${t.docUri}")
-                    } else {
-                        val parentName = t.relPath.substringBeforeLast('/', "").substringAfterLast('/')
-                        add(toTreeChildUri(t.treeUri, t.parentDocUri) ?: t.parentDocUri, parentName)
-                    }
-                }
-            }
-        }
-        return out
     }
 }

@@ -154,15 +154,7 @@ class V2TranslationViewModel(application: Application) : AndroidViewModel(applic
         _folders.value = current + V2FolderItem(uri = key, name = name.ifBlank { FALLBACK_FOLDER_NAME }, fileUris = fileUris)
     }
 
-    /** 自前ブラウザ確定結果の一括追加(加算のみ。既存単発追加は不変)。 */
-    fun addFolderEntries(entries: List<Pair<String, String>>) {
-        for ((uriString, name) in entries) {
-            if (uriString.isBlank()) continue
-            addFolder(Uri.parse(uriString), name)
-        }
-    }
-
-    /** 自前ブラウザ確定結果の一括追加(絞り込み付き。空fileUrisは全件)。 */
+    /** 自前ブラウザ確定結果の一括追加(絞り込み付き。空fileUrisは直下全件)。 */
     fun addFolderTargets(targets: List<com.example.novelscraper.translation.picker.V2FolderTarget>) {
         for (t in targets) {
             if (t.folderUri.isBlank()) continue

@@ -46,6 +46,7 @@ import com.example.novelscraper.translation.picker.SafBrowserViewModel
 import com.example.novelscraper.translation.picker.treeDisplayName
 import com.example.novelscraper.translation.v2.ui.V2TranslationPanel
 import com.example.novelscraper.translation.v2.ui.V2TranslationViewModel
+import com.example.novelscraper.translation.v2.settings.V2Settings
 import com.example.novelscraper.ui.components.*
 import com.example.novelscraper.ui.theme.AppColors
 import kotlinx.coroutines.flow.debounce
@@ -81,6 +82,8 @@ fun MainScreen(
 
     val v2ViewModel: V2TranslationViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     val v2EngineState by v2ViewModel.engineState.collectAsState()
+    val v2Settings by v2ViewModel.settings.collectAsState()
+    // 技術的根拠1行：出力dir名は設定由来のため、ブラウザ確定の除外則へ開根の都度注入する（保持側に設定を持たせない）。
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     // レンダラープロセス死亡時の再生成キー（破棄済みWebViewは再利用禁止が公式要件）。
@@ -148,7 +151,7 @@ fun MainScreen(
         if (treeUri != null) {
             val folderName = treeDisplayName(context, treeUri)
             pickerVM.persistRootPermission(treeUri, folderName) { saved ->
-                browser = pickerVM.openRoot(saved, folderName)
+                browser = pickerVM.openRoot(saved, folderName, v2OutputExclusions(v2Settings))
                 showRootMenu = false
             }
         }
@@ -678,7 +681,7 @@ fun MainScreen(
                         if (bad) {
                             grantLauncher.launch(null)
                         } else {
-                            browser = pickerVM.openRoot(root.treeUri, root.displayName)
+                            browser = pickerVM.openRoot(root.treeUri, root.displayName, v2OutputExclusions(v2Settings))
                             showRootMenu = false
                         }
                     },
@@ -707,7 +710,9 @@ fun MainScreen(
                         } else {
                             val items = PickerTargetAdapter.toWebFolderItems(targets)
                             viewModel.addTranslationFolderItems(engine, items)
-                            Toast.makeText(context, "${items.size}件を登録しました", Toast.LENGTH_SHORT).show()
+                            // 技術的根拠1行：web実行系はフォルダ列挙前提でファイル絞り不可のため、単体指定の同胞巻き込みを隠さない。
+                            val note = if (targets.any { it.kind == com.example.novelscraper.translation.picker.PickerKind.FILE }) "(直下・ファイル指定は親単位)" else "(直下のみ)"
+                            Toast.makeText(context, "${items.size}件を登録しました$note", Toast.LENGTH_SHORT).show()
                         }
                         if (result.truncated) {
                             Toast.makeText(context, "上限のため一部除外しました", Toast.LENGTH_LONG).show()
@@ -723,6 +728,15 @@ fun MainScreen(
             }
         }
     }
+}
+
+/**
+ * v2設定からブラウザ除外名を抜き出す純粋関数。空は既定（前方一致で捕捉）のため空集合。
+ * 技術的根拠1行：設定→除外の変換を1箇所に寄せ、開根2経路の乖離を作らない。
+ */
+private fun v2OutputExclusions(settings: V2Settings): Set<String> {
+    val name = settings.limits.outputSubDir.trim()
+    return if (name.isEmpty()) emptySet() else setOf(name)
 }
 
 /**

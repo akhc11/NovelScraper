@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.PreferencesRepository
+import com.example.novelscraper.translation.common.compareNatural
 import com.example.novelscraper.translation.common.ingest.DeclaredEncoding
 import com.example.novelscraper.translation.common.ingest.TextIngest
 import kotlinx.coroutines.Dispatchers
@@ -202,36 +203,10 @@ class TranslationFileStore(
             }
         }
 
-        // 自然順（01, 02, 10 等）でソート
+        // 自然順（01, 02, 10 等）でソート。実体は translation/common の単一正本。
         pendingList.sortedWith(Comparator { a, b ->
             compareNatural(a.name, b.name)
         })
-    }
-
-    /**
-     * 自然順（数値連番を正しく考慮したソート）
-     */
-    private fun compareNatural(a: String, b: String): Int {
-        val regex = Regex("(\\d+)|(\\D+)")
-        val aTokens = regex.findAll(a).map { it.value }.toList()
-        val bTokens = regex.findAll(b).map { it.value }.toList()
-        val minLen = minOf(aTokens.size, bTokens.size)
-
-        for (i in 0 until minLen) {
-            val aToken = aTokens[i]
-            val bToken = bTokens[i]
-            val aNum = aToken.toLongOrNull()
-            val bNum = bToken.toLongOrNull()
-
-            if (aNum != null && bNum != null) {
-                val cmp = aNum.compareTo(bNum)
-                if (cmp != 0) return cmp
-            } else {
-                val cmp = aToken.compareTo(bToken, ignoreCase = true)
-                if (cmp != 0) return cmp
-            }
-        }
-        return aTokens.size.compareTo(bTokens.size)
     }
 
     /**

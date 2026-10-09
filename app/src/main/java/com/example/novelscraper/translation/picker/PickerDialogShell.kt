@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,11 +26,13 @@ import com.example.novelscraper.ui.theme.AppColors
 /**
  * 自前ブラウザ系ダイアログの共通の器。根メニューとフォルダ内選択で同一サイズにする。
  * 技術的根拠1行：窓サイズの正本を1箇所に寄せ、画面遷移時の伸縮と様式乖離を物理的に防ぐ。
+ * navigationIconは題の先頭装飾（例：戻る‹）。不要な器では渡さない。
  */
 @Composable
 fun PickerDialogShell(
     title: String,
     onDismiss: () -> Unit,
+    navigationIcon: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -46,11 +49,15 @@ fun PickerDialogShell(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    navigationIcon?.invoke(this)
                     Text(
                         title,
                         color = AppColors.textPrimary,
                         fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
                     TextButton(onClick = onDismiss) {
                         Text("閉じる", color = AppColors.textSecondary, fontSize = 12.sp)

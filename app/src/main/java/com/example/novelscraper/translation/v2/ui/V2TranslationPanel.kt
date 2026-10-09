@@ -543,7 +543,8 @@ private fun V2FolderSection(
                             .padding(horizontal = 6.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val label = if (item.fileUris.isNotEmpty()) "${item.name} (${item.fileUris.size}件指定)" else item.name
+                        // 技術的根拠1行：空fileUrisは直下全件意図のため件数表示で区別し、孫混入の誤解を作らない。
+                        val label = if (item.fileUris.isNotEmpty()) "${item.name} (${item.fileUris.size}件指定)" else "${item.name} (直下全件)"
                         Text("${index + 1}. $label", color = Color.White, fontSize = 11.sp, maxLines = 1)
                         Spacer(modifier = Modifier.width(4.dp))
                         Icon(

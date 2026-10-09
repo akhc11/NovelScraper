@@ -29,6 +29,7 @@ import com.example.novelscraper.translation.v2.pipeline.V2_PROMPT_6_READABLE
 import com.example.novelscraper.translation.v2.pipeline.V2_PROMPT_7_RETRY
 import com.example.novelscraper.translation.common.ingest.IngestResult
 import com.example.novelscraper.translation.common.ingest.TextIngest
+import com.example.novelscraper.translation.common.compareNatural
 import com.example.novelscraper.translation.v2.pipeline.detectLanguage
 import com.example.novelscraper.translation.v2.pipeline.resolvePromptOrder
 import com.example.novelscraper.translation.v2.pipeline.splitSingleTextFile
@@ -594,7 +595,8 @@ class RunEngine(
                 !it.isDirectory && it.name.endsWith(".txt", ignoreCase = true) &&
                     !LangCacheStore.isCacheFileName(it.name)
             }
-            .sortedBy { it.name }
+            // 技術的根拠1行：表示順・範囲選択順と同一の自然順を正本にし、区間指定と実行順の乖離をなくす。
+            .sortedWith { a, b -> compareNatural(a.name, b.name) }
         // 技術的根拠1行：選択スナップショット外の親同胞を翻訳しないよう、実行時列挙を実行時URI一致で絞る(空=従来通り全件)。
         val allTxtFiles = applyFileFilter(listed, allowFileUris)
         if (allowFileUris.isNotEmpty()) {

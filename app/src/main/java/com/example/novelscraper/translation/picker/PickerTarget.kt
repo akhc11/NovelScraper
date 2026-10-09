@@ -8,6 +8,7 @@ enum class PickerKind { ROOT, FOLDER, FILE }
 /**
  * 選択対象の不変モデル。URIは文字列で保持し、android.net.Uriに依存しない。
  * 技術的根拠1行：選択責務をOS許可取りとアプリ内複数選択に分離し、翻訳投入はURI列受け渡しに切断する。
+ * 契約：FOLDER=直下全件意図（孫以下は含めない）、FILE=単体。確定側で展開しない。
  */
 @Serializable
 data class PickerTarget(

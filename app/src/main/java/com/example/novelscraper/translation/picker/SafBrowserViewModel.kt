@@ -71,13 +71,19 @@ class SafBrowserViewModel(application: Application) : AndroidViewModel(applicati
 
     private var browserState: SafBrowserState? = null
 
-    fun openRoot(treeUri: String, displayName: String): SafBrowserState {
+    fun openRoot(
+        treeUri: String,
+        displayName: String,
+        extraExcludedDirs: Set<String> = emptySet()
+    ): SafBrowserState {
         closeBrowser()
         return SafBrowserState(
             store = SafFileStore(getApplication<Application>().applicationContext),
             scope = viewModelScope,
             treeUri = treeUri,
-            rootName = displayName
+            rootName = displayName,
+            // 技術的根拠1行：空白名は除外則と突合せ不能のため落とし、設定由来の欠落を作らない。
+            extraExcludedDirs = extraExcludedDirs.filter { it.isNotBlank() }.toSet()
         ).also {
             browserState = it
             it.refresh()

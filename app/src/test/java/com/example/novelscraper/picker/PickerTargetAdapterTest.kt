@@ -103,29 +103,6 @@ class PickerTargetAdapterTest {
     }
 
     @Test
-    fun v2_foldsFileToParent() {
-        val entries = PickerTargetAdapter.toV2FolderEntries(listOf(root(), folder(), file()))
-        // ROOT(tree)+FOLDER(a)+FILE→親(aに畳まれ重複除去)。
-        assertEquals(listOf("tree://root", "doc://a"), entries.map { it.first })
-        assertEquals("A", entries[1].second)
-    }
-
-    @Test
-    fun v2_dropsOrphanFile() {
-        val orphan = file().copy(parentDocUri = "")
-        val entries = PickerTargetAdapter.toV2FolderEntries(listOf(orphan))
-        assertTrue(entries.isEmpty())
-    }
-
-    @Test
-    fun v2_dedupesAndSkipsBlank() {
-        val entries = PickerTargetAdapter.toV2FolderEntries(
-            listOf(folder(), folder(), PickerTarget(PickerKind.FOLDER, "", "tree://root"))
-        )
-        assertEquals(1, entries.size)
-    }
-
-    @Test
     fun v2Targets_singleFileKeepsAllowList() {
         // ファイル1件選択→親に畳むがfileUrisに1件保持し、同胞巻き込みを防ぐ。
         val targets = PickerTargetAdapter.toV2FolderTargets(listOf(file()))
@@ -136,7 +113,7 @@ class PickerTargetAdapterTest {
 
     @Test
     fun v2Targets_folderAloneMeansAll() {
-        // FOLDER単体(子FILEなし)は空集合=全件扱い(従来動作)。
+        // FOLDER単体(子FILEなし)は空集合=直下全件扱い(従来動作)。
         val targets = PickerTargetAdapter.toV2FolderTargets(listOf(folder()))
         assertEquals(1, targets.size)
         assertTrue(targets[0].fileUris.isEmpty())
@@ -235,10 +212,11 @@ class PickerTargetAdapterTest {
     }
 
     @Test
-    fun v2_emitsTreeFormUris() {
-        val entries = PickerTargetAdapter.toV2FolderEntries(listOf(realFolder(), realFile()))
-        // FILEは親に畳まれ重複除去でFOLDER1件
-        assertEquals(listOf(realFolderTreeChild), entries.map { it.first })
-        assertEquals("novel", entries[0].second)
+    fun v2Targets_emitsTreeFormUris() {
+        val targets = PickerTargetAdapter.toV2FolderTargets(listOf(realFolder(), realFile()))
+        // FILEは親に畳まれ、FOLDERと同親のためfileUris付き1件
+        assertEquals(1, targets.size)
+        assertEquals(realFolderTreeChild, targets[0].folderUri)
+        assertEquals(setOf(realFileTreeChild), targets[0].fileUris)
     }
 }

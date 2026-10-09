@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.example.novelscraper.translation.common.NovelPhysicalSplitter
 import com.example.novelscraper.translation.common.ingest.DeclaredEncoding
+import com.example.novelscraper.translation.common.compareNatural
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -220,7 +221,8 @@ class TranslationQueueManager(
                         val rawFiles = children.filter {
                             it.isFile && it.name?.endsWith(".txt", ignoreCase = true) == true &&
                                     it.name?.startsWith("part_", ignoreCase = true) != true
-                        }.sortedBy { it.name }
+                        // 技術的根拠1行：表示順・実行順と同一の自然順を正本にし、区間指定と実行順の乖離をなくす。
+                        }.sortedWith { a, b -> compareNatural(a.name ?: "", b.name ?: "") }
 
                         if (rawFiles.isNotEmpty()) {
                             foundRawText = true

@@ -24,3 +24,20 @@ test_data/
 .freebuff/
 .kotlin/
 diff_*.txt
+
+# Personal/local IDE and agent state (never commit)
+.idea/firebender/
+.opencode/goals/
+.opencode/goal-locks/
+
+# Local secrets, signing material and logs
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+google-services.json
+*.log
